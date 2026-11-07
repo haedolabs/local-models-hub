@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local models</title>
+<style>
+:root {
+  color-scheme: light;
+  --plane: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --hover: rgba(11,11,11,0.04); --track: #ebeae4;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --other: #a9a8a1; --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05); --track: #2c2c2a;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --other: #5f5e59; --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05); --track: #2c2c2a;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --other: #5f5e59; --good-text: #0ca30c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--plane); color: var(--ink); height: 100%; }
+body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+.wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
+@media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
+header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 20px; }
+h1 { font-size: 18px; font-weight: 600; margin: 0; }
+.sub { color: var(--ink-2); margin-left: 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.seg { display: inline-flex; background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 2px; }
+.seg button, .btn { font: inherit; border: 0; background: transparent; color: var(--ink-2); padding: 3px 10px; border-radius: 6px; cursor: pointer; }
+.seg button:hover, .btn:hover { background: var(--hover); }
+.seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--ring); }
+.btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
+#alerts:empty { display: none; }
+.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.row { display: grid; gap: 10px; min-height: 0; }
+.row.a { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
+.row.b { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.row.c { grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 4fr); }
+.card { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
+.card h2 { font-size: 13px; font-weight: 600; margin: 0; }
+.card .hint { color: var(--muted); font-size: 11.5px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.card .body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.tile { padding: 8px 12px; }
+.tile .label { color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.tile .value { font-size: 22px; font-weight: 600; line-height: 1.15; }
+.tile .value small { font-size: 12px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
+.tile .foot { color: var(--muted); font-size: 11.5px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meter { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 6px; }
+.meter > div { height: 100%; border-radius: 3px; background: var(--s1); }
+.legend { display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--ink-2); font-size: 11.5px; margin: 0 0 4px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.key-rect { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.key-line { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
+svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.fam { margin-bottom: 8px; }
+.fam:last-child { margin-bottom: 0; }
+.fam-name { font-weight: 600; }
+.fam-meta { color: var(--ink-2); font-size: 11.5px; }
+.copy { display: grid; grid-template-columns: 52px auto 1fr; align-items: center; gap: 4px 10px; margin-top: 6px; }
+.copy .nm { color: var(--ink-2); font-size: 11.5px; }
+.slots { display: inline-flex; gap: 2px; }
+.slot { width: 18px; height: 18px; border-radius: 4px; background: var(--track); }
+.copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.band { grid-column: 2 / -1; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.band .bar { flex: 1 1 auto; height: 4px; border-radius: 2px; background: var(--track); position: relative; overflow: hidden; }
+.band .bar > div { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; background: var(--s1); }
+.band .bar > i { position: absolute; top: -2px; width: 1px; height: 8px; background: var(--axis); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td { padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.sub { padding-left: 28px; color: var(--ink-2); }
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; font-size: 11.5px; box-shadow: 0 0 0 1px var(--ring); color: var(--ink-2); white-space: nowrap; }
+.badge.warn::before { content: "!"; font-weight: 700; color: var(--critical); }
+.badge.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+.badge.down::before { content: "!"; font-weight: 700; color: var(--critical); }
+.badge.cycle::before { content: "↻"; font-weight: 700; color: var(--warning); }
+.muted { color: var(--muted); }
+.ink2 { color: var(--ink-2); }
+.empty { color: var(--muted); padding: 6px 0; }
+.more { color: var(--muted); font-size: 11.5px; padding: 4px 8px; }
+.bar-thin { height: 4px; border-radius: 2px; background: var(--track); margin-top: 4px; width: 120px; }
+.bar-thin > div { height: 100%; border-radius: 2px; background: var(--s1); }
+.chart { position: relative; flex: 1 1 auto; min-height: 60px; }
+.tablebox { max-height: 100%; overflow: hidden; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
+#tip .t { color: var(--muted); margin-bottom: 4px; }
+#tip .r { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+#tip .r b { font-weight: 600; font-variant-numeric: tabular-nums; }
+#tip .r span { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+.offline { opacity: 0.45; transition: opacity .2s; }
+#banner { display: none; padding: 8px 14px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
+#banner b { color: var(--critical); }
+.alert { display: flex; gap: 10px; align-items: flex-start; padding: 7px 14px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); margin-bottom: 6px; }
+.alert:last-child { margin-bottom: 0; }
+.alert .ico { flex: none; width: 18px; height: 18px; border-radius: 50%; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; color: #fff; }
+.alert.critical .ico { background: var(--critical); }
+.alert.warning .ico { background: var(--warning); color: #0b0b0b; }
+.alert.info .ico { background: var(--s1); }
+.alert code, .crash-then code { font-size: 12px; }
+footer { color: var(--muted); font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; justify-content: space-between; }
+footer b { color: var(--ink-2); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><h1 style="display:inline">Local models</h1><span class="sub">every project and Claude session using LM Studio on this Mac</span></div>
+    <div class="chips"><span>Charts: the last</span>
+      <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
+      <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span id="clock" class="muted"></span>
+      <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
+  </header>
+  <div>
+    <div id="banner"><b>The door is not answering.</b> <span class="ink2">Open it with <code>localmodels start</code>; this page picks up again by itself.</span></div>
+    <div id="alerts"></div>
+  </div>
+
+  <section class="kpis">
+    <div class="card tile"><div class="label">Answering now</div><div class="value" id="k-ans">–</div><div class="foot" id="k-ans-f"></div></div>
+    <div class="card tile"><div class="label">Waiting for a turn</div><div class="value" id="k-wait">–</div><div class="foot" id="k-wait-f"></div></div>
+    <div class="card tile"><div class="label">Tokens a second</div><div class="value" id="k-tok">–</div><div class="foot" id="k-tok-f">last minute, all projects</div></div>
+    <div class="card tile"><div class="label">Requests</div><div class="value" id="k-req">–</div><div class="foot" id="k-req-f"></div></div>
+    <div class="card tile"><div class="label">Memory used</div><div class="value" id="k-mem">–</div><div class="meter"><div id="k-mem-m" style="width:0"></div></div><div class="foot" id="k-mem-f" style="margin-top:4px"></div></div>
+    <div class="card tile"><div class="label">Claude Code sessions</div><div class="value" id="k-cc">–</div><div class="foot" id="k-cc-f"></div></div>
+  </section>
+
+  <section class="row a">
+    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">each box is one answer slot (a filled box is answering, colored by its project); the thin bar is the copy's work since it was loaded against its recycle band</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
+    <article class="card"><div class="card-head"><div><h2>Answers at once, by project</h2><div class="hint" id="ans-hint">the line across the top is how many the loaded copies answer at once; the right edge is now</div></div><button class="btn" data-table="ans">table</button></div>
+      <div class="legend" id="ans-legend"></div><div class="chart" id="ans"></div></article>
+  </section>
+
+  <section class="row b">
+    <article class="card"><div class="card-head"><div><h2>Tokens a second</h2><div class="hint">words the models write, all projects together (finished requests)</div></div><button class="btn" data-table="tok">table</button></div>
+      <div class="chart" id="tok"></div></article>
+    <article class="card"><div class="card-head"><div><h2>Requests by project</h2><div class="hint" id="req-hint"></div></div><button class="btn" data-table="req">table</button></div>
+      <div class="legend" id="req-legend"></div><div class="chart" id="req"></div></article>
+    <article class="card"><div class="card-head"><div><h2>Memory used</h2><div class="hint" id="mem-hint">sampled every 15 seconds</div></div><button class="btn" data-table="mem">table</button></div>
+      <div class="chart" id="mem"></div></article>
+  </section>
+
+  <section class="row c">
+    <article class="card"><h2>Using the models now</h2><div class="hint">every program with a request in, or one in the last two minutes; a batch shows its progress, a request its step</div><div class="body" id="users"></div></article>
+    <article class="card"><h2>Claude Code sessions</h2><div class="hint">every session that wrote in the last three hours, newest first</div><div class="body" id="claude"></div></article>
+    <article class="card"><h2>Last requests</h2><div class="hint">through the hub; never the content</div><div class="body" id="recent"></div></article>
+  </section>
+
+  <footer><span id="mac"></span><span id="events"></span><span id="foot"></span></footer>
+</div>
+<div id="tip"></div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+let S = null, H = null, R = [], RANGE = 60, COLORS = {};
+const tables = {}, inflight = {};                        // chart id -> showing its table; endpoint -> a fetch under way
+
+// ---------------------------------------------------------------- small helpers
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (k === 'style') e.style.cssText = v; else if (k === 'class') e.className = v; else e.setAttribute(k, v); }
+  for (const c of kids) e.append(c == null ? '' : c);
+  return e;
+}
+function sv(tag, attrs) { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); return e; }
+function color(project) {
+  if (project === 'straight to LM Studio') return 'var(--other)';
+  const slot = COLORS[project];
+  return slot ? `var(--s${slot + 1})` : 'var(--other)';    // slot 1 (blue) is "all projects together"
+}
+function compact(n) { n = +n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'K' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n)); }
+function full(n) { return Math.round(+n || 0).toLocaleString(); }
+function clock(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}); }
+function clockS(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
+function ago(t) { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? s + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; }
+function left(s) { return s < 90 ? s + ' s left' : s < 5400 ? Math.round(s / 60) + ' min left' : (s / 3600).toFixed(1) + ' h left'; }
+function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
+function ticks(max, n = 4) { const s = niceMax(max / n); const out = []; for (let v = 0; v <= max + 1e-9; v += s) out.push(+v.toFixed(6)); return out; }
+function short(model) { return String(model || '?').replace(/^[^/]+\//, ''); }
+function kindWords(k) { return {batch: 'batch', chat: 'chat', ask: 'question', eval: 'test', test: 'test'}[k] || 'requests'; }
+function merge(c) { if (c) Object.assign(COLORS, c); }
+function rowsThatFit(box, rowPx = 25, headPx = 26) { return Math.max(2, Math.floor((box.clientHeight - headPx - 4) / rowPx)); }
+function tableIn(box, head, rows, more) {
+  const n = rowsThatFit(box), shown = rows.slice(0, n);
+  const t = el('table', {}, el('thead', {}, el('tr', {}, ...head)), el('tbody', {}, ...shown));
+  box.replaceChildren(t, rows.length > n ? el('div', {class: 'more'}, `+ ${rows.length - n} more` + (more ? ' · ' + more : '')) : '');
+}
+
+// ---------------------------------------------------------------- the tooltip
+const tip = $('tip');
+function showTip(x, y, title, rows) {
+  tip.replaceChildren(el('div', {class: 't'}, title), ...rows.map(r => {
+    const key = el('i', {style: `display:inline-block;width:${r.line ? 12 : 8}px;height:${r.line ? 2 : 8}px;border-radius:${r.line ? 1 : 2}px;background:${r.color}`});
+    return el('div', {class: 'r'}, el('span', {}, key, r.name), el('b', {}, r.value));
+  }));
+  tip.style.display = 'block';
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(window.innerWidth - w - 8, x + 14) + 'px';
+  tip.style.top = Math.max(8, Math.min(window.innerHeight - h - 8, y - h / 2)) + 'px';
+}
+function hideTip() { tip.style.display = 'none'; }
+
+// ---------------------------------------------------------------- a chart frame: axes, grid, crosshair; sized to its box
+function frame(box, t0, t1, ymax, yfmt) {
+  const labels = ticks(ymax).map(v => yfmt ? yfmt(v) : compact(v));
+  const W = Math.max(240, box.clientWidth), P = {l: Math.max(28, Math.max(...labels.map(s => s.length)) * 6.4 + 10), r: 58, t: 8, b: 20};
+  const height = Math.max(50, box.clientHeight - P.t - P.b - 2);
+  const svg = sv('svg', {width: W, height: height + P.t + P.b, role: 'img'});
+  const x = t => P.l + (t - t0) / (t1 - t0) * (W - P.l - P.r);
+  const y = v => P.t + height - (v / ymax) * height;
+  for (const v of ticks(ymax)) {
+    svg.append(sv('line', {x1: P.l, x2: W - P.r, y1: y(v), y2: y(v), stroke: v === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1}));
+    const tx = sv('text', {x: P.l - 6, y: y(v) + 4, 'text-anchor': 'end'}); tx.textContent = yfmt ? yfmt(v) : compact(v); svg.append(tx);
+  }
+  const span = t1 - t0, every = span <= 1200 ? 300 : span <= 4000 ? 600 : span <= 25000 ? 3600 : 14400;
+  for (let t = Math.ceil(t0 / every) * every; t <= t1; t += every) {
+    const tx = sv('text', {x: x(t), y: P.t + height + 14, 'text-anchor': 'middle'}); tx.textContent = clock(t); svg.append(tx);
+  }
+  return {svg, x, y, W, P, height};
+}
+function crosshair(f, xs, onAt) {
+  const line = sv('line', {y1: f.P.t, y2: f.P.t + f.height, stroke: 'var(--axis)', 'stroke-width': 1, visibility: 'hidden'});
+  const hit = sv('rect', {x: f.P.l, y: f.P.t, width: f.W - f.P.l - f.P.r, height: f.height, fill: 'transparent', tabindex: 0});
+  const at = ev => {
+    const r = f.svg.getBoundingClientRect(), px = ev.clientX - r.left;
+    let i = 0, best = Infinity;
+    xs.forEach((xx, k) => { const d = Math.abs(xx - px); if (d < best) { best = d; i = k; } });
+    line.setAttribute('x1', xs[i]); line.setAttribute('x2', xs[i]); line.setAttribute('visibility', 'visible');
+    onAt(i, ev.clientX, ev.clientY);
+  };
+  hit.addEventListener('pointermove', at);
+  hit.addEventListener('pointerleave', () => { line.setAttribute('visibility', 'hidden'); hideTip(); });
+  hit.addEventListener('focus', () => { const r = f.svg.getBoundingClientRect(); at({clientX: r.left + xs[xs.length - 1], clientY: r.top + 40}); });
+  hit.addEventListener('blur', () => { line.setAttribute('visibility', 'hidden'); hideTip(); });
+  f.svg.append(line, hit);
+}
+function legend(box, items) {
+  box.replaceChildren(...items.map(it => el('span', {}, el('i', {class: it.line ? 'key-line' : 'key-rect', style: `background:${it.color}`}), it.name)));
+}
+function tableView(box, head, rows) {
+  const n = rowsThatFit(box, 23, 24);
+  const t = el('table', {}, el('thead', {}, el('tr', {}, ...head.map((h, i) => el('th', {class: i ? 'num' : ''}, h)))),
+    el('tbody', {}, ...rows.slice(0, n).map(r => el('tr', {}, ...r.map((c, i) => el('td', {class: i ? 'num' : ''}, c))))));
+  box.replaceChildren(el('div', {class: 'tablebox'}, t));
+}
+function projectsIn(obj) { return Object.keys(obj || {}).sort((a, b) => (COLORS[a] || 99) - (COLORS[b] || 99) || a.localeCompare(b)); }
+function crashList() { return (S && S.crashes && S.crashes.recent) || []; }
+function recycleList() { return (S && S.recycle && S.recycle.recent) || []; }
+function day(t) { return new Date(t * 1000).toLocaleDateString([], {day: 'numeric', month: 'short'}); }
+// a crash or a recycle on a time chart: a dashed rule at its minute, labeled, under the crosshair's hover layer
+function markEvents(f, t0, t1) {
+  for (const c of crashList().filter(c => c.at >= t0 && c.at <= t1)) {
+    const x = f.x(c.at);
+    f.svg.append(sv('line', {x1: x, x2: x, y1: f.P.t, y2: f.P.t + f.height, stroke: 'var(--critical)', 'stroke-width': 1.5, 'stroke-dasharray': '3 3'}));
+    const tx = sv('text', {x: x + 4, y: f.P.t + 10}); tx.textContent = 'crash ' + clock(c.at); tx.style.fill = 'var(--ink-2)'; f.svg.append(tx);
+  }
+  for (const r of recycleList().filter(r => r.event === 'recycled' && r.at >= t0 && r.at <= t1)) {
+    const x = f.x(r.at);
+    f.svg.append(sv('line', {x1: x, x2: x, y1: f.P.t, y2: f.P.t + f.height, stroke: 'var(--warning)', 'stroke-width': 1, 'stroke-dasharray': '2 3'}));
+  }
+}
+function crashIn(a, b) { return crashList().find(c => c.at >= a && c.at < b); }
+
+// ---------------------------------------------------------------- charts
+function renderAnswering() {
+  const box = $('ans'); if (!H) return;
+  const names = projectsIn(H.answering).filter(p => H.answering[p].some(v => v > 0.001));
+  const items = names.map(p => ({name: p, color: color(p)})).concat([{name: 'waiting for a turn', color: 'var(--ink-2)', line: true}]);
+  legend($('ans-legend'), items);
+  const t = i => H.start + (i + 0.5) * H.step, n = H.n;
+  if (tables.ans) {
+    const rows = [], per = Math.max(1, Math.round(60 / H.step));
+    for (let i = 0; i < n; i += per) {
+      const avg = a => (a.slice(i, i + per).reduce((s, v) => s + v, 0) / Math.min(per, n - i));
+      rows.push([clock(H.start + i * H.step), ...names.map(p => avg(H.answering[p]).toFixed(1)), avg(H.waiting).toFixed(1)]);
+    }
+    return tableView(box, ['minute', ...names, 'waiting'], rows.reverse());
+  }
+  const tot = Array.from({length: n}, (_, i) => names.reduce((s, p) => s + H.answering[p][i], 0));
+  const ymax = niceMax(Math.max(H.at_once || 0, ...tot, ...H.waiting, 1));
+  const f = frame(box, H.start, H.start + n * H.step, ymax);
+  const xs = Array.from({length: n}, (_, i) => f.x(t(i)));
+  const base = new Array(n).fill(0);
+  names.forEach(p => {
+    const v = H.answering[p], top = base.map((b, i) => b + v[i]);
+    let d = '';
+    xs.forEach((x, i) => d += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(top[i]).toFixed(1));
+    for (let i = n - 1; i >= 0; i--) d += 'L' + xs[i].toFixed(1) + ',' + f.y(base[i]).toFixed(1);
+    f.svg.append(sv('path', {d: d + 'Z', fill: color(p), 'fill-opacity': 0.16}));
+    let l = ''; xs.forEach((x, i) => l += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(top[i]).toFixed(1));
+    f.svg.append(sv('path', {d: l, fill: 'none', stroke: color(p), 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}));
+    top.forEach((v2, i) => base[i] = v2);
+  });
+  let w = ''; xs.forEach((x, i) => w += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(H.waiting[i]).toFixed(1));
+  f.svg.append(sv('path', {d: w, fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 2, 'stroke-linejoin': 'round'}));
+  if (H.at_once) {
+    const yy = f.y(H.at_once);
+    f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
+    const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = `${H.at_once} at once`; f.svg.append(tx);
+  }
+  markEvents(f, H.start, H.start + n * H.step);
+  crosshair(f, xs, (i, cx, cy) => {
+    const c = crashIn(H.start + i * H.step - H.step, H.start + (i + 1) * H.step);
+    showTip(cx, cy, clockS(H.start + i * H.step) + ' – ' + clockS(H.start + (i + 1) * H.step),
+      names.map(p => ({name: p, color: color(p), value: H.answering[p][i].toFixed(1)})).concat(
+        [{name: 'all answering', color: 'var(--s1)', value: tot[i].toFixed(1)}, {name: 'waiting', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)}],
+        c ? [{name: `crash, ${c.which}`, color: 'var(--critical)', line: true, value: clockS(c.at)}] : []));
+  });
+  box.replaceChildren(f.svg);
+}
+
+function renderTokens() {
+  const box = $('tok'); if (!H) return;
+  const n = H.n, t = i => H.start + (i + 0.5) * H.step;
+  if (tables.tok) {
+    const rows = [], per = Math.max(1, Math.round(60 / H.step));
+    for (let i = 0; i < n; i += per) rows.push([clock(H.start + i * H.step), full(H.tokens.slice(i, i + per).reduce((s, v) => s + v, 0) / Math.min(per, n - i))]);
+    return tableView(box, ['minute', 'tokens a second'], rows.reverse());
+  }
+  const ymax = niceMax(Math.max(...H.tokens, 10));
+  const f = frame(box, H.start, H.start + n * H.step, ymax);
+  const xs = Array.from({length: n}, (_, i) => f.x(t(i)));
+  let d = '', a = '';
+  xs.forEach((x, i) => { d += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(H.tokens[i]).toFixed(1); });
+  a = d + `L${xs[n - 1].toFixed(1)},${f.y(0)}L${xs[0].toFixed(1)},${f.y(0)}Z`;
+  f.svg.append(sv('path', {d: a, fill: 'var(--s1)', 'fill-opacity': 0.1}));
+  f.svg.append(sv('path', {d, fill: 'none', stroke: 'var(--s1)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}));
+  const last = H.tokens[n - 1] || 0;
+  f.svg.append(sv('circle', {cx: xs[n - 1], cy: f.y(last), r: 4, fill: 'var(--s1)', stroke: 'var(--surface)', 'stroke-width': 2}));
+  const tx = sv('text', {x: xs[n - 1] + 8, y: f.y(last) + 4}); tx.textContent = full(last) + '/s'; tx.style.fill = 'var(--ink-2)'; f.svg.append(tx);
+  markEvents(f, H.start, H.start + n * H.step);
+  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(H.start + i * H.step), [{name: 'tokens a second', color: 'var(--s1)', line: true, value: full(H.tokens[i])}]));
+  box.replaceChildren(f.svg);
+}
+
+function renderRequests() {
+  const box = $('req'); if (!H) return;
+  const Q = H.requests, names = projectsIn(Q.by);
+  $('req-hint').textContent = `each column is ${Q.step >= 3600 ? Q.step / 3600 + ' hours' : Q.step >= 60 ? Q.step / 60 + ' minute' + (Q.step > 60 ? 's' : '') : Q.step + ' seconds'}`;
+  legend($('req-legend'), names.map(p => ({name: p, color: color(p)})));
+  if (tables.req) {
+    const rows = [];
+    for (let i = Q.n - 1; i >= 0; i--) { const vals = names.map(p => Q.by[p][i]); if (vals.some(v => v)) rows.push([clock(Q.start + i * Q.step), ...vals.map(full)]); }
+    return tableView(box, ['from', ...names], rows);
+  }
+  const tot = Array.from({length: Q.n}, (_, i) => names.reduce((s, p) => s + Q.by[p][i], 0));
+  const ymax = niceMax(Math.max(...tot, 4));
+  const f = frame(box, Q.start, Q.start + Q.n * Q.step, ymax, v => full(v));
+  const band = (f.W - f.P.l - f.P.r) / Q.n, bw = Math.max(2, Math.min(24, band - 2));
+  for (let i = 0; i < Q.n; i++) {
+    let acc = 0;
+    const live = names.filter(p => Q.by[p][i] > 0);
+    live.forEach((p, k) => {
+      const v = Q.by[p][i], x0 = f.x(Q.start + i * Q.step) + (band - bw) / 2;
+      const yTop = f.y(acc + v), yBot = f.y(acc), gap = k ? 2 : 0, h = Math.max(1, yBot - yTop - gap);
+      const topSeg = k === live.length - 1, r = topSeg ? Math.min(4, bw / 2, h) : 0;
+      const yb = yBot - gap, yt = yb - h;
+      const d = `M${x0},${yb}V${yt + r}Q${x0},${yt} ${x0 + r},${yt}H${x0 + bw - r}Q${x0 + bw},${yt} ${x0 + bw},${yt + r}V${yb}Z`;
+      const seg = sv('path', {d, fill: color(p), tabindex: 0});
+      const tipIt = ev => { seg.setAttribute('fill-opacity', 0.75); const r2 = seg.getBoundingClientRect();
+        showTip(ev.clientX || r2.right, ev.clientY || r2.top, `${clock(Q.start + i * Q.step)} – ${clock(Q.start + (i + 1) * Q.step)}`,
+          [{name: p, color: color(p), value: full(v) + ' request' + (v === 1 ? '' : 's')}, {name: 'all projects', color: 'var(--s1)', value: full(tot[i])}]); };
+      seg.addEventListener('pointermove', tipIt); seg.addEventListener('focus', tipIt);
+      const off = () => { seg.removeAttribute('fill-opacity'); hideTip(); };
+      seg.addEventListener('pointerleave', off); seg.addEventListener('blur', off);
+      f.svg.append(seg);
+      acc += v;
+    });
+  }
+  box.replaceChildren(f.svg);
+}
+
+function renderMemory() {
+  const box = $('mem'); if (!H) return;
+  const M = H.memory;
+  if (!M.t.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No samples yet: the door samples memory every 15 seconds.')); return; }
+  if (tables.mem) {
+    const rows = []; for (let i = M.t.length - 1; i >= 0; i -= 4) rows.push([clockS(M.t[i]), M.used[i].toFixed(1) + ' GB']);
+    return tableView(box, ['time', 'memory used'], rows);
+  }
+  const f = frame(box, H.start, H.now, M.total, v => v + ' GB');
+  const xs = M.t.map(f.x);
+  let d = ''; xs.forEach((x, i) => d += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(M.used[i]).toFixed(1));
+  f.svg.append(sv('path', {d: d + `L${xs[xs.length - 1].toFixed(1)},${f.y(0)}L${xs[0].toFixed(1)},${f.y(0)}Z`, fill: 'var(--s1)', 'fill-opacity': 0.1}));
+  f.svg.append(sv('path', {d, fill: 'none', stroke: 'var(--s1)', 'stroke-width': 2, 'stroke-linejoin': 'round'}));
+  const yy = f.y(M.total);
+  f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
+  const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${M.total} GB`; f.svg.append(lt);
+  const li = M.used.length - 1;
+  f.svg.append(sv('circle', {cx: xs[li], cy: f.y(M.used[li]), r: 4, fill: 'var(--s1)', stroke: 'var(--surface)', 'stroke-width': 2}));
+  const vt = sv('text', {x: xs[li] + 8, y: f.y(M.used[li]) + 4}); vt.textContent = M.used[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
+  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(M.t[i]), [{name: 'memory used', color: 'var(--s1)', line: true, value: M.used[i].toFixed(1) + ' GB'}]));
+  box.replaceChildren(f.svg);
+}
+
+function renderCharts() {
+  if (!H) return;
+  merge(H.colors);
+  renderAnswering(); renderTokens(); renderRequests(); renderMemory();
+  const n = H.n, last = H.tokens.slice(Math.max(0, n - Math.round(60 / H.step)));
+  $('k-tok').textContent = full(last.reduce((a, b) => a + b, 0) / Math.max(1, last.length));
+  const Q = H.requests, reqTot = Array.from({length: Q.n}, (_, i) => Object.values(Q.by).reduce((s, v) => s + v[i], 0));
+  $('k-req').textContent = full(reqTot.reduce((a, b) => a + b, 0));
+  const np = Object.keys(Q.by).length;
+  $('k-req-f').textContent = `${rangeWords()} · ${np} project${np === 1 ? '' : 's'}`;
+  $('mem-hint').textContent = `every 15 seconds; the line across the top is the Mac's ${H.memory.total} GB`;
+}
+function rangeWords() { return {15: 'last 15 minutes', 60: 'last hour', 360: 'last 6 hours', 1440: 'last 24 hours'}[RANGE]; }
+
+// ---------------------------------------------------------------- now
+function renderNow() {
+  if (!S) return;
+  merge(S.colors);
+  $('clock').textContent = 'updated ' + S.clock;
+  chip('chip-door', S.door.up, `the door is open on :${S.door.port}`, 'the door is closed');
+  const lmOk = S.lmstudio.server === 'on';
+  chip('chip-lm', lmOk, S.lmstudio.listing_ok === false ? `LM Studio's server is on; its model listing is unsure (${Math.round(S.lmstudio.listing_age / 60)} min old)` : "LM Studio's server is on", "LM Studio's server is off");
+  if (lmOk && S.lmstudio.listing_ok === false) $('chip-lm').querySelector('i').style.background = 'var(--warning)';
+  // stat tiles
+  const fams = S.lmstudio.families, busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
+  $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} at once`));
+  const answering = S.users.filter(u => u.answering).map(u => u.project);
+  $('k-ans-f').textContent = answering.length ? [...new Set(answering)].join(', ') : 'nothing answering';
+  const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
+  $('k-wait').textContent = String(waiting);
+  $('k-wait-f').textContent = waiting ? `${q.people || 0} for a person, ${q.others || 0} batch and other · people first` : `last 7 days: ${S.waits7.waits} waits over 2 s, ${S.waits7.minutes} min in all`;
+  const m = S.mac, share = m.used / Math.max(1, m.total);
+  $('k-mem').replaceChildren(String(Math.round(m.used)), el('small', {}, `of ${Math.round(m.total)} GB`));
+  const meter = $('k-mem-m'); meter.style.width = Math.round(share * 100) + '%';
+  meter.style.background = share > 0.92 ? 'var(--critical)' : share > 0.85 ? 'var(--warning)' : 'var(--s1)';
+  $('k-mem-f').textContent = (share > 0.92 ? 'almost full · ' : share > 0.85 ? 'getting full · ' : '') + `${Math.round(m.free)} GB free on disk`;
+  const work = S.claude.filter(c => c.working);
+  $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
+  $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
+  renderModels(); renderUsers(); renderClaude(); renderMac(); renderAlerts(); renderEvents();
+}
+
+// a model down after a crash, a copy being recycled, an unsure listing: said at the top, in words
+function renderAlerts() {
+  const out = [];
+  for (const d of (S.crashes && S.crashes.down) || []) {
+    const left = d.state === 'left down';
+    out.push(el('div', {class: 'alert ' + (left ? 'critical' : 'warning'), role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
+      el('span', {}, el('b', {}, `${d.family} crashed at ${clock(d.crashed)}`), ' ', el('span', {class: 'ink2'}, `(${d.which}). `),
+        left ? el('span', {}, `Left down: ${d.why}. Load it by hand: `, el('code', {}, `localmodels use ${d.family}`), '; the hub tries again every hour.')
+             : el('span', {}, d.state === 'waiting for room' ? `Waiting for room to load it again${d.why ? ' (' + d.why + ')' : ''}; requests only it could answer wait meanwhile.`
+                                                              : 'The hub is loading it again; the other copies keep answering, and requests only it could answer wait meanwhile.'))));
+  }
+  if (S.recycle && S.recycle.words) out.push(el('div', {class: 'alert info', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '↻'), el('span', {}, S.recycle.words)));
+  if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'The settings file could not be read: '), S.settings_error, ' The last good settings stand.')));
+  $('alerts').replaceChildren(...out);
+}
+
+function renderEvents() {
+  const cs = crashList(), rs = recycleList().filter(r => r.event === 'recycled');
+  const bits = [el('b', {}, 'Last 7 days: ')];
+  bits.push(cs.length ? `${cs.length} crash${cs.length === 1 ? '' : 'es'} (last ${day(cs[0].at)} ${clock(cs[0].at)}, ${cs[0].which}: ${cs[0].then}; ${cs.reduce((s, c) => s + (c.failed || 0), 0)} requests failed in all)` : 'no crashes');
+  bits.push(' · ' + (rs.length ? `${rs.length} cop${rs.length === 1 ? 'y' : 'ies'} recycled before the band (last ${day(rs[0].at)} ${clock(rs[0].at)}: ${short(rs[0].model)} after ${compact(rs[0].tokens)} tokens, back in ${Math.round(rs[0].seconds || 0)} s)` : 'no copy recycled yet'));
+  bits.push(' · ', el('span', {class: 'muted'}, 'localmodels crashes for the list'));
+  $('events').replaceChildren(...bits);
+}
+
+function chip(id, ok, yes, no) {
+  const c = $(id); c.querySelector('i').style.background = ok ? 'var(--good)' : 'var(--critical)';
+  c.querySelector('span').textContent = ok ? yes : no;
+}
+
+function renderModels() {
+  const box = $('models-body'), fams = S.lmstudio.families;
+  const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
+    el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.state}`))));
+  if (!fams.length) { box.replaceChildren(...down, down.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.')); $('models-legend').replaceChildren(); return; }
+  const seen = new Set();
+  box.replaceChildren(...down, ...fams.map(f => {
+    const head = el('div', {}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'},
+      `${f.copies.length > 1 ? f.copies.length + ' copies · ' : ''}${f.at_once} at once · ${f.busy} busy · ${f.size} GB · ${full(f.copies[0].context)} context`));
+    const rows = f.copies.map((c, k) => {
+      const boxes = [];
+      for (const h of c.holders) for (let j = 0; j < h.n; j++) { boxes.push(h.project); seen.add(h.project); }
+      while (boxes.length < c.busy) boxes.push('straight to LM Studio');
+      const slots = el('span', {class: 'slots'}, ...Array.from({length: c.parallel}, (_, j) => {
+        const p = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: p ? `background:${color(p)}` : ''});
+        const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${c.id} · slot ${j + 1}`,
+          [{name: p || 'free', color: p ? color(p) : 'var(--track)', value: p ? 'answering' : 'free'}]); };
+        b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt);
+        b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
+        return b;
+      }));
+      const state = c.down ? el('span', {class: 'badge down'}, 'down: loading again') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for a recycle' : 'recycling')
+        : el('span', {}, (c.busy ? 'working' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy} of ${c.parallel} busy`);
+      const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `copy ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
+      if (sv_) {
+        const sh = sv_.share == null ? null : Math.min(1, sv_.share);
+        const bar = el('div', {class: 'bar'}, el('div', {style: `width:${Math.round((sh || 0) * 100)}%;background:${sh > 0.95 ? 'var(--critical)' : sh > 0.7 ? 'var(--warning)' : 'var(--s1)'}`}));
+        if (sv_.band && sv_.band.soft) bar.append(el('i', {style: `left:${Math.round(100 * sv_.band.soft / sv_.band.tokens)}%`, title: 'the soft limit: recycled when idle'}));
+        parts.push(el('div', {class: 'band'}, `since ${clock(sv_.since)}: ${compact(sv_.tokens)} tokens`, sv_.band ? bar : el('span', {class: 'muted'}, '· not recycled'),
+          sv_.band ? `${Math.round((sv_.share || 0) * 100)}% of ${compact(sv_.band.tokens)}` : '', sv_.drift ? el('span', {class: 'badge warn'}, sv_.drift) : ''));
+      }
+      return el('div', {class: 'copy'}, ...parts);
+    });
+    return el('div', {class: 'fam'}, head, ...rows);
+  }));
+  legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat([{name: 'free', color: 'var(--track)'}]));
+}
+
+function renderUsers() {
+  const box = $('users'), us = S.users;
+  if (!us.length) { box.replaceChildren(el('div', {class: 'empty'}, 'Nothing is using a local model right now.')); return; }
+  const head = ['project', 'what', 'now', 'model', 'since', 'Claude session', 'progress or step'].map(h => el('th', {}, h));
+  const rows = [];
+  for (const u of us) {
+    const b = u.batch || {};
+    let now;
+    if (u.answering || u.waiting) now = el('span', {}, el('span', {class: 'badge live'}, `${u.answering} answering`), u.waiting ? ' ' : '', u.waiting ? el('span', {class: 'badge'}, `${u.waiting} waiting`) : '');
+    else if (u.direct) now = el('span', {class: 'badge'}, `${u.direct} connected`);
+    else now = el('span', {class: 'muted'}, 'between requests');
+    const flag = u.direct && u.via !== 'hub' ? el('div', {}, el('span', {class: 'badge warn'}, 'straight to LM Studio, not through the hub')) : '';
+    const prog = b.total ? el('div', {}, `${b.done} of ${b.total} done` + (b.left ? ` · ~${left(b.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${b.pct || 0}%`}))) : el('span', {class: 'muted', title: u.step || ''}, u.step || '–');
+    rows.push(el('tr', {},
+      el('td', {}, el('span', {class: 'dot', style: `background:${color(u.project)}`}), u.project),
+      el('td', {}, kindWords(u.kind), u.app ? el('div', {class: 'muted'}, u.app) : ''),
+      el('td', {}, now, flag),
+      el('td', {}, (u.models || []).map(short).join(', ') || '–'),
+      el('td', {class: 'num'}, ago(u.since)),
+      el('td', {title: u.title || ''}, u.title || (u.session ? 'a Claude session' : el('span', {class: 'muted'}, '–'))),
+      el('td', {}, prog)));
+    for (const j of (b.now || []).slice(0, 8)) {
+      rows.push(el('tr', {}, el('td', {class: 'sub', colspan: 4}, `agent ${j.job}` + (j.step ? ` · ${j.step}` : '')), el('td', {class: 'num ink2'}, ago(j.since)), el('td', {}),
+        el('td', {}, j.pct != null ? el('div', {class: 'ink2'}, `${j.pct}%` + (j.left ? ` · ~${left(j.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${j.pct}%`}))) : el('span', {class: 'muted'}, 'starting'))));
+    }
+  }
+  tableIn(box, head, rows, 'localmodels for all of them');
+}
+
+function renderClaude() {
+  const box = $('claude'), cs = S.claude;
+  if (!cs.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No Claude Code session wrote in the last three hours.')); return; }
+  const head = ['project', 'now', 'session', ''].map(h => el('th', {}, h));
+  const rows = cs.map(c => {
+    const bits = [];
+    if (c.subagents && c.subagents.length) bits.push(`${c.subagents.length} subagent${c.subagents.length === 1 ? '' : 's'}`);
+    for (const w of c.workflows || []) if (w.live && w.running.length) bits.push(`workflow ${w.finished} of ${w.agents}`);
+    return el('tr', {},
+      el('td', {}, c.project),
+      el('td', {}, c.working ? el('span', {class: 'badge live'}, 'working') : el('span', {class: 'muted'}, `idle ${ago(c.last)}`)),
+      el('td', {title: c.title}, c.title, bits.length ? el('div', {class: 'muted'}, bits.join(' · ')) : ''),
+      el('td', {}, c.uses ? el('span', {class: 'badge'}, 'using a local model') : ''));
+  });
+  tableIn(box, head, rows);
+}
+
+function renderRecent() {
+  const box = $('recent');
+  if (!R.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No requests through the hub yet.')); return; }
+  const head = ['time', 'project', 'what', 'copy', 's', 'waited', 'out', ''].map((h, i) => el('th', {class: i >= 4 && i <= 6 ? 'num' : ''}, h));
+  const rows = R.map(r => el('tr', {},
+    el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
+    el('td', {}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
+    el('td', {title: r.step || ''}, kindWords(r.kind), r.step ? el('div', {class: 'muted'}, r.step) : ''),
+    el('td', {class: 'ink2'}, r.copy && r.copy !== r.model ? 'copy ' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : 'copy 1'),
+    el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
+    el('td', {class: 'num'}, (+r.waited || 0) >= 0.1 ? (+r.waited).toFixed(1) : '–'),
+    el('td', {class: 'num'}, full(r.out_tokens)),
+    el('td', {}, r.status === 499 ? el('span', {class: 'badge', title: r.note || ''}, 'hung up') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
+      : r.tries > 1 ? el('span', {class: 'badge cycle', title: r.note || ''}, 'resent, answered') : '')));
+  tableIn(box, head, rows, 'localmodels log for the day');
+}
+
+function renderMac() {
+  const m = S.mac, top = (S.top || []).slice(0, 3);
+  $('mac').replaceChildren(el('b', {}, 'The Mac: '), `load ${m.load && m.load[0] ? m.load[0] : '?'} · ${Math.round(m.free)} GB free on disk · busiest: `
+    + top.map(t => `${t.name} ${Math.round(t.cpu)}% / ${t.mem.toFixed(1)} GB`).join(', ') + ` · swaps refused in 7 days: ${S.waits7.refused}`);
+  $('foot').textContent = 'Names, times and token counts only, never what anyone sent. In a terminal: localmodels, or localmodels dash.';
+}
+
+// ---------------------------------------------------------------- fetching, and holding the last picture while it reloads
+async function get(path) { const r = await fetch(path, {cache: 'no-store'}); if (!r.ok) throw new Error(path + ' ' + r.status); return r.json(); }
+function online(ok) { $('banner').style.display = ok ? 'none' : 'block'; document.body.classList.toggle('offline', !ok); if (!ok) chip('chip-door', false, '', 'the door is not answering'); }
+async function tick(name, fn) {                              // one fetch of each kind at a time: a slow door never piles them up
+  if (inflight[name]) return;
+  inflight[name] = true;
+  try { await fn(); } finally { inflight[name] = false; }
+}
+const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); online(true); renderNow(); } catch (e) { online(false); } });
+const tickHistory = () => tick('history', async () => { try { H = await get('/hub/history?minutes=' + RANGE); renderCharts(); } catch (e) {} });
+const tickRecent = () => tick('recent', async () => { try { R = await get('/hub/recent?n=40'); renderRecent(); } catch (e) {} });
+
+$('range').addEventListener('click', ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  RANGE = +b.dataset.m;
+  for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', x === b ? 'true' : 'false');
+  try { localStorage.setItem('lm-range', String(RANGE)); } catch (e) {}
+  tickHistory();
+});
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-table]'); if (!b) return;
+  const id = b.dataset.table; tables[id] = !tables[id]; b.textContent = tables[id] ? 'chart' : 'table';
+  renderCharts();
+});
+const THEMES = ['auto', 'light', 'dark'];
+function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; }
+$('theme').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];
+  applyTheme(next); try { localStorage.setItem('lm-theme', next); } catch (e) {}
+  renderCharts();
+});
+try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
+try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
+let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { renderCharts(); if (S) { renderUsers(); renderClaude(); } renderRecent(); }, 150); });
+
+tickNow(); tickHistory(); tickRecent();
+setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000);
+</script>
+</body>
+</html>

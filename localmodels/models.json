@@ -1,0 +1,18 @@
+{
+ "families": {
+  "qwen/qwen3.6-35b-a3b": {
+   "key": "qwen/qwen3.6-35b-a3b",
+   "copies": 2,
+   "context": 65536,
+   "parallel": 4,
+   "recycle": {
+    "tokens": 800000,
+    "soft": 560000,
+    "before_batch": 0.5
+   },
+   "why": "Two copies of 4 answer more in all than one copy of 8 on this hardware; the recycle band comes from measured engine crashes at 931,000 to 1,175,000 tokens processed per copy (GUIDE.md)."
+  }
+ },
+ "batch_at_once": 8,
+ "headroom_gb": 8
+}
