@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""localmodels - the local-models hub's one command (localmodels help; the rules: GUIDE.md)."""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from localmodels.cli import main  # noqa: E402
+
+sys.exit(main(sys.argv[1:]))
