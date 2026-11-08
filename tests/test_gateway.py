@@ -7,7 +7,7 @@ before batches in the queue, a chunked request body, a route with a trailing sla
 LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
 loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_gateway.py
 """
-import http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
+import fcntl, select, http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from localmodels import crashes, gateway, llmshare, recycle
@@ -106,6 +106,7 @@ def run(box):
     rows = [row(F), row(F2)]
     llmshare.loaded, llmshare.parallel_of, llmshare.read_ok = (lambda fresh=False, force=False: list(rows)), (lambda m: 1), (lambda: True)
     llmshare.api_models = lambda timeout=3: {r['id']: 4096 for r in rows}
+    llmshare._ps['good_at'] = time.time()                     # this gateway has had a model listing (the stub above is it)
     llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2, context=4096, parallel=1, recycle=False)}, batch_at_once=2, headroom_gb=1)
     up = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Fake); threading.Thread(target=up.serve_forever, daemon=True).start()
     door = gateway.Server(('127.0.0.1', 0), gateway.Door); threading.Thread(target=door.serve_forever, daemon=True).start()
@@ -219,7 +220,13 @@ def run(box):
         code, r, h = ask(tag='z')
         t('a family in the settings with nothing loaded and nothing on the way: 503 within a second, never the bare id',
           code == 503 and time.time() - t0 < 2 and not Fake.seen and 'no copy' in json.loads(urllib.request.urlopen(url + '/hub/health').read() and b'{}') if False else code == 503 and time.time() - t0 < 2 and not Fake.seen, (code, Fake.seen))
-        plan()
+        llmshare._ps['good_at'] = 0.0; plan(); got = {}
+        th = threading.Thread(target=lambda: got.update(r=ask(tag='w'))); th.start(); time.sleep(1.5)
+        held = [m for m in llmshare.inflight() if m.get('state') == 'held: waiting for the first model listing']
+        rows.append(row(F)); llmshare._ps['good_at'] = time.time(); th.join(10)
+        t('a gateway that has never had a model listing holds the request (up to 30 s) instead of answering 503, then answers',
+          held and got.get('r') and got['r'][0] == 200, (held and held[0].get('state'), got.get('r') and got['r'][0]))
+        rows.clear(); plan()
         code, r, h = ask(model='other/unknown', tag='u')
         t('a model the settings do not know is still passed through', code == 200 and Fake.seen[0][0] == 'other/unknown', Fake.seen)
         rows[:] = [row(F), row(F2)]
@@ -404,6 +411,54 @@ def run(box):
         rows[:] = saved
         st_ = llmshare.waiting_here()
         t('nobody waits once the queue is empty', st_ == dict(people=0, others=0), st_)
+
+        print('worker rules: the request-line timeout, the connection count, the queued marks')
+        gateway.REQUEST_LINE_TIMEOUT = 1
+        idle = socket.create_connection(('127.0.0.1', gateway.PORT)); idle.settimeout(5); t0 = time.time()
+        try: closed = idle.recv(1) == b''
+        except OSError: closed = True
+        t('a connection that sends no request line is closed after the request-line timeout', closed and 0.8 < time.time() - t0 < 3, round(time.time() - t0, 2))
+        idle.close()
+        late = socket.create_connection(('127.0.0.1', gateway.PORT))
+        body = json.dumps(dict(model=F, messages=[], tag='late')).encode()
+        late.sendall(b'POST /v1/chat/completions HTTP/1.0\r\nHost: localhost:%d\r\nX-Kind: test\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % (gateway.PORT, len(body)))
+        time.sleep(2.5); late.sendall(body); late.settimeout(20)
+        got = b''
+        while True:
+            x = late.recv(65536)
+            if not x: break
+            got += x
+        late.close()
+        t('a request whose body comes 2.5 s after its headers is answered (only the request line is timed)', got.startswith(b'HTTP/1.0 200'), got[:40])
+        plan('slow'); Fake.slow = 2.0
+        code, r, h = ask(tag='slowly')
+        t('an answer that takes longer than the timeout is never cut', code == 200, code)
+        gateway.REQUEST_LINE_TIMEOUT = 30
+        raw(F, 'gone', close_after=0.3); time.sleep(1.0)
+        t('the connection count returns to 0 after answers, streams, refusals and a client that left', gateway.conns() == 0, gateway.conns())
+        lis = gateway.Server(('127.0.0.1', 0), gateway.Door); lis.socket.setblocking(False)
+        c = socket.create_connection(lis.server_address); select.select([lis.socket], [], [], 2)
+        conn, _ = lis.get_request(); n1 = gateway.conns()
+        t('get_request: a blocking socket from a non-blocking listener, counted', conn.getblocking() and conn.gettimeout() is None and n1 == 1, (conn.getblocking(), conn.gettimeout(), n1))
+        lis.shutdown_request(conn); c.close()
+        class Refusing(gateway.Server):
+            def verify_request(self, request, client_address): return False
+        rf = Refusing(('127.0.0.1', 0), gateway.Door); threading.Thread(target=rf.serve_forever, daemon=True).start()
+        c = socket.create_connection(rf.server_address); c.settimeout(5)
+        try: c.recv(1)
+        except OSError: pass
+        c.close(); time.sleep(0.3); rf.shutdown(); rf.server_close(); lis.server_close()
+        t('the verify_request-false path is counted out too', gateway.conns() == 0, gateway.conns())
+        held_slot = open(os.path.join(llmshare.SLOTS, llmshare._safe(F), 'slot-0.lock'), 'a+'); fcntl.flock(held_slot, fcntl.LOCK_EX)
+        held2 = open(os.path.join(llmshare.SLOTS, llmshare._safe(F2), 'slot-0.lock'), 'a+'); fcntl.flock(held2, fcntl.LOCK_EX)
+        plan(); got = {}
+        th = threading.Thread(target=lambda: got.update(r=ask(tag='q', kind='batch'))); th.start(); time.sleep(1.0)
+        q = [m for m in llmshare.inflight() if m.get('state') == 'queued']
+        fcntl.flock(held_slot, fcntl.LOCK_UN); held_slot.close(); fcntl.flock(held2, fcntl.LOCK_UN); held2.close(); th.join(10)
+        mk = q[0] if q else {}
+        t('a waiting request is queued in its mark with its place in every gateway\'s queue: kind, since, candidates, deadline',
+          mk.get('prio') == 1 and mk.get('t0') and sorted(mk.get('cands') or []) == sorted([F, F2]) and mk.get('until', 0) > time.time() and mk.get('n'), mk)
+        t('...and then answered', got.get('r') and got['r'][0] == 200, got.get('r') and got['r'][0])
     finally:
         door.shutdown(); up.shutdown()
 

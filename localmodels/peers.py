@@ -769,6 +769,28 @@ def view(max_age=30):
     return out
 
 
+def ask_poll(wait=3):
+    """Another gateway holds the peer-poller role: ask it to look now, and wait up to `wait` seconds for its newer link.json."""
+    try: before = os.path.getmtime(STATE)
+    except OSError: before = 0.0
+    llmshare.nudge('peer-poller')
+    end = time.time() + wait
+    while time.time() < end:
+        try:
+            if os.path.getmtime(STATE) > before: return True
+        except OSError: pass
+        time.sleep(0.1)
+    return False
+
+
+def listen_words():
+    """What the link listener does now, in words: this process's own when it holds the link-listener role, else what the
+    holder wrote in run/link-listener.json."""
+    if LISTEN.get('words') is not None: return LISTEN['words']
+    try: return (json.load(open(os.path.join(llmshare.RUN, 'link-listener.json'))) or {}).get('words')
+    except (OSError, ValueError, AttributeError): return None
+
+
 def capacity(model):
     """How many requests at once this Mac's peers take for a family now (llmshare.at_once adds it): the peers up with
     the family matched, each with the slots it has free for this Mac."""

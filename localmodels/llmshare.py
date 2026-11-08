@@ -623,25 +623,26 @@ class Counted:
 
 
 # ---------------------------------------------------------------- LM Studio's server: started only when it is down
-def server_up(timeout=3):
-    """Whether LM Studio's server is up: only a refused connection means down. A slow answer, a reset or a cut answer
-    means it is up and busy, and starting it then would restart it under every request in flight."""
-    try: urllib.request.urlopen(LMSTUDIO + '/v1/models', timeout=timeout); return True
+def server_up(timeout=3, url=None):
+    """Whether LM Studio's server (url: LMSTUDIO) is up: only a refused connection means down. A slow answer, a reset or a
+    cut answer means it is up and busy, and starting it then would restart it under every request in flight."""
+    try: urllib.request.urlopen((url or LMSTUDIO) + '/v1/models', timeout=timeout); return True
     except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
     except ConnectionRefusedError: return False
     except OSError: return True
 
 
-def start_server(why='a request could not connect', debounce=60):
+def start_server(why='a request could not connect', debounce=60, url=None):
     """LM Studio's server, started only when it is down: one start across every process on this Mac (a blocking lock on
     run/server-start.lock, the check repeated inside it), and at most one per `debounce` seconds (run/server-start.json:
     60 for the request path, 0 for the instance manager). -> whether it answers now."""
-    if server_up(2): return True
+    up = lambda t: server_up(t, url)
+    if up(2): return True
     os.makedirs(RUN, mode=0o700, exist_ok=True)
     info = os.path.join(RUN, 'server-start.json')
     with open(os.path.join(RUN, 'server-start.lock'), 'a+') as h:
         fcntl.flock(h, fcntl.LOCK_EX)                       # a second process waits here for the first one's start
-        if server_up(2): return True
+        if up(2): return True
         try: last = float(json.load(open(info)).get('at') or 0)
         except (OSError, ValueError, AttributeError, TypeError): last = 0.0
         if debounce and time.time() - last < debounce: return False
@@ -651,7 +652,7 @@ def start_server(why='a request could not connect', debounce=60):
         try: subprocess.run([LMS, 'server', 'start'], capture_output=True, timeout=60)
         except (OSError, subprocess.SubprocessError) as e: _error('server start: lms server start', e); return False
         for _ in range(20):
-            if server_up(2): return True
+            if up(2): return True
             time.sleep(0.5)
         return False
 
