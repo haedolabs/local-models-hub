@@ -60,8 +60,8 @@ def test_recycle():
     since = time.time() - 3 * 3600
     reset(since)
     rows, busy = [row(B), row(C2)], {llmshare._safe(B): 2, llmshare._safe(C2): 1}
-    t('settings: off, partial, default', recycle.thresholds(dict(recycle=False)) is None and recycle.thresholds(dict(recycle=dict(tokens=50)))['soft'] == 560000
-      and recycle.thresholds({})['tokens'] == 800000 and recycle.thresholds({}).get('requests') == 0)
+    t('settings: off, partial, default', recycle.thresholds(dict(recycle=False)) is None and recycle.thresholds(dict(recycle=dict(tokens=50)))['soft'] == 220000
+      and recycle.thresholds({})['tokens'] == 300000 and recycle.thresholds({}).get('requests') == 0)
     served(B, 40); served(C2, 30)                              # 260,000 and 195,000 tokens
     t('below the band: nothing to do', recycle.plan(rows, busy) is None and not recycle.draining())
     v = recycle.view(rows)

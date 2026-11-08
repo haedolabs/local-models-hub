@@ -6,11 +6,11 @@
    "context": 65536,
    "parallel": 4,
    "recycle": {
-    "tokens": 800000,
-    "soft": 560000,
+    "tokens": 300000,
+    "soft": 220000,
     "before_batch": 0.5
    },
-   "why": "Two replicas of 4 slots give more aggregate throughput than one instance of 8 on this hardware; the recycle thresholds come from measured engine crashes at 931,000 to 1,175,000 tokens processed per instance (GUIDE.md)."
+   "why": "Two replicas of 4 slots give more aggregate throughput than one instance of 8 on this hardware; the recycle thresholds come from measured engine crashes: 931,000 to 1,175,000 tokens processed per instance with short completions, 244,748 to 478,356 with long ones (GUIDE.md)."
   }
  },
  "batch_at_once": 8,

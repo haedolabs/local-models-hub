@@ -3,13 +3,18 @@ has crashed, so the crash is less likely to come at all.
 
 Why: LM Studio's MLX engine dies with "[metal::malloc] Resource limit (499000) exceeded" after a large amount of work on a
 copy: the engine's count of Metal buffers grows with the work a copy has done and is only freed when the copy is unloaded.
-Measured: three crashes at 931,000, 1,161,000 and 1,175,000 tokens processed (prompt and answer together) per copy since its
-load; one copy served 1,354,000 without dying. So the band is a hazard zone, not a wall: recycling is insurance, and the
-hub's reload of a crashed copy with the door holding and resending requests (crashes.py, gateway.py) stays the safety net.
+Measured, tokens processed (prompt and answer together) per copy since its load: with short answers (1,700 to 2,300
+tokens written per request) three crashes at 931,000 to 1,175,000, and one copy served 1,354,000 without dying; with long
+answers (3,100 to 4,300 written per request) four crashes at 374,691 to 478,356 on one Mac and 445,999 on another, one at
+244,748, while one copy served 653,132. No single count (tokens processed, tokens written, requests, the sum of squared
+answer lengths) separates the crashes from the survivors, so the band is a hazard zone, not a wall: the threshold sits
+below the lowest crash under the heaviest load measured, with room for the answers in flight while a copy drains
+(4 answers of 10,000 tokens). Recycling is insurance; the hub's reload of a crashed copy with the door holding and
+resending requests (crashes.py, gateway.py) stays the safety net.
 This is what web servers do with workers that leak (gunicorn's max_requests, Apache's MaxRequestsPerChild): recycle each
 worker after a set amount of work, one at a time and staggered, so the service never stops.
 
-How: models.json gives a family "recycle": {"tokens": 800000, "soft": 560000, "before_batch": 0.5, "requests": 0}, tokens
+How: models.json gives a family "recycle": {"tokens": 300000, "soft": 220000, "before_batch": 0.5, "requests": 0}, tokens
 processed since the copy was loaded, counted from the hub's request log ("recycle": false turns it off; "requests" is a
 backstop for clients that report no usage, 0 = off). The door's keeper (models.keep, every 20 s) asks plan(): a copy past
 "tokens" is marked DRAINING, the door sends it nothing new (gateway.generate leaves it out; a lone copy's requests, or
@@ -31,7 +36,7 @@ import time
 
 from . import crashes, llmshare
 
-DEFAULT = dict(tokens=800_000, soft=560_000, before_batch=0.5, requests=0)
+DEFAULT = dict(tokens=300_000, soft=220_000, before_batch=0.5, requests=0)
 DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try again after; between two recycles of a family; a fresh-start request lasts
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
 _held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
