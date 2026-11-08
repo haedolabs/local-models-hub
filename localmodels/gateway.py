@@ -37,7 +37,7 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, crashes, llmshare, maint, peers, recycle, runs, web, whois
+from . import VERSION, crashes, errors, llmshare, maint, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
@@ -245,7 +245,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         try:                                                 # every answer says when maintenance is announced or on
             h = maint.header(maint.read())
             if h: self.send_header('X-Hub-Maintenance', h)
-        except Exception: pass
+        except Exception as e: errors.record('maintenance header', e)
         super().end_headers()
 
     def _send(self, code, obj, retry_after=None):
@@ -301,8 +301,8 @@ class Door(http.server.BaseHTTPRequestHandler):
     def any(self, method):
         try: self._any(method)
         except (BrokenPipeError, ConnectionResetError): pass
-        except Exception as e:                               # never a bare reset: the program gets an answer, the log the reason
-            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway error on {method} {self.path}: {type(e).__name__}: {e}\n{traceback.format_exc()}", file=sys.stderr, flush=True)
+        except Exception as e:                               # never a bare reset: the client gets an answer, the error record the reason
+            errors.record(f"{method} {self.path.split('?')[0]}", e)
             if not self._sent: self._send(500, dict(error=f'internal gateway error: {type(e).__name__}: {e}'))
 
     def _any(self, method):
@@ -631,11 +631,23 @@ class Door(http.server.BaseHTTPRequestHandler):
                 fam = recycle.fresh_start(model) if model else None
                 crashes.nudge()
                 return self._send(200, dict(ok=bool(fam), family=fam, note='an instance past half its recycle threshold is recycled before the batch starts' if fam else 'unknown family, or recycling is disabled for it'))
-        except Exception as e: return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
+            if route == '/hub/errors':                                              # what the error record holds (localmodels errors)
+                return self._send(200, dict(errors=errors.recent((q.get('minutes') or [1440])[0], 200)))
+            if route == '/hub/client-error' and method == 'POST':                     # the dashboard's own render errors
+                body = self._body()[:8000]
+                try: j = json.loads(body) if body else {}
+                except ValueError: j = {}
+                if not isinstance(j, dict): j = {}
+                errors.record(f"dashboard: {str(j.get('where') or '?')[:60]}", words=str(j.get('error') or 'error')[:300],
+                              trace=str(j.get('stack') or '')[:800], source='dashboard')
+                return self._send(200, dict(ok=True))
+        except Exception as e:
+            errors.record(f'{method} {route}', e)
+            return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
-        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, POST /hub/recycle'))
+        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, POST /hub/recycle, POST /hub/client-error'))
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -706,7 +718,7 @@ def listen_link():
                     peers.LISTEN['words'] = words
                     if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
                 else: said = None
-        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener error: {type(e).__name__}: {e}", flush=True)
+        except Exception as e: errors.record('link listener', e)
         time.sleep(5)
 
 
@@ -736,9 +748,9 @@ def keeper():
             did = models.keep()
             if did and did != last: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'; '.join(did)}", flush=True)
             last = did or last
-        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} instance manager error: {e}", flush=True)
+        except Exception as e: errors.record('instance manager', e)
         try: caf, idle_since = awake(caf, idle_since)
-        except Exception: pass
+        except Exception as e: errors.record('keep-awake (caffeinate)', e)
         if crashes.WAKE.wait(20):
             crashes.WAKE.clear(); time.sleep(1)            # a request just failed: give LM Studio a moment to log why
 

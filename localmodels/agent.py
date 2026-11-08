@@ -74,7 +74,7 @@ def err_text(e):
     """An HTTPError's body, read once and kept on the error (a second read would find it gone)."""
     if not hasattr(e, '_text'):
         try: e._text = e.read().decode('utf-8', 'replace')[:400]
-        except Exception: e._text = ''
+        except Exception: e._text = ''                   # not recorded: an error body that cannot be read is just empty
     return e._text
 
 
@@ -308,7 +308,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
         wait_down = WAIT_DOWN if job.get('wait_down') is None else float(job['wait_down'])
         while True:
             try: r = post('/v1/chat/completions', req, project, kind, headers={'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
-            except Exception as e:
+            except Exception as e:                       # not recorded: a failed request is retried or raised to the job, whose log holds it
                 again, pause, what = transient(e)
                 if not again or time.time() - t_first >= wait_down: raise
                 pause = pause or RETRY_WAITS[min(k, len(RETRY_WAITS) - 1)]; k += 1
@@ -356,7 +356,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                 step(words(fn, a))
                 names = {d['name'] for d in defs(job)}
                 try: res = call(fn, a, job) if fn in names else dict(ok=False, error=f'{fn} is not one of your tools: {", ".join(sorted(names))}')
-                except Exception as e: res = dict(ok=False, error=f'{type(e).__name__}: {e}')
+                except Exception as e: res = dict(ok=False, error=f'{type(e).__name__}: {e}')   # not recorded: a tool's error is its result, for the model
                 text = json.dumps(res, default=str)
                 if len(text) > RESULT_CAP: text = text[:RESULT_CAP] + ' ... [cut: ask for less, e.g. one section or fewer lines]'
                 calls.append(dict(tool=fn, args=a, chars=len(text)))
@@ -411,7 +411,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                         else f'HTTP {e.code} from LM Studio: {body or e.reason}')
     except (urllib.error.URLError, OSError, KeyError, IndexError, ValueError, TypeError) as e:
         out['error'] = f'{type(e).__name__}: {e}'
-    except Exception as e:                                # never a job that takes the batch down with it
+    except Exception as e:                                # never a job that takes the batch down with it (not recorded: the job's own log holds it)
         out['error'] = f'{type(e).__name__}: {e}'
     usage['context'] = ctx
     if usage['peak_prompt'] > 0.85 * ctx:
@@ -459,7 +459,7 @@ def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None,
                 try:
                     r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind)
                     if not r['ok'] and not r.get('error'): r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind); r['retried'] = True
-                except Exception as e: r = dict(label=label(j.get('label')), ok=False, error=f'{type(e).__name__}: {e}', seconds=0, turns=0, calls=[], usage={})
+                except Exception as e: r = dict(label=label(j.get('label')), ok=False, error=f'{type(e).__name__}: {e}', seconds=0, turns=0, calls=[], usage={})   # not recorded: the job's result
                 return r
             for f in cf.as_completed([ex.submit(once_more, j) for j in jobs]):
                 r = f.result(); results.append(r)

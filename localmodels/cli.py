@@ -19,6 +19,8 @@
   localmodels name private <project> | public <project> private: screens show only the names set for it
   localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
+  localmodels errors [--minutes 1440] [--trace]   what the hub recorded as going wrong (endpoints, background loops, the
+                                 dashboard's render errors), newest first; --trace adds each traceback
   localmodels peer               peer status: each configured peer (state, RTT, interface, replicas, slots) and the link
                                  listener when this host serves as a peer
   localmodels peer add <name> <address>   add a peer gateway by its Thunderbolt Bridge address (port 1235 by default)
@@ -39,7 +41,8 @@
   localmodels check              self-test: sandbox suites, then live checks against the installed gateway
   localmodels install [--wait MINUTES] [--plugin] [--dry] [--no-claude]
                                  set the hub up on this Mac; run it again after changing the hub's code (it waits for a
-                                 moment with no request in flight: 1.5 minutes unless --wait says longer).
+                                 moment with no request in flight: 1.5 minutes unless --wait says longer; a change to the
+                                 dashboard page alone is replaced in place at once, with no restart).
                                  --plugin: installed as a Claude Code plugin, which brings the tools. --dry: say what
                                  would be done, write nothing. --no-claude: no MCP registration, no signpost line
   localmodels uninstall          undo install
@@ -65,7 +68,7 @@ _HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.pa
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_code.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -128,7 +131,7 @@ def status():
             print('  tokens since load: ' + ' · '.join(f"{dash.short(i)} {c['tokens'] / 1000:.0f}k" + (f" ({int(100 * c['share'])}% of recycle threshold)" if c.get('share') is not None else '')
                                               for i, c in v['copies'].items()))
         if v.get('job'): print('  ' + recycle.words(v['job']))
-    except Exception as e: print(f'  (could not read per-instance token counts: {e})')
+    except Exception as e: print(f'  (could not read per-instance token counts: {e})')   # not recorded: shown to the person running the command
     for line in crash_lines(): print(line)
     print('clients:' if users else 'clients: none')
     for r in users:
@@ -224,7 +227,7 @@ def peer_lines(door_up=True):
         out.append('  link listener: ' + ((d or {}).get('listening') or ('gateway not running' if not door_up else
                                                                        'no status (gateway runs code without peer support: localmodels install)')))
         try: out += [f'  peer report warning: {wn}' for wn in (peers.report().get('keeper') or {}).get('warnings') or []]
-        except Exception as e: out.append(f'  peer report error: {type(e).__name__}: {e}')
+        except Exception as e: out.append(f'  peer report error: {type(e).__name__}: {e}')   # not recorded: shown to the person running the command
     return out
 
 
@@ -580,6 +583,29 @@ def _loaded(label=LABEL):
     return _launchctl('print', f'gui/{os.getuid()}/{label}').returncode == 0
 
 
+HOT = (os.path.join('localmodels', 'dash.html'),)     # read from disk on every request (web.page): changed alone, replaced in place
+
+
+def code_changes():
+    """The files that differ between this repo's code and the installed copy, repo-relative."""
+    def files(root):
+        return {os.path.relpath(f, root) for f in glob.glob(os.path.join(root, 'localmodels', '*')) if os.path.isfile(f) and not f.endswith('.pyc')}
+    rels = sorted(files(HOME) | files(INSTALLED) | {os.path.join('bin', 'localmodels'), 'LICENSE', os.path.join('.claude-plugin', 'plugin.json')})
+    def same(rel):
+        a, b = os.path.join(HOME, rel), os.path.join(INSTALLED, rel)
+        if not os.path.exists(a) and not os.path.exists(b): return True
+        try: return open(a, 'rb').read() == open(b, 'rb').read()
+        except OSError: return False
+    return [r for r in rels if not same(r)]
+
+
+def hot_swap(changes):
+    """Replace files the gateway reads per request in the installed copy, each atomically: no restart, nothing in flight touched."""
+    for rel in changes:
+        dst = os.path.join(INSTALLED, rel); tmp = dst + '.new'
+        shutil.copy2(os.path.join(HOME, rel), tmp); os.replace(tmp, dst)
+
+
 def deploy():
     """Copy the hub's code to where launchd runs the door from (macOS keeps background programs out of ~/Documents)."""
     tmp = INSTALLED + '.new'
@@ -694,30 +720,37 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         print(f'0. the settings file {llmshare.MODELS} written, fitted to this Mac: {_fitted_words(fitted)} (edit it; the gateway reloads it on change)')
     else: print(f'0. the settings: {llmshare.MODELS}')
     running = _loaded() or any(_loaded(o) for o in OLD_LABELS)
-    if running and not quiet(wait):
+    changes = code_changes() if running and os.path.isdir(INSTALLED) else None
+    hot = bool(changes) and all(c in HOT for c in changes)
+    if hot:                                                 # the page alone: in place, while batches run (a restart waits for quiet)
+        hot_swap(changes)
+        print(f"1. {', '.join(changes)} replaced in place in {INSTALLED} (read per request): no gateway restart, nothing in flight touched; reload the page")
+        r = None
+    elif running and not quiet(wait):
         print(f'the gateway stayed busy for {wait / 60:.1f} minutes ({len(llmshare.inflight())} requests in flight): nothing changed; '
               'try again when it is quiet, or: localmodels install --wait 480')
         return 3
-    with llmshare.swapping(wait=120) as got:                    # no load or recycle half done when the door restarts
-        if not got: print('a swap or a reload is under way: try again in a moment'); return 3
-        for o in OLD_LABELS:
-            if _loaded(o):
-                _launchctl('bootout', f'{uid}/{o}')
-                try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{o}.plist'))
-                except OSError: pass
-                print(f'   (the gateway under its old label {o} is stopped; it restarts as {LABEL})')
-        deploy()
-        print(f'1. gateway code copied to {INSTALLED} ({digest(INSTALLED)})')
-        plist = _plist()
-        try: changed = plistlib.load(open(PLIST, 'rb')) != plist
-        except (OSError, ValueError): changed = True
-        os.makedirs(os.path.dirname(PLIST), exist_ok=True)
-        with open(PLIST, 'wb') as f: plistlib.dump(plist, f)
-        if _loaded() and changed: _launchctl('bootout', f'{uid}/{LABEL}'); time.sleep(1); r = _launchctl('bootstrap', uid, PLIST)
-        elif _loaded(): r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}')
-        else: r = _launchctl('bootstrap', uid, PLIST)
+    if not hot:
+        with llmshare.swapping(wait=120) as got:                    # no load or recycle half done when the door restarts
+            if not got: print('a swap or a reload is under way: try again in a moment'); return 3
+            for o in OLD_LABELS:
+                if _loaded(o):
+                    _launchctl('bootout', f'{uid}/{o}')
+                    try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{o}.plist'))
+                    except OSError: pass
+                    print(f'   (the gateway under its old label {o} is stopped; it restarts as {LABEL})')
+            deploy()
+            print(f'1. gateway code copied to {INSTALLED} ({digest(INSTALLED)})')
+            plist = _plist()
+            try: changed = plistlib.load(open(PLIST, 'rb')) != plist
+            except (OSError, ValueError): changed = True
+            os.makedirs(os.path.dirname(PLIST), exist_ok=True)
+            with open(PLIST, 'wb') as f: plistlib.dump(plist, f)
+            if _loaded() and changed: _launchctl('bootout', f'{uid}/{LABEL}'); time.sleep(1); r = _launchctl('bootstrap', uid, PLIST)
+            elif _loaded(): r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}')
+            else: r = _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
-    print(f"2. gateway starts at login ({PLIST}): {'listening on ' + llmshare.HUB if up else 'NOT responding: ' + (r.stderr.strip() or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
+    print(f"2. gateway starts at login ({PLIST}): {'listening on ' + llmshare.HUB if up else 'NOT responding: ' + ((r.stderr.strip() if r else '') or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
     if up and retire_loader(dry=True): print('   ' + retire_loader())
     if plugin:
         print("3. the hub's MCP tools come with the Claude Code plugin (its .mcp.json): nothing registered here")
@@ -850,6 +883,20 @@ def _at(word):
     return at + 86400 if at <= time.time() else at
 
 
+def errors_cmd(minutes=1440, trace=False):
+    """localmodels errors: the error record, newest first (a repeat within a minute is counted, not repeated)."""
+    from . import errors
+    rs = errors.recent(minutes, 200)
+    span = f'{minutes / 60:g} hours' if minutes >= 120 else f'{minutes:g} minutes'
+    if not rs: print(f'no errors recorded in the last {span} ({errors.FILE})'); return 0
+    print(f'{len(rs)} error{"s" if len(rs) != 1 else ""} recorded in the last {span}, newest first ({errors.FILE}):')
+    for r in rs:
+        print(f"  {time.strftime('%d %b %H:%M:%S', time.localtime(r.get('at', 0)))}  {r.get('source')} · {r.get('where')}: {r.get('error')}"
+              + (f"  (+{r['repeats']} repeats)" if r.get('repeats') else ''))
+        if trace and r.get('trace'): print('      ' + str(r['trace']).strip().replace('\n', '\n      '))
+    return 0
+
+
 def maintenance_cmd(a):
     """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off."""
     from . import dash, maint, models
@@ -965,6 +1012,10 @@ def check():
         t(f'{name[5:-3]}: the sandbox tests pass', good, note)
     down = crashes.down()
     t('no model is down after a crash', not down, '; '.join(d['words'] for d in down) or 'localmodels crashes for the record')
+    from . import errors as _errors
+    errs = _errors.recent(60, 200)
+    t('no errors recorded in the last hour', not errs,
+      f"{len(errs)} recorded; last: {errs[0].get('source')} · {errs[0].get('where')}: {errs[0].get('error')} (localmodels errors --trace)" if errs else 'localmodels errors for the record')
     if dash.door()['stale']: print("  skip instance-manager check (the gateway runs stale code until localmodels install)")
     else:
         seen = time.time() - (crashes._read(fresh=True).get('at') or 0)
@@ -1167,6 +1218,8 @@ def main(argv):
         from . import maint; return maint.notice_main()
     if verb == 'crashes':
         d = num(a, '--days', 7.0); return crashes_cmd(d, '--scan' in a) if d is not None else 2
+    if verb == 'errors':
+        m = num(a, '--minutes', 1440.0); return errors_cmd(m, '--trace' in a) if m is not None else 2
     if verb == 'ask':
         skip = {opt(a, '--dir'), opt(a, '--schema'), opt(a, '--max-turns'), opt(a, '--model')}
         q = next((x for x in a if not x.startswith('-') and x not in skip), None)

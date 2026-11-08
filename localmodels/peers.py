@@ -33,7 +33,7 @@ on. LM Link (LM Studio's own linking) is not used: llmshare leaves its rows (dev
 """
 import collections, errno, hashlib, hmac, ipaddress, json, os, re, secrets, shlex, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 
-from . import VERSION, llmshare, maint
+from . import VERSION, errors, llmshare, maint
 
 TOKEN_FILE = os.path.join(llmshare.SHARED, 'peer-token')      # the same on every Mac of the set; mode 0600
 STATE = os.path.join(llmshare.SHARED, 'link.json')            # the front's look at its peers, written by the door
@@ -466,7 +466,7 @@ def report(front=None):
     for base, w in recycle.held_back().items(): keeper['warnings'].append(f'{base}: {w}')
     from . import dash
     try: used, total = dash.every('memory', 10, dash.memory); mem = dict(used=round(used, 1), total=round(total, 1))   # the front's memory pool (read every 10 s, not every poll)
-    except Exception: mem = None
+    except Exception as e: mem = None; errors.record('peer report: memory', e)
     return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
                 keeper=keeper, memory=mem)
@@ -677,7 +677,7 @@ def poller():
     while True:
         try:
             if LINK.peers or configured(): LINK.poll()
-        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: peer poll error: {type(e).__name__}: {e}", flush=True)
+        except Exception as e: errors.record('peer poller', e)
         WAKE.wait(1.0); WAKE.clear()
 
 
