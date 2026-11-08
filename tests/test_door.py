@@ -3,7 +3,8 @@
 crash-shaped failure (LM Studio's words, a dropped connection, or a copy gone from the listing), 503 with Retry-After when
 the resend fails too, a genuine 400 passed through, routing around a copy that is down or draining, a named copy that is
 not there, nothing loaded, a hold that runs out, a program that hangs up while it waits or during the answer, people
-before batches in the queue, a chunked request body, a route with a trailing slash, a model left down. Nothing real is
+before batches in the queue, a chunked request body, a route with a trailing slash, a model left down, and every API
+LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
 loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_door.py
 """
 import http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
@@ -17,6 +18,22 @@ ok = []
 
 def t(name, good, note=''):
     ok.append(bool(good)); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
+
+
+SSE = {   # streams as LM Studio sends them: each ends with its own last event, none with [DONE] (only OpenAI's chat does)
+    'anthropic': [('message_start', dict(type='message_start', message=dict(id='m', model=F, usage=dict(input_tokens=12, output_tokens=1)))),
+                  ('content_block_delta', dict(type='content_block_delta', index=0, delta=dict(type='text_delta', text='OK'))),
+                  ('message_delta', dict(type='message_delta', delta=dict(stop_reason='end_turn'), usage=dict(output_tokens=5))),
+                  ('message_stop', dict(type='message_stop'))],
+    'responses': [('response.created', dict(type='response.created', response=dict(id='r', model=F))),
+                  ('response.output_text.delta', dict(type='response.output_text.delta', delta='OK')),
+                  ('response.completed', dict(type='response.completed', response=dict(id='r', model=F, usage=dict(input_tokens=7, output_tokens=4))))],
+    'native-sse': [('chat.start', dict(type='chat.start', model_instance_id=F)),
+                   ('message.delta', dict(type='message.delta', content='OK')),
+                   ('chat.end', dict(type='chat.end', result=dict(model_instance_id=F, stats=dict(input_tokens=9, total_output_tokens=6))))],
+}
+SSE['anthropic-cut'] = SSE['anthropic'][:2]
+SSE['anthropic-error'] = SSE['anthropic'][:2] + [('error', dict(type='error', error=dict(type='api_error', message='The model has crashed')))]
 
 
 class Fake(http.server.BaseHTTPRequestHandler):
@@ -42,7 +59,16 @@ class Fake(http.server.BaseHTTPRequestHandler):
             try: self.connection.shutdown(socket.SHUT_RDWR)
             except OSError: pass
             self.close_connection = True; return
-        if what == 'crash':
+        if what in SSE:                                       # a whole stream in one of LM Studio's other formats
+            self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+            try:
+                for ev, data in SSE[what]: self.wfile.write((f'event: {ev}\n' if ev else '').encode() + b'data: ' + json.dumps(data).encode() + b'\n\n')
+                if what.endswith('-cut'): self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+            self.close_connection = True; return
+        if what == 'native':                                  # LM Studio's own REST API: the counts are in stats
+            out, code = json.dumps(dict(model_instance_id=body.get('model'), output=[dict(type='message', content='OK')], stats=dict(input_tokens=9, total_output_tokens=6))).encode(), 200
+        elif what == 'crash':
             out, code = json.dumps(dict(error='Error: The model has crashed without additional information. (Exit code: null)')).encode(), 400
         elif what == 'bad':
             out, code = json.dumps(dict(error=dict(message="Invalid 'messages': must be an array", type='invalid_request_error'))).encode(), 400
@@ -95,11 +121,11 @@ def run(box):
     def plan(*what):
         with Fake.lock: Fake.plan[:] = list(what); Fake.seen.clear()
 
-    def raw(model, tag, kind='batch', close_after=None, stream=False):
+    def raw(model, tag, kind='batch', close_after=None, stream=False, path='/v1/chat/completions'):
         """A request sent by hand over a socket; close_after: hang up that many seconds later (a program giving up)."""
         s = socket.create_connection(('127.0.0.1', gateway.PORT))
         body = json.dumps(dict(model=model, messages=[], tag=tag, stream=stream)).encode()
-        s.sendall(b'POST /v1/chat/completions HTTP/1.0\r\nHost: localhost:%d\r\nX-Kind: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % (gateway.PORT, kind.encode(), len(body)) + body)
+        s.sendall(b'POST %s HTTP/1.0\r\nHost: localhost:%d\r\nX-Kind: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % (path.encode(), gateway.PORT, kind.encode(), len(body)) + body)
         if close_after is not None: time.sleep(close_after); s.close(); return None
         return s
 
@@ -266,6 +292,48 @@ def run(box):
             try: urllib.request.urlopen(req, timeout=5); code = 200
             except urllib.error.HTTPError as e: code = e.code
         t('an unload sent through the door, in any case, naming the copy another run uses: refused (409)', code == 409, code)
+
+        print("the door: every API LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, LM Studio's own)")
+        def streamed(what, path):
+            plan(what); crashes.WAKE.clear(); crashes._seen_state['nudged'] = 0
+            s = raw(F, what, kind='test', stream=True, path=path); s.settimeout(30); data = b''
+            while True:
+                part = s.recv(65536)
+                if not part: break
+                data += part
+            s.close()
+            return data, rows_logged()[0]
+        for what, path, want in (('anthropic', '/v1/messages', (12, 5)), ('responses', '/v1/responses', (7, 4)), ('native-sse', '/api/v1/chat', (9, 6))):
+            data, row_ = streamed(what, path)
+            t(f'{path} streamed: its own last event ends it whole, nothing added, nothing flagged',
+              data.rstrip().endswith(b'}') and b'cut the answer short' not in data and b'[DONE]' not in data and not row_.get('note') and not crashes.WAKE.is_set(),
+              (data[-80:], row_.get('note')))
+            t(f'{path} streamed: its tokens are counted (they feed the recycle band)', (row_.get('prompt_tokens'), row_.get('completion_tokens')) == want,
+              (row_.get('prompt_tokens'), row_.get('completion_tokens')))
+        plan('native')
+        code, r, h = ask(tag='native', path='/api/v1/chat')
+        row_ = rows_logged()[0]
+        t("LM Studio's own API, not streamed: its tokens are counted from stats", code == 200 and (row_.get('prompt_tokens'), row_.get('completion_tokens')) == (9, 6),
+          (code, row_.get('prompt_tokens'), row_.get('completion_tokens')))
+        data, row_ = streamed('anthropic-cut', '/v1/messages')
+        t('an Anthropic stream that breaks off ends with an Anthropic error event, no [DONE]; the row says cut; the keeper looks',
+          b'event: error' in data and b'"type": "error"' in data and b'api_error' in data and b'[DONE]' not in data and 'cut' in (row_.get('note') or '') and crashes.WAKE.is_set(),
+          (data[-160:], row_.get('note')))
+        data, row_ = streamed('anthropic-error', '/v1/messages')
+        t("a stream LM Studio ends with its own error event: passed as it is, nothing added; the row says so; the keeper looks",
+          data.rstrip().endswith(b'crashed"}}') and b'cut the answer short' not in data and 'with an error' in (row_.get('note') or '') and crashes.WAKE.is_set(),
+          (data[-100:], row_.get('note')))
+        saved = list(rows); rows.clear(); plan()
+        req = urllib.request.Request(url + '/v1/messages', data=json.dumps(dict(model=F, messages=[])).encode(), headers={'Content-Type': 'application/json', 'X-Kind': 'test'})
+        try: urllib.request.urlopen(req, timeout=10); code, err = 200, {}
+        except urllib.error.HTTPError as e: code, err = e.code, json.loads(e.read() or b'{}')
+        t("the door's own refusal on /v1/messages is shaped as Anthropic's clients read it, with Retry-After",
+          code == 503 and err.get('type') == 'error' and err.get('error', {}).get('type') == 'overloaded_error' and err['error'].get('message'), (code, err))
+        req = urllib.request.Request(url + '/v1/chat/completions', data=json.dumps(dict(model=F, messages=[])).encode(), headers={'Content-Type': 'application/json', 'X-Kind': 'test'})
+        try: urllib.request.urlopen(req, timeout=10); code, err = 200, {}
+        except urllib.error.HTTPError as e: code, err = e.code, json.loads(e.read() or b'{}')
+        t('the same refusal on the OpenAI path keeps the shape programs already read', code == 503 and isinstance(err.get('error'), str), (code, err))
+        rows[:] = saved
         st_ = llmshare.waiting_here()
         t('nobody waits once the queue is empty', st_ == dict(people=0, others=0), st_)
     finally:

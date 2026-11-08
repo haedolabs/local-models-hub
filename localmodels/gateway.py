@@ -39,6 +39,19 @@ SWAP = re.compile(r'/(load|unload)$')
 PASS = ('content-type', 'authorization', 'accept', 'x-api-key', 'anthropic-version', 'openai-organization')
 GONE = re.compile(r'crashed|no models? (?:are |is )?loaded|not loaded|model_not_found|has been unloaded|model unloaded', re.I)
 LOG_MAX, RETRY_AFTER, AWAKE_FOR = 20_000_000, 30, 600
+# How each of LM Studio's APIs ends a stream that came out whole: OpenAI's chat and completions with `data: [DONE]`, the
+# others with a last event of their own (Anthropic's messages, OpenAI's responses, LM Studio's own chat). An error event
+# is an ending too: LM Studio said what went wrong, so nothing is cut short.
+LAST_EVENTS = frozenset((b'message_stop', b'response.completed', b'response.incomplete', b'response.failed', b'chat.end', b'error'))
+FAILED_EVENTS = frozenset((b'response.failed', b'error'))    # whole, but the keeper looks: a crash can end a stream this way
+# What the door adds when a stream breaks off, in the stream's own format, so the program's own client reads it as an error.
+CUT = {
+    'openai': b'data: {"error": "LM Studio cut the answer short"}\n\ndata: [DONE]\n\n',
+    'anthropic': b'event: error\ndata: {"type": "error", "error": {"type": "api_error", "message": "LM Studio cut the answer short"}}\n\n',
+    'responses': b'event: error\ndata: {"type": "error", "code": "server_error", "message": "LM Studio cut the answer short"}\n\n',
+    'native': b'event: error\ndata: {"type": "error", "error": {"type": "server_error", "message": "LM Studio cut the answer short"}}\n\n',
+}
+ANTHROPIC_ERROR = {400: 'invalid_request_error', 403: 'permission_error', 404: 'not_found_error', 409: 'invalid_request_error', 503: 'overloaded_error'}
 _n, _lock, _live = itertools.count(1), threading.Lock(), {}
 _start = {'at': 0.0, 'since': time.time(), 'lock': threading.Lock()}
 
@@ -122,6 +135,36 @@ def start_lmstudio(why='a request could not connect'):
         return False
 
 
+def dialect(route):
+    """Which of LM Studio's APIs a route is: 'anthropic' (/v1/messages), 'responses' (/v1/responses), 'native'
+    (LM Studio's own /api/...), or 'openai' (chat, completions, embeddings)."""
+    if route.endswith('/messages'): return 'anthropic'
+    if route.endswith('/responses'): return 'responses'
+    if route.startswith('/api/'): return 'native'
+    return 'openai'
+
+
+def counts(obj):
+    """The token counts in an answer or in one stream event, wherever its API puts them: `usage` (OpenAI, Anthropic's
+    message_delta), `message.usage` (Anthropic's message_start), `response.usage` (OpenAI's responses), `stats` or
+    `result.stats` (LM Studio's own). -> {'prompt_tokens': n, 'completion_tokens': n}, holding only what it says."""
+    if not isinstance(obj, dict): return {}
+    inner = lambda k, sub: obj.get(k).get(sub) if isinstance(obj.get(k), dict) else None
+    out = {}
+    for u in (obj.get('usage'), inner('message', 'usage'), inner('response', 'usage'), obj.get('stats'), inner('result', 'stats')):
+        if not isinstance(u, dict): continue
+        p = u.get('prompt_tokens') or u.get('input_tokens')
+        c = u.get('completion_tokens') or u.get('output_tokens') or u.get('total_output_tokens')
+        if isinstance(p, int): out['prompt_tokens'] = max(p, out.get('prompt_tokens', 0))
+        if isinstance(c, int): out['completion_tokens'] = max(c, out.get('completion_tokens', 0))
+    return out
+
+
+def merge(a, b):
+    """Counts from two stream events together: each count is the largest said (streams repeat or grow them, never shrink)."""
+    return {k: max(a.get(k, 0), b.get(k, 0)) for k in set(a) | set(b)}
+
+
 def _usage(u):
     u = u or {}
     return (u.get('prompt_tokens') or u.get('input_tokens') or 0), (u.get('completion_tokens') or u.get('output_tokens') or 0)
@@ -170,11 +213,13 @@ class Upstream:
 class Door(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     server_version = f'localmodels-hub/{VERSION}'
-    _sent = False
+    _sent, _dialect = False, 'openai'
 
     def log_message(self, *a): pass
 
     def _send(self, code, obj, retry_after=None):
+        if self._dialect == 'anthropic' and code >= 400 and isinstance(obj, dict) and isinstance(obj.get('error'), str):
+            obj = dict(type='error', error=dict(type=ANTHROPIC_ERROR.get(code, 'api_error'), message=obj['error']))   # as Anthropic's SDKs read it
         b = json.dumps(obj).encode()
         try:
             self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b)))
@@ -243,6 +288,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         route = path.split('?')[0].rstrip('/')
         path = route + ('?' + path.split('?', 1)[1] if '?' in path else '')   # LM Studio's router knows no trailing slash
         route = route.lower()
+        self._dialect = dialect(route)
         if method == 'POST' and SWAP.search(route):
             names = [str(j[k]) for k in ('model', 'identifier', 'instance_id') if j.get(k)]
             why = llmshare.swap_blockers(names or [r['id'] for r in llmshare.loaded(fresh=True)])
@@ -395,7 +441,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             if stream and 'event-stream' in ctype:
                 self.send_response(code); self.send_header('Content-Type', ctype); self.send_header('Cache-Control', 'no-cache')
                 self.end_headers(); self._sent = True
-                whole = False
+                whole = failed = False
                 while True:
                     try: line = resp.readline()
                     except (http.client.HTTPException, OSError): line = None   # LM Studio's end broke off
@@ -403,20 +449,29 @@ class Door(http.server.BaseHTTPRequestHandler):
                     if a: line = line.replace(a, b)
                     self.wfile.write(line)
                     if line.startswith(b'data: [DONE]'): whole = True
-                    if line.startswith(b'data: {') and b'"usage"' in line:
-                        try: usage = json.loads(line[6:]).get('usage') or usage
-                        except ValueError: pass
+                    elif line.startswith(b'event: '):
+                        name = line[7:].strip()
+                        if name in LAST_EVENTS: whole = True; failed = failed or name in FAILED_EVENTS
+                    elif line.startswith(b'data: {') and (b'"usage"' in line or b'"stats"' in line
+                                                          or (len(line) < 200 and b'"type"' in line and b'delta' not in line)):   # never a token chunk
+                        try: ev = json.loads(line[6:])
+                        except ValueError: ev = None
+                        if isinstance(ev, dict):
+                            usage = merge(usage, counts(ev))
+                            name = str(ev.get('type', '')).encode()
+                            if name in LAST_EVENTS: whole = True; failed = failed or name in FAILED_EVENTS   # a stream without event: lines
                     if line in (b'\n', b'\r\n'): self.wfile.flush()
-                if not whole:                                                # the stream ended without [DONE]: cut short
+                if whole and failed: self._note = 'LM Studio ended the answer with an error'; crashes.nudge()
+                if not whole:                                                # the stream ended without its last event: cut short
                     self._note = 'LM Studio cut the answer short'; crashes.nudge()
-                    self.wfile.write(b'data: {"error": "LM Studio cut the answer short"}\n\ndata: [DONE]\n\n')
+                    self.wfile.write(CUT.get(self._dialect, CUT['openai']))
                 self.wfile.flush()
                 return code, usage, None
             data = resp.read()
             if a: data = data.replace(a, b)
-            if b'"usage"' in data[-4000:] or len(data) < 200_000:
-                try: usage = (json.loads(data) or {}).get('usage') or {}
-                except (ValueError, AttributeError): pass
+            if len(data) < 20_000_000:                                    # the counts sit at the top level or one deep
+                try: usage = counts(json.loads(data))
+                except ValueError: pass
             self.send_response(code); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(data)))
             self.end_headers(); self.wfile.write(data); self._sent = True
             return code, usage, None
