@@ -62,10 +62,14 @@ def _events(rows, inflight=()):
 
 
 def _episodes(evs):
-    """A key's events split into runs: a pause of GAP between requests starts a new one."""
-    eps, last_end = [], None
+    """A key's events split into runs: a pause of GAP between requests starts a new one, and so does a named run whose
+    count drops below half of where it had got to (the same run started again; requests sent side by side arrive a
+    few units out of order, never half)."""
+    eps, last_end, best = [], None, 0
     for e in sorted(evs, key=lambda e: e['start']):
-        if not eps or (last_end is not None and e['start'] - last_end > GAP): eps.append([])
+        again = e.get('done') is not None and best >= 4 and e['done'] < best / 2
+        if not eps or again or (last_end is not None and e['start'] - last_end > GAP): eps.append([]); best = 0
+        if e.get('done') is not None: best = max(best, e['done'])
         eps[-1].append(e)
         last_end = max(last_end or 0, e['end'] or e['start'])
     return eps
@@ -110,9 +114,29 @@ def history(rows):
     return out
 
 
+def _job(ep, now):
+    """The job a named run is on now: the phase its latest step names ("check 10 of 50"), counted the way a phase from step
+    words is (items answered), with its own pace, time left and finish. None when its steps do not say where they are."""
+    steps = [(e, parse_step(e.get('step'))) for e in ep]
+    steps = [(e, p) for e, p in steps if p]
+    if not steps: return None
+    name = max(steps, key=lambda x: x[0]['start'])[1][0]
+    evs = [dict(e, kind='phase', n=p[1], total=p[2]) for e, p in steps if p[0] == name]
+    total = max(evs, key=lambda e: e['start'])['total']
+    pts, _ = _points(evs)
+    done = pts[-1][1] if pts else 0
+    started = min(e['start'] for e in evs)
+    pace = _pace(pts, 0, started, now)
+    left = 0 if done >= total else int((total - done) * pace) if pace else None
+    return dict(name=name, done=done, total=max(total, done), pct=min(100, int(100 * done / total)), left=left,
+                finish=now + left if left is not None else None, started=started)
+
+
 def progress(rows, inflight=(), now=None, history=None):
     """{(project, name): {name, project, kind ('run' or 'phase'), phase, done, total, pct, left, basis, started}} for each
-    run going on now. kind 'run': the program said it with X-Run; 'phase': read from its step words."""
+    run going on now, with finish (now plus left, a time) and scope: kind "run" (the program said it with X-Run) covers the
+    whole run, kind "phase" (read from its step words) only that phase. A run also carries job: the phase it is on now,
+    with its own done, total, pct, left, finish and started (_job)."""
     import time
     now = now or time.time()
     out = {}
@@ -136,7 +160,9 @@ def progress(rows, inflight=(), now=None, history=None):
             if done - first >= FEW and pace: left, basis = (total - done) * pace, 'this run'
             elif seed: left, basis = (total - done) * seed, 'the last run'
             elif pace: left, basis = (total - done) * pace, 'this run so far'
+        left = int(left) if left is not None else None
         out[key] = dict(name=key[1], project=key[0], kind=ep[0]['kind'], phase=phase if ep[0]['kind'] == 'run' else None, done=done,
-                        total=total, pct=min(100, int(100 * done / total)) if total else None,
-                        left=int(left) if left is not None else None, basis=basis if total else None, started=started)
+                        total=total, pct=min(100, int(100 * done / total)) if total else None, left=left,
+                        finish=now + left if left is not None else None, basis=basis if total else None, started=started,
+                        scope='whole run' if ep[0]['kind'] == 'run' else 'this phase', job=_job(ep, now) if ep[0]['kind'] == 'run' else None)
     return out

@@ -156,15 +156,18 @@ def live_runs():
 
 
 def attach_runs(out):
-    """Give each program its run: the one it named (X-Run) before a phase read from its step words, the latest first.
-    The row's 'since' becomes when that run began, not when the program first used a model."""
+    """Give each program its batch and its job: a run it named (X-Run) is the batch, and the phase it is on now (its step
+    words, "check 10 of 50") the job; a phase read from step words alone is a job with no batch size known. The row's
+    'since' becomes when the batch (or the job) began, not when the program first used a model."""
     live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
     for r in out:
+        r.setdefault('job', None)
         if r.get('batch'): continue
         mine = [g for g in live if g['project'] == r['project']]
         if not mine: continue
         g = mine[0]
-        r['batch'] = dict(g, now=[])
+        if g['kind'] == 'run': r['batch'], r['job'] = dict(g, now=[]), g.get('job')
+        else: r['job'] = dict(g)
         r['since'] = g['started']
 
 
@@ -339,7 +342,11 @@ def fit(line, w):
 
 
 def _left(sec):
-    return f'{sec}s left' if sec < 90 else f'{round(sec / 60)}m left' if sec < 5400 else f'{sec / 3600:.1f}h left'
+    sec = int(sec)
+    if sec < 90: return f'{sec}s left'
+    if sec < 5400: return f'{round(sec / 60)}m left'
+    if sec < 172800: return f'{sec // 3600}h{round(sec % 3600 / 60):02d}m left'
+    return f'{sec // 86400}d{round(sec % 86400 / 3600)}h left'
 
 
 def prog(pct, left, since):
@@ -379,15 +386,17 @@ def show(s, w=80, h=24):
             state = k(f"{r['answering']} answering", 'y', 'B') + (k(f" · {r['waiting']} waiting", 'y') if r['waiting'] else '')
         elif r['direct']: state = k(f"{r['direct']} connected", 'y')
         else: state = k('between requests', 'd')
-        if b.get('total'):
-            state = prog(b.get('pct'), b.get('left'), r['since']) + ' ' + f"{b['done']}/{b['total']}"
-            label = b.get('phase') or (b.get('name') if b.get('kind') == 'phase' else None)
-            if label: state += k(f" · {label[:24]}", 'd')
+        lines = []                                  # the batch and the job, each a bar with its time left and finish
+        for word, p in (('batch', b if b.get('total') else None), ('job', r.get('job'))):
+            if not p or not p.get('total'): continue
+            fin = k(f" → {time.strftime('%H:%M', time.localtime(p['finish']))}", 'c') if p.get('finish') else ''
+            lines.append(f"    {k(word.ljust(5), 'B')} {prog(p.get('pct'), p.get('left'), r['since'])} {p['done']}/{p['total']}{fin} {k((p.get('name') or '')[:24], 'd')}")
         who = k('← Claude', 'm', 'B') + (f" · {r['title']}" if r.get('title') else '') if (r.get('session') or r.get('host_session')) else \
             k(f"← {r['app']}", 'd') if r.get('app') else ''
         flag = k(' ⚠ straight to LM Studio', 'r') if r['direct'] and r.get('via') != 'hub' else ''
-        step = k(f" · {r['step'][:30]}", 'd') if r.get('step') and not b.get('total') else ''
+        step = k(f" · {r['step'][:30]}", 'd') if r.get('step') and not lines else ''
         L.append(f"  {k(r['project'][:14].ljust(14), 'B')} {kind_words(r):<9} {state}{step}{flag} {k(ago(r['since']), 'd')} {who}")
+        L += lines
         for j in b.get('now', [])[:3]:
             L.append(f"    {k('agent', 'y')} {(j['job'] + (' · ' + j['step'] if j.get('step') else ''))[:44]:<44} {prog(j['pct'], j['left'], j['since'])}")
     if not L: L.append('  ' + k('nothing is using a local model', 'd'))

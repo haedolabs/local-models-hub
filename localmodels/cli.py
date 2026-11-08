@@ -49,8 +49,28 @@ def ago(t): return time.strftime('%H:%M', time.localtime(t))
 
 
 def ago_left(s):
-    """Seconds ahead in plain words: 40 s, 12 min, 2.5 h."""
-    return f'{int(s)} s' if s < 90 else f'{round(s / 60)} min' if s < 5400 else f'{s / 3600:.1f} h'
+    """A stretch of time in the unit that reads best: 40 s, 12 min, 2 h 15 min, 3 d 4 h."""
+    s = max(0, int(round(s)))
+    if s < 90: return f'{s} s'
+    if s < 5400: return f'{round(s / 60)} min'
+    if s < 172800: h, m = s // 3600, round(s % 3600 / 60); return f'{h} h' + (f' {m} min' if m else '')
+    d, h = s // 86400, round(s % 86400 / 3600); return f'{d} d' + (f' {h} h' if h else '')
+
+
+def finish_words(t):
+    """A time ahead in local time, with the day when it is not today."""
+    d, today = time.localtime(t), time.localtime()
+    day = '' if d.tm_yday == today.tm_yday and d.tm_year == today.tm_year else \
+        'tomorrow ' if time.localtime(time.time() + 86400).tm_yday == d.tm_yday else time.strftime('%a ', d)
+    return day + time.strftime('%H:%M', d)
+
+
+def track_words(word, p):
+    """'batch nightly: 109 of 150, 47 min left, done about 20:41'."""
+    if not p or not p.get('total'): return ''
+    when = (f"{ago_left(p['left'])} left, done about {finish_words(p['finish'])}" if p.get('left') else 'finishing') if p.get('left') is not None \
+        else 'estimating the time left' if p['done'] < p['total'] else 'done'
+    return f" · {word}{' ' + p['name'] if p.get('name') else ''}: {p['done']} of {p['total']}, {when}"
 
 
 def num(a, name, default):
@@ -89,8 +109,8 @@ def status():
         state = (f"{r['answering']} answering" + (f", {r['waiting']} waiting" if r['waiting'] else '')) if r['answering'] or r['waiting'] else \
             f"{r['direct']} connected straight to LM Studio (not through the hub)" if r['direct'] else 'between requests'
         who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
-        print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or {}).get('started') else 'since'} {ago(r['since'])}"
-              + (f" · {b.get('name') + ': ' if b.get('name') else ''}{b['done']} of {b['total']} done" + (f", about {ago_left(b['left'])} left" if b.get('left') else ', estimating the time left' if b.get('done', 0) < b['total'] else '') if b.get('total') else '') + (f" · {r['step']}" if r.get('step') and not b.get('total') else '') + who)
+        print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or r.get('job') or {}).get('started') else 'since'} {ago(r['since'])}"
+              + (track_words('batch', b) if b.get('total') else '') + track_words('job', r.get('job')) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
     work = [c for c in cs if c['working']]
     print(f"Claude Code: {len(work)} working" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
           + f", {len(cs) - len(work)} idle in the last 3 hours")
