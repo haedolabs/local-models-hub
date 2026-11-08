@@ -124,7 +124,7 @@ Then point clients at `http://localhost:1235/v1` (any API key), or `http://local
 {
  "families": {
   "qwen/qwen3.6-35b-a3b": {"key": "qwen/qwen3.6-35b-a3b", "copies": 2, "context": 65536, "parallel": 4,
-                           "recycle": {"tokens": 300000, "soft": 220000, "before_batch": 0.5}}
+                           "recycle": {"tokens": 300000, "written": 150000, "soft": 220000, "before_batch": 0.5}}
  },
  "batch_at_once": 8,
  "headroom_gb": 8

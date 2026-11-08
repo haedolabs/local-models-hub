@@ -14,9 +14,12 @@ resending requests (crashes.py, gateway.py) stays the safety net.
 This is what web servers do with workers that leak (gunicorn's max_requests, Apache's MaxRequestsPerChild): recycle each
 worker after a set amount of work, one at a time and staggered, so the service never stops.
 
-How: models.json gives a family "recycle": {"tokens": 300000, "soft": 220000, "before_batch": 0.5, "requests": 0}, tokens
-processed since the copy was loaded, counted from the hub's request log ("recycle": false turns it off; "requests" is a
-backstop for clients that report no usage, 0 = off). The door's keeper (models.keep, every 20 s) asks plan(): a copy past
+How: models.json gives a family "recycle": {"tokens": 300000, "written": 150000, "soft": 220000, "before_batch": 0.5,
+"requests": 0}: tokens processed and tokens written (the answers alone) since the copy was loaded, counted from the hub's
+request log; a copy is as far along its band as the count furthest along its own threshold ("recycle": false turns it
+off; "written": 0 leaves the answers uncounted; "requests" is a backstop for clients that report no usage, 0 = off).
+With long answers every crash measured came at 197,524 to 213,269 tokens written (295,340 to 478,356 processed), so the
+written count is the tighter one there; with short answers the processed count reaches its threshold first. The door's keeper (models.keep, every 20 s) asks plan(): a copy past
 "tokens" is marked DRAINING, the door sends it nothing new (gateway.generate leaves it out; a lone copy's requests, or
 requests that name that copy, are held as after a crash), its requests in flight finish, and when none is left (the slot
 locks and LM Studio's own status agree) models.keep unloads it and loads it again with the family's settings, under the
@@ -36,7 +39,7 @@ import time
 
 from . import crashes, llmshare
 
-DEFAULT = dict(tokens=300_000, soft=220_000, before_batch=0.5, requests=0)
+DEFAULT = dict(tokens=300_000, written=150_000, soft=220_000, before_batch=0.5, requests=0)
 DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try again after; between two recycles of a family; a fresh-start request lasts
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
 _held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
@@ -91,11 +94,29 @@ def counts(copy, since):
     return out[copy]
 
 
+def _shares(c, th):
+    out = dict(tokens=c['tokens'] / max(1, th['tokens']))
+    if th.get('written'): out['written'] = c['written'] / th['written']
+    if th.get('requests'): out['requests'] = c['requests'] / th['requests']
+    return out
+
+
 def share(c, th):
-    """How far along its band a copy is: 1.0 = at the hard threshold."""
-    s = c['tokens'] / max(1, th['tokens'])
-    if th.get('requests'): s = max(s, c['requests'] / th['requests'])
-    return s
+    """How far along its band a copy is (1.0: at the hard threshold), by whichever count is furthest along its own
+    threshold: tokens processed, tokens written, or requests."""
+    return max(_shares(c, th).values())
+
+
+def lead(c, th):
+    """The count furthest along its threshold: 'tokens', 'written' or 'requests'."""
+    s = _shares(c, th)
+    return max(s, key=s.get)
+
+
+def _work(c, th):
+    """A copy's work since load against its band, in words."""
+    return (f"{c['tokens']:,} tokens processed ({c['written']:,} written, {c['requests']} requests) since load; threshold {th['tokens']:,} processed"
+            + (f" or {th['written']:,} written" if th.get('written') else ''))
 
 
 def drift(row, f):
@@ -147,10 +168,10 @@ def plan(rows, busy=None):
             s = share(c, th)
             idle = not busy.get(llmshare._safe(i)) and have[i].get('state') == 'IDLE'
             wrong = drift(have[i], f)
-            if s >= 1: why, rank = f"recycle threshold reached: {c['tokens']:,} tokens processed since load ({c['requests']} requests), threshold {th['tokens']:,}", 3 + s
+            if s >= 1: why, rank = f"recycle threshold reached: {_work(c, th)}", 3 + s
             elif wrong and idle: why, rank = f'load parameters differ from the family settings ({wrong})', 2.5
-            elif fresh and s >= th['before_batch']: why, rank = f"batch starting with {c['tokens']:,} tokens processed since load, past {int(th['before_batch'] * 100)}% of its recycle threshold ({th['tokens']:,})", 2 + s
-            elif idle and c['tokens'] >= th['soft']: why, rank = f"idle with {c['tokens']:,} tokens processed since load, past the soft threshold ({th['soft']:,})", 1 + s
+            elif fresh and s >= th['before_batch']: why, rank = f"batch starting at {int(s * 100)}% of its recycle threshold, past {int(th['before_batch'] * 100)}%: {_work(c, th)}", 2 + s
+            elif idle and s >= th['soft'] / max(1, th['tokens']): why, rank = f"idle at {int(s * 100)}% of its recycle threshold, past the soft threshold ({int(100 * th['soft'] / max(1, th['tokens']))}%): {_work(c, th)}", 1 + s
             else: continue
             if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
                 _held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
@@ -237,8 +258,8 @@ def view(rows):
         f = fams.get(base)
         th = thresholds(f) if f else None
         c = counts(x['id'], _since(seen, x['id']))
-        out[x['id']] = dict(c, share=round(share(c, th), 2) if th else None, drift=drift(x, f) if f else None,
-                            band=dict(tokens=th['tokens'], soft=th['soft'], requests=th.get('requests') or 0) if th else None)
+        out[x['id']] = dict(c, share=round(share(c, th), 2) if th else None, by=lead(c, th) if th else None, drift=drift(x, f) if f else None,
+                            band=dict(tokens=th['tokens'], written=th.get('written') or 0, soft=th['soft'], requests=th.get('requests') or 0) if th else None)
     r = st.get('recycle') or {}
     return dict(copies=out, job=r.get('job'), last=r.get('last') or {})
 
