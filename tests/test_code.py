@@ -33,6 +33,28 @@ def silent_handlers():
     return out
 
 
+# ---------------------------------------------------------------- every sibling module a file uses, it imports
+def unimported_siblings():
+    """Names of the package's own modules used as `name.attr` in a file that never imports that name. -> ['file: name']."""
+    import ast
+    pkg = os.path.join(ROOT, 'localmodels')
+    mods = {f[:-3] for f in os.listdir(pkg) if f.endswith('.py') and f != '__init__.py'}
+    out = []
+    for f in sorted(os.listdir(pkg)):
+        if not f.endswith('.py'): continue
+        tree = ast.parse(open(os.path.join(pkg, f)).read())
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                bound |= {(a.asname or a.name).split('.')[0] for a in node.names}
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bound |= {a.arg for a in node.args.args + node.args.kwonlyargs}
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store): bound.add(node.id)
+        used = {n.value.id for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods}
+        out += [f'{f}: {name}' for name in sorted(used - bound - {f[:-3]})]
+    return out
+
+
 # ---------------------------------------------------------------- the dashboard's script: nothing called that is not defined
 KEYWORDS = {'if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'new', 'await', 'async', 'do', 'else', 'in',
             'of', 'instanceof', 'void', 'delete', 'throw', 'yield', 'super', 'import', 'case'}
@@ -158,6 +180,16 @@ def main():
         print('no exception is swallowed silently')
         bad = silent_handlers()
         t('every broad handler records the error in the error record, or says why not (# not recorded: ...)', not bad, '; '.join(bad))
+        bad = unimported_siblings()
+        t("every sibling module a file uses (name.attr), it imports (models.py used errors without it)", not bad, '; '.join(bad))
+        reuse = [f for f in os.listdir(os.path.join(ROOT, 'localmodels')) if f.endswith('.py') and 'SO_REUSEPORT' in open(os.path.join(ROOT, 'localmodels', f)).read()]
+        t('no SO_REUSEPORT anywhere: one listening socket per address, shared by inheritance', not reuse, reuse)
+        py39 = '/usr/bin/python3'
+        if os.path.exists(py39):
+            import subprocess
+            r = subprocess.run([py39, '-c', 'import sys, py_compile, glob; [py_compile.compile(f, doraise=True, cfile=None, optimize=-1) or None for f in glob.glob(sys.argv[1] + "/*.py")]; print(sys.version_info[:2])',
+                                os.path.join(ROOT, 'localmodels')], capture_output=True, text=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPYCACHEPREFIX=os.path.join(box, 'pyc')))
+            t(f'every module compiles under {py39} (the oldest Python the hub supports)', r.returncode == 0, (r.stdout + r.stderr)[-300:])
         print("the dashboard's script")
         page = open(os.path.join(ROOT, 'localmodels', 'dash.html')).read()
         missing = js_undefined(page)
