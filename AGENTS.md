@@ -4,6 +4,7 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 
 ## Layout
 - `localmodels/gateway.py` — the gateway: attributes each request, acquires a slot, forwards to LM Studio, logs one line, holds and resends across a crash.
+- `localmodels/supervisor.py`, `worker.py` — zero-downtime deploys: the supervisor (standard library only, nothing else from the package) holds the listening sockets and runs workers from immutable `releases/<digest>`; a new worker warms up and self-tests before it accepts, the old one drains with no deadline, roles (instance manager, peer poller, memory sampler, link listener) are flocks held by one serving worker.
 - `localmodels/llmshare.py` — the sharing rules: slot locks, leases, the swap lock, the model listing, the readers of the shared state.
 - `localmodels/models.py`, `crashes.py`, `recycle.py` — the instance manager: replicas kept loaded, crashed instances reloaded, instances recycled before the crash threshold.
 - `localmodels/peers.py` — other Macs' gateways as more replicas of a family: the shared token, a peer's report, the front's link (polls, backoff, free slots, model fingerprints), the network checks.
@@ -12,7 +13,7 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 - `localmodels/whois.py`, `sessions.py` — who is behind a connection; every Claude Code session on the Mac.
 - `localmodels/web.py`, `dash.html`, `dash.py` — the dashboard and the terminal dash.
 - `localmodels/cli.py`, `bin/localmodels` — the command.
-- `tests/` — sandbox tests with a fake LM Studio (two gateways for peers); `tools/` — measurements.
+- `tests/` — sandbox tests with a fake LM Studio (two gateways for peers; `test_handoff.py` deploys under load with a supervisor); `tools/` — measurements.
 
 ## Working on it
 - After any change: `localmodels check` (it runs the sandbox tests against the installed gateway), then `localmodels install` (launchd runs a copy of the code; `localmodels` reports *stale code* until then). A new rule gets a sandbox test first.
