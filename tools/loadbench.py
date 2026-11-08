@@ -4,6 +4,8 @@ thinking on and off, in both layouts (two copies with 8 at once; one copy with 4
 
   python3 tools/loadbench.py [--n 16] [--max-tokens 10000] [--family qwen/qwen3.6-35b-a3b] [--cells all|two|one]
                              [--smoke] [--anyway]
+  python3 tools/loadbench.py --url http://localhost:2234 --model <id> [--at-once 4] [--n 16] [--think both|on|off] [--label name]
+                             one LM Studio straight, not through the door: another Mac's, through an SSH tunnel
 
 Each request: a system prompt naming 40 quantities to extract, a made-up memo of about 9,000 characters with some 55 of
 them planted (dates and amounts; the generator knows the answers), and a strict JSON schema for the list of items; up to
@@ -14,6 +16,9 @@ prompt tokens a second in all, seconds a request (median, p90), empty answers, r
 values. It holds a 'test' lease so no swap pulls the copies out from under it, and refuses to start while a batch is using
 the models (--anyway: start regardless). --smoke: two short requests in one cell, to check the tool itself. Report:
 ~/Library/Logs/LocalModels/loadbench-<time>.json. Run it when the model or the engine changes; GUIDE.md keeps what it found.
+--url measures one LM Studio straight (another Mac's, say, through `ssh -L 2234:127.0.0.1:1234 <that Mac>`): the same
+requests and scoring, two cells (one instance, --at-once requests at a time, thinking on and off), no lease and no hub,
+so the numbers compare with the one-copy cells of a run through the door.
 """
 import argparse, concurrent.futures as cf, json, os, random, re, statistics, sys, threading, time, urllib.error, urllib.request
 
@@ -98,13 +103,16 @@ def score(items, planted, text):
     return found, invented
 
 
-# ---------------------------------------------------------------- one request, through the door
+# ---------------------------------------------------------------- one request, through the door (or --url, straight)
+BASE = {'url': llmshare.HUB}
+
+
 def ask(model, text, think, max_tokens, tag):
     body = dict(model=model, max_tokens=max_tokens, **agent.SAMPLING,
                 messages=[{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': 'Extract every quantity from this memo as JSON.\n\n' + text}],
                 response_format={'type': 'json_schema', 'json_schema': {'name': 'items', 'strict': True, 'schema': SCHEMA}})
     if not think: body.update(agent.THINK_OFF)
-    req = urllib.request.Request(llmshare.HUB + '/v1/chat/completions', data=json.dumps(body).encode(), headers={
+    req = urllib.request.Request(BASE['url'] + '/v1/chat/completions', data=json.dumps(body).encode(), headers={
         'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test', 'X-Session': tag})
     t0 = time.time()
     try: r = json.load(urllib.request.urlopen(req, timeout=3600)); err = None
@@ -159,7 +167,10 @@ def main():
     ap.add_argument('--n', type=int, default=16); ap.add_argument('--max-tokens', type=int, default=10000)
     ap.add_argument('--family'); ap.add_argument('--cells', default='all', choices=['all', 'two', 'one'])
     ap.add_argument('--smoke', action='store_true'); ap.add_argument('--anyway', action='store_true')
+    ap.add_argument('--url'); ap.add_argument('--model'); ap.add_argument('--at-once', type=int, default=4); ap.add_argument('--label', default='remote')
+    ap.add_argument('--think', default='both', choices=['both', 'on', 'off'], help='with --url: which thinking cells to run')
     a = ap.parse_args()
+    if a.url: return straight(a)
     if not llmshare.hub_up(fresh=True): sys.exit("the hub's door is closed: localmodels start")
     busy = [d for d in llmshare.leases() if d.get('kind') == 'batch']
     if busy and not a.anyway:
@@ -207,6 +218,31 @@ def main():
     os.makedirs(os.path.expanduser('~/Library/Logs/LocalModels'), exist_ok=True)
     path = os.path.expanduser(f"~/Library/Logs/LocalModels/loadbench-{time.strftime('%Y%m%d-%H%M')}.json")
     json.dump(dict(family=family, loaded=loaded, at=round(t0), n=n, max_tokens=max_tokens, minutes=round((time.time() - t0) / 60, 1), cells=out), open(path, 'w'), indent=1)
+    print(f'\n{(time.time() - t0) / 60:.1f} minutes · report: {path}')
+    return 0
+
+
+def straight(a):
+    """--url: one LM Studio measured straight, two cells (thinking on, off), --at-once requests at a time on --model."""
+    if not a.model: sys.exit('--url needs --model: the model id that server lists (curl <url>/v1/models)')
+    BASE['url'] = a.url.rstrip('/')
+    try: ids = [m['id'] for m in json.load(urllib.request.urlopen(BASE['url'] + '/v1/models', timeout=10)).get('data', [])]
+    except (OSError, ValueError) as e: sys.exit(f"{BASE['url']} does not answer: {e}")
+    if a.model not in ids: sys.exit(f"{a.model} is not loaded there; it lists: {', '.join(ids) or 'nothing'}")
+    n, max_tokens = (2, 600) if a.smoke else (a.n, a.max_tokens)
+    cells = [(f'{a.label}-x{a.at_once}-on', True), (f'{a.label}-x{a.at_once}-off', False)]
+    cells = [c for c in cells if a.think == 'both' or (a.think == 'on') == c[1]][-1 if a.smoke else 0:]
+    run_id, t0, out = int(time.time()), time.time(), []
+    print(f"{a.model} at {BASE['url']}, straight: {len(cells)} cells, {n} requests each, {a.at_once} at once, up to {max_tokens} tokens an answer")
+    for k, (name, think) in enumerate(cells):
+        print(f"\n  {name}: {a.at_once} at once, thinking {'on' if think else 'off'}")
+        c = cell(name, a.model, a.at_once, think, n, max_tokens, run_id, 1000 * k)
+        out.append(c)
+        print(f"  -> {c['wall']:.0f} s wall · {c['busy_completion_per_s']} tokens/s written while every slot is busy · {c['prompt_per_s']} prompt tokens/s · "
+              f"median {c['median_s']} s · {c['empty']} empty, {c['errors']} errors · recall {c['found']}/{c['planted']}", flush=True)
+    os.makedirs(os.path.expanduser('~/Library/Logs/LocalModels'), exist_ok=True)
+    path = os.path.expanduser(f"~/Library/Logs/LocalModels/loadbench-{a.label}-{time.strftime('%Y%m%d-%H%M')}.json")
+    json.dump(dict(url=BASE['url'], model=a.model, at=round(t0), n=n, max_tokens=max_tokens, minutes=round((time.time() - t0) / 60, 1), cells=out), open(path, 'w'), indent=1)
     print(f'\n{(time.time() - t0) / 60:.1f} minutes · report: {path}')
     return 0
 
