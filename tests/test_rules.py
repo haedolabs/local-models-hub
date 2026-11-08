@@ -584,11 +584,16 @@ def test_about(box):
     from localmodels import NAME, VERSION, web
     home = os.path.join(box, 'about'); os.makedirs(os.path.join(home, '.claude-plugin'))
     open(os.path.join(home, 'LICENSE'), 'w').write('MIT License\n\nCopyright (c) 2026 Pat Sample\n\nPermission is hereby granted...\n')
-    open(os.path.join(home, '.claude-plugin', 'plugin.json'), 'w').write(json.dumps(dict(name='x', repository='https://example.org/pat/hub')))
+    manifest = lambda **kw: open(os.path.join(home, '.claude-plugin', 'plugin.json'), 'w').write(json.dumps(dict(name='x', **kw)))
+    manifest(repository='https://example.org/pat/hub', author=dict(name='Pat Sample', url='https://pat.example'))
     a = web.about(home)
-    t('version, license, copyright and source, as the files say', a == dict(name=NAME, version=VERSION, license='MIT License', copyright='© 2026 Pat Sample',
-      source='https://example.org/pat/hub'), a)
-    t('with neither file (an old install), the version alone', web.about(os.path.join(box, 'nowhere')) == dict(name=NAME, version=VERSION, license=None, copyright=None, source=None))
+    t('version, license, copyright, its link and source, as the files say', a == dict(name=NAME, version=VERSION, license='MIT License', copyright='© 2026 Pat Sample',
+      copyright_url='https://pat.example', source='https://example.org/pat/hub'), a)
+    manifest(author=dict(name='Pat Sample', url='http://pat.example'))
+    t('an author address that is not https: no link', web.about(home)['copyright_url'] is None)
+    manifest(author='Pat Sample')
+    t('an author given as plain text: no link', web.about(home)['copyright_url'] is None)
+    t('with neither file (an old install), the version alone', web.about(os.path.join(box, 'nowhere')) == dict(name=NAME, version=VERSION, license=None, copyright=None, copyright_url=None, source=None))
 
 
 def test_names(box):

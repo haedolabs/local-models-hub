@@ -67,10 +67,11 @@ def _cached(key, seconds, fn):
 
 # ---------------------------------------------------------------- now
 def about(home=None):
-    """The dashboard's corner: {version, license, copyright, source}, read from the hub's own LICENSE and plugin
-    manifest (install copies both beside the code), so no name or address is written into the code itself."""
+    """The dashboard's corner: {version, license, copyright, copyright_url, source}, read from the hub's own LICENSE and
+    plugin manifest (install copies both beside the code), so no name or address is written into the code itself. The
+    copyright line links to the manifest author's https address."""
     home = home or HOME
-    lic = cr = src = None
+    lic = cr = src = site = None
     try:
         lines = [l.strip() for l in open(os.path.join(home, 'LICENSE')) if l.strip()]
         lic = lines[0] if lines else None
@@ -79,8 +80,10 @@ def about(home=None):
     try:
         m = json.load(open(os.path.join(home, '.claude-plugin', 'plugin.json')))
         src = m.get('repository') or m.get('homepage')
+        site = m['author'].get('url') if isinstance(m.get('author'), dict) else None
     except (OSError, ValueError): pass
-    return dict(name=NAME, version=VERSION, license=lic, copyright=cr, source=src if isinstance(src, str) and src.startswith('https://') else None)
+    https = lambda u: u if isinstance(u, str) and u.startswith('https://') else None
+    return dict(name=NAME, version=VERSION, license=lic, copyright=cr, copyright_url=https(site), source=https(src))
 
 
 def snapshot():
