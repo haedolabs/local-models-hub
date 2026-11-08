@@ -23,8 +23,11 @@ written count is the tighter one there; with short answers the processed count r
 "tokens" is marked DRAINING, the door sends it nothing new (gateway.generate leaves it out; a lone copy's requests, or
 requests that name that copy, are held as after a crash), its requests in flight finish, and when none is left (the slot
 locks and LM Studio's own status agree) models.keep unloads it and loads it again with the family's settings, under the
-swap lock, and records it in crashes.jsonl (event "recycled"). A copy past "soft" that is idle anyway is recycled on the
-spot, so the hard drain rarely runs. before_batch: when a batch begins it asks the door (POST /hub/recycle, which
+swap lock, and records it in crashes.jsonl (event "recycled"). The unload names the exact instance (models.unload: LM
+Studio's REST API, since its server also resolves a plain name by model key, which is the first copy's identifier), and
+models._recycle checks which instance went: when LM Studio took another one, that one is loaded again at once and the
+recycle is given up and retried after RETRY. A copy past "soft" that is idle anyway is recycled on the spot, so the hard
+drain rarely runs. before_batch: when a batch begins it asks the door (POST /hub/recycle, which
 agent.batch does; or `localmodels recycle`), and a copy past that share of its band is recycled first, so a night's work
 starts on fresh copies. One copy at a time; never while its family has a copy down or missing; two minutes between two
 recycles of a family; a drain that has not emptied in 10 minutes is given up and tried again 10 minutes later. A copy
@@ -197,15 +200,23 @@ def ready(rows, busy):
     return j, held == 0 and (row is None or row['state'] == 'IDLE')
 
 
+def given_up(copy, why, states=('draining', 'reloading')):
+    """The recycle of this copy ends without a reload (recorded as 'recycle given up', with why); it is tried again after
+    RETRY seconds, and meanwhile the copy serves as before. -> whether a job ended."""
+    with crashes._state() as st:
+        r = _r(st)
+        j = r['job']
+        if not j or j['copy'] != copy or j['state'] not in states: return False
+        crashes._record(dict(event='recycle given up', family=j['family'], model=copy, why=str(why)[:300]))
+        r['job'], r['retry_after'] = None, time.time() + RETRY
+    return True
+
+
 def give_up_if_stuck():
     """A drain that has not emptied in DRAIN_MAX seconds is let go; the copy is tried again after RETRY seconds. -> words or None."""
     j = job()
     if not j or j['state'] != 'draining' or time.time() - j['since'] < DRAIN_MAX: return None
-    with crashes._state() as st:
-        r = _r(st)
-        if r['job'] and r['job']['state'] == 'draining':
-            crashes._record(dict(event='recycle given up', family=j['family'], model=j['copy'], why=f'still active after {DRAIN_MAX // 60} min of draining'))
-            r['job'], r['retry_after'] = None, time.time() + RETRY
+    given_up(j['copy'], f'still active after {DRAIN_MAX // 60} min of draining', states=('draining',))
     return f"{j['copy']}: still active after {DRAIN_MAX // 60} min of draining; recycle deferred {RETRY // 60} min"
 
 

@@ -177,6 +177,50 @@ def test_listing(box):
     L.LMS, L.PS_TIMEOUT = real[0], real[1]; L._ps.update(real[2])
 
 
+def test_unload(box):
+    print("unloading one instance: by its exact id through LM Studio's REST API; the command only where that API is missing")
+    import http.server, threading
+    from localmodels import llmshare as L, models
+
+    class Fake(http.server.BaseHTTPRequestHandler):
+        mode, ids, seen = 'exact', [C2, B], []                # LM Studio lists the second replica first (seen on this hardware)
+
+        def log_message(self, *a): pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])) or b'{}')
+            Fake.seen.append((self.path, body.get('instance_id')))
+            if self.path != '/api/v1/models/unload' or Fake.mode == 'missing':      # an LM Studio without the API answers 200 with an error
+                out, code = dict(error=f'Unexpected endpoint or method. (POST {self.path})'), 200
+            else:
+                i = body.get('instance_id')
+                hit = next((x for x in Fake.ids if L.family(x) == i), None) if Fake.mode == 'by key' else (i if i in Fake.ids else None)
+                if hit: Fake.ids.remove(hit); out, code = dict(instance_id=i), 200
+                else: out, code = dict(error=dict(type='model_not_found', message=f'no instance {i}')), 404
+            data = json.dumps(out).encode()
+            self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(data)))
+            self.end_headers(); self.wfile.write(data)
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Fake); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    real, cmd = (L.LMSTUDIO, L.api_models, models._lms), []
+    L.LMSTUDIO = f'http://127.0.0.1:{srv.server_address[1]}'
+    L.api_models = lambda timeout=3: {i: 65536 for i in Fake.ids}
+    models._lms = lambda *a, **k: (cmd.append(a), (True, 'ok'))[1]
+    try:
+        ok_, words = models.unload(B)
+        t('by its exact id through the REST API: the first replica goes, the second stays, no command run',
+          ok_ and Fake.seen[-1] == ('/api/v1/models/unload', B) and Fake.ids == [C2] and not cmd, (Fake.seen, Fake.ids, cmd))
+        ok_, words = models.unload(B)
+        t('an instance that is not loaded: said so, and the command is not tried', not ok_ and 'not loaded' in words and not cmd, (words, cmd))
+        Fake.ids[:] = [C2, B]; Fake.mode = 'by key'
+        ok_, words, gone = models.unload_exactly(B, wait=2)
+        t('a server that resolves the name by model key takes the first in its list: seen at once (the second replica went)', gone == [C2] and B in Fake.ids, (gone, Fake.ids))
+        Fake.ids[:] = [C2, B]; Fake.mode = 'missing'
+        ok_, words = models.unload(B)
+        t('an LM Studio without the REST API: the command, as before', cmd == [('unload', B)], cmd)
+    finally:
+        L.LMSTUDIO, L.api_models, models._lms = real; srv.shutdown(); srv.server_close()
+
+
 def test_server_probe(box):
     print("LM Studio's server is started only when a connection is refused")
     import http.server, threading
@@ -215,8 +259,12 @@ def test_keep(box):
     L.api_models = lambda timeout=3: api['ids']
     L.busy_slots = lambda: dict(busy['held'])
     loads, unloads = [], []
-    models.load = lambda key, ident, context, parallel: (loads.append(ident), crashes.loaded_now([ident]), (True, 'ok'))[2]
-    models.unload = lambda ident: (unloads.append(ident), (True, ''))[1]
+    def fake_load(key, ident, context, parallel):          # a pretend LM Studio: what is loaded and unloaded shows in its listing
+        loads.append(ident); crashes.loaded_now([ident]); api['ids'] = dict(api['ids'], **{ident: 65536}); return True, 'ok'
+
+    def fake_unload(ident, takes=None):                    # takes: the instance LM Studio unloads instead (a name resolved by model key)
+        unloads.append(ident); api['ids'] = {k: v for k, v in api['ids'].items() if k != (takes or ident)}; return True, ''
+    models.load, models.unload = fake_load, fake_unload
     models._lms, models.free_gb, models.ensure_server = (lambda *a, **k: (True, '')), (lambda: 100.0), (lambda *a, **k: True)
     reset(time.time() - 3600)
     t('a whole listing: nothing to do', models.keep() == [] and not loads)
@@ -239,6 +287,19 @@ def test_keep(box):
     listings[:] = [[row(C2)]]
     words = models.keep()
     t('a family down after a crash: its reload first, no recycle in the same pass', loads == [B] and not unloads and recycle.job() is None, (loads, unloads, words))
+
+    with crashes._state() as st: st['down'] = {}
+    unloads.clear(); loads.clear(); reset(time.time() - 3 * 3600); served(B, 130)          # copy 1 past the band, idle
+    listings[:] = [[row(B), row(C2)]]; api['ids'] = {B: 65536, C2: 65536}
+    models.unload = lambda ident: fake_unload(ident, takes=C2)                           # LM Studio takes copy 2 instead
+    counted = lambda: len([r for r in crashes.records(1) if r.get('event') in ('crash', 'recycled')])
+    n0 = counted(); words = models.keep()
+    rec = [r for r in crashes.records(1) if r.get('event') == 'recycle given up']
+    t('an unload that took the other replica: that one is loaded again at once, the drained one keeps serving, the recycle is tried later',
+      unloads == [B] and loads == [C2] and recycle.job() is None and set(api['ids']) == {B, C2} and crashes._read(fresh=True)['recycle']['retry_after'] > time.time()
+      and rec and f'unloaded {C2} when asked to unload {B}' in rec[-1].get('why', ''), (unloads, loads, words, rec[-1:]))
+    t('...counted neither as a crash nor as a recycle', counted() == n0, (n0, counted()))
+    models.unload = fake_unload
     L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
     with crashes._state() as st: st['down'] = {}
 
@@ -576,6 +637,7 @@ def main():
         test_recycle()
         test_listing(box)
         test_server_probe(box)
+        test_unload(box)
         test_keep(box)
         test_prune(box)
         test_settings(box)
