@@ -17,5 +17,5 @@ A door on `localhost:1235` in front of LM Studio, shared by every project and ev
 - After any change: `localmodels check` (it runs the sandbox tests against the installed door), then `localmodels install` (launchd runs a copy of the code; the dash says *runs older code* until then). A new rule gets a sandbox test first.
 - Standard library only, Python 3.9 or later. No dependencies.
 - Never stop LM Studio's server. Never unload or reload a model another run is using (`localmodels swapcheck`). Never put a prompt, an answer or a file's contents in the hub's records.
-- Plain words in anything a person reads: the dash, the command's output, error messages.
+- Precise technical terms in anything a person reads (the dashboard, CLI output, error messages, MCP tool text): its readers are engineers. Name things by what they are (gateway, instance, replica, slot, admission queue, lease, recycle), not by metaphor ("door", "keeper").
 - Commit only this repo's files. Nothing personal, no other project's name, no narration in anything committed; local notes go in `CLAUDE.local.md`, which git ignores.
