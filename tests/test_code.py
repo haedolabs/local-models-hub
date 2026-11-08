@@ -35,24 +35,42 @@ def silent_handlers():
 
 # ---------------------------------------------------------------- every sibling module a file uses, it imports
 def unimported_siblings():
-    """Names of the package's own modules used as `name.attr` in a file that never imports that name. -> ['file: name']."""
+    """The package's own modules used as `name.attr` where no import of that name is in scope: not at module level, nor
+    in the function that uses it or one around it (cli.build_release once used dash, which cli imports only inside other
+    functions, and failed with NameError at run time). -> ['file:function: name']."""
     import ast
     pkg = os.path.join(ROOT, 'localmodels')
     mods = {f[:-3] for f in os.listdir(pkg) if f.endswith('.py') and f != '__init__.py'}
     out = []
+
+    def binds(node):
+        """Names bound directly in this scope (imports, assignments, arguments), not inside nested functions or classes."""
+        got, todo = set(), list(ast.iter_child_nodes(node))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            got |= {a.arg for a in node.args.args + node.args.kwonlyargs + node.args.posonlyargs}
+        while todo:
+            n = todo.pop()
+            if isinstance(n, (ast.Import, ast.ImportFrom)): got |= {(a.asname or a.name).split('.')[0] for a in n.names}
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store): got.add(n.id)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)): got.add(n.name); continue
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)): todo.extend(ast.iter_child_nodes(n))
+        return got
+
+    def visit(node, scope, where, f):
+        for n in ast.iter_child_nodes(node):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                visit(n, scope | binds(n), getattr(n, 'name', 'lambda'), f)
+            elif isinstance(n, ast.ClassDef): visit(n, scope | binds(n), n.name, f)
+            else:
+                if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods and n.value.id not in scope and n.value.id != f[:-3]:
+                    out.append(f'{f}:{where}: {n.value.id}')
+                visit(n, scope, where, f)
+
     for f in sorted(os.listdir(pkg)):
         if not f.endswith('.py'): continue
         tree = ast.parse(open(os.path.join(pkg, f)).read())
-        bound = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                bound |= {(a.asname or a.name).split('.')[0] for a in node.names}
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                bound |= {a.arg for a in node.args.args + node.args.kwonlyargs}
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store): bound.add(node.id)
-        used = {n.value.id for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods}
-        out += [f'{f}: {name}' for name in sorted(used - bound - {f[:-3]})]
-    return out
+        visit(tree, binds(tree), '<module>', f)
+    return sorted(set(out))
 
 
 # ---------------------------------------------------------------- the dashboard's script: nothing called that is not defined
@@ -181,7 +199,7 @@ def main():
         bad = silent_handlers()
         t('every broad handler records the error in the error record, or says why not (# not recorded: ...)', not bad, '; '.join(bad))
         bad = unimported_siblings()
-        t("every sibling module a file uses (name.attr), it imports (models.py used errors without it)", not bad, '; '.join(bad))
+        t("every sibling module a function uses (name.attr) is imported where that function can see it", not bad, '; '.join(bad))
         reuse = [f for f in os.listdir(os.path.join(ROOT, 'localmodels')) if f.endswith('.py') and 'SO_REUSEPORT' in open(os.path.join(ROOT, 'localmodels', f)).read()]
         t('no SO_REUSEPORT anywhere: one listening socket per address, shared by inheritance', not reuse, reuse)
         py39 = '/usr/bin/python3'
