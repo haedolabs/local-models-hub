@@ -15,13 +15,55 @@ Claude Code session's folder). names.json, in the hub's settings folder, maps wh
 
 The names apply when a screen reads, never in the records, so a new name applies to all past history at once.
 `localmodels name` sets them.
+
+Screenshot mode (`localmodels present on for 2h`, present.json beside names.json, off by itself at its end): every screen
+shows the projects it keeps by their names (the demo's and local-models by default) and every other project as "other",
+private; no Claude Code session title shows anywhere; error details are left out. For pictures of the dashboard that
+show the hub at work and nothing personal.
 """
-import json, os
+import json, os, time
 
 from . import llmshare, runs
 
 FILE = os.path.join(llmshare.SHARED, 'names.json')
 _cache = {'mtime': None, 'data': {}}
+_present = {'checked': 0.0, 'mtime': None, 'data': None}
+OTHER = 'other'                                          # what a project not kept is called in screenshot mode
+
+
+def _present_file(): return os.path.join(os.path.dirname(FILE), 'present.json')
+
+
+def presenting():
+    """Screenshot mode while it is on: {until, keep: [project names shown as they are]}, else None (looked at once a second)."""
+    now = time.time()
+    if now - _present['checked'] >= 1:
+        _present['checked'] = now
+        try: m = os.path.getmtime(_present_file())
+        except OSError: m = None
+        if m != _present['mtime']:
+            try: d = json.load(open(_present_file())) if m else None
+            except (OSError, ValueError): d = None
+            _present.update(mtime=m, data=d if isinstance(d, dict) else None)
+    d = _present['data']
+    return d if d and float(d.get('until') or 0) > now else None
+
+
+def set_present(minutes, keep):
+    """Screenshot mode on for `minutes`, showing the projects in `keep` by name. -> the state."""
+    d = dict(until=round(time.time() + float(minutes) * 60), keep=sorted({str(k) for k in keep if k}), set_at=round(time.time()))
+    os.makedirs(os.path.dirname(_present_file()), exist_ok=True)
+    tmp = f'{_present_file()}.{os.getpid()}.tmp'
+    with open(tmp, 'w') as f: json.dump(d, f); f.write('\n')
+    os.replace(tmp, _present_file())
+    _present['checked'] = 0.0
+    return d
+
+
+def present_off():
+    try: os.remove(_present_file())
+    except OSError: pass
+    _present['checked'] = 0.0
 
 
 def _load():
@@ -49,6 +91,8 @@ def _resolve(raw):
     a = _entry(raw)
     shown = a['name'] or raw
     b = _entry(shown) if shown != raw else dict(name=None, private=False, labels={})
+    pm = presenting()
+    if pm and shown not in pm.get('keep', ()) and raw not in pm.get('keep', ()): return OTHER, True, {}   # screenshot mode
     return shown, a['private'] or b['private'], {**b['labels'], **a['labels']}
 
 
@@ -86,16 +130,17 @@ def request(rec):
 
 
 def session(c):
-    """A Claude Code session for a screen: the project as shown; no title when the project is private."""
+    """A Claude Code session for a screen: the project as shown; no title when the project is private, and none at all in
+    screenshot mode (titles are free text)."""
     raw = c.get('project') or '?'
-    return dict(c, project=project(raw), title=None if private(raw) else c.get('title'))
+    return dict(c, project=project(raw), title='a Claude Code session' if presenting() else None if private(raw) else c.get('title'))
 
 
 def user(r):
     """A program using the models, for a screen: the project, script, step, batch and job as shown."""
     raw = r.get('project') or '?'
     out = dict(r, project=project(raw), app=label(raw, r.get('app')), step=step(raw, r.get('step')))
-    if private(raw): out['title'] = None
+    if private(raw) or presenting(): out['title'] = None
     if isinstance(r.get('batch'), dict):
         b = dict(r['batch'], name=label(raw, r['batch'].get('name')), phase=label(raw, r['batch'].get('phase')))
         if isinstance(b.get('job'), dict): b['job'] = dict(b['job'], name=label(raw, b['job'].get('name')))
