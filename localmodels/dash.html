@@ -53,7 +53,9 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--ring); }
 .btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
 #alerts:empty { display: none; }
-.kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
+.kpis { display: flex; gap: 10px; }
+.kpis > .card { flex: 1 1 0; min-width: 0; }
+.kpis > .soc { flex-grow: 1.35; }            /* a chip and three lines: room for "m4pro GPU 100% CPU 100%" beside the chip at 1512 px */
 .soc { container: soc / inline-size; }       /* the chip follows the tile's own width, so "GPU 100%" always fits on one line beside it */
 .soc .socbody { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .soc .socnums { min-width: 0; flex: 1; }
@@ -858,7 +860,8 @@ function renderSoc() {         // the chip at work: each CPU core lit by its own
   gpu.classList.toggle('busy', gp != null && gp >= 50);
   $('k-soc').textContent = gp != null ? `GPU ${gp}%` : '–';                  // GPU on the value line, CPU on its own line below:
   $('k-soc-c').textContent = c && c.cpu_pct != null ? `CPU ${c.cpu_pct}%` : '';  // both always fit beside the chip, never wrapped
-  const away = (S.peers || []).filter(p => p.soc && p.soc.gpu_pct != null).map(p => `${p.name} GPU ${p.soc.gpu_pct}%`);
+  const away = (S.peers || []).filter(p => p.soc && p.soc.gpu_pct != null)     // each peer's GPU and CPU, as this Mac's above
+    .map(p => `${p.name} GPU ${p.soc.gpu_pct}%` + (p.soc.cpu_pct != null ? ` CPU ${p.soc.cpu_pct}%` : ''));
   const f = $('k-soc-f');                // the peers' GPUs (this chip's name is in the tooltip); the chip's name when there are none
   f.textContent = c ? (away.length ? away.join(' · ') : (c.name || '').replace(/^Apple /, '')) : 'live after the gateway restarts';
   $('soc-tile').title = c ? `${c.name}: ${n} CPU cores (each lit by its load), ${g} GPU cores${c.gpu_mem_gb != null ? `, ${c.gpu_mem_gb} GB in use by the GPU` : ''}` : '';
