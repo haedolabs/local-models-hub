@@ -54,9 +54,12 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
 #alerts:empty { display: none; }
 .kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
-.soc .socbody { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.soc .socnums { min-width: 0; }
-.pkg { flex: none; width: 60px; height: 60px; padding: 5px; border-radius: 3px;   /* the chip: gold pins on four sides, the die inside */
+.soc { container: soc / inline-size; }       /* the chip follows the tile's own width, so "GPU 100%" always fits on one line beside it */
+.soc .socbody { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.soc .socnums { min-width: 0; flex: 1; }
+@container soc (max-width: 175px) { .soc .pkg { width: 40px; height: 40px; padding: 4px; } .soc .die { padding: 2px; gap: 2px; } }
+@container soc (max-width: 157px) { .soc .pkg { display: none; } }
+.pkg { flex: none; width: 56px; height: 56px; padding: 5px; border-radius: 3px;   /* the chip: gold pins on four sides, the die inside */
   background:
     repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) top / 100% 3px no-repeat,
     repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) bottom / 100% 3px no-repeat,
@@ -89,7 +92,8 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .card .body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .tile { padding: 8px 12px; }
 .tile .label { color: var(--ink-2); font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; white-space: nowrap; }
-.tile .value { font-size: 22px; font-weight: 600; line-height: 1.15; }
+.tile .value { font-size: 22px; font-weight: 600; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, always */
+.tile .minor { color: var(--ink-2); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile .value small { font-size: 12px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
 .tile .foot { color: var(--muted); font-size: 11.5px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meter { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 6px; }
@@ -219,7 +223,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <div class="card tile"><div class="label">Throughput</div><div class="value" id="k-tok">–</div><div class="foot" id="k-tok-f">tokens/s, last minute</div></div>
     <div class="card tile"><div class="label">Requests</div><div class="value" id="k-req">–</div><div class="foot" id="k-req-f"></div></div>
     <div class="card tile"><div class="label">Memory used</div><div class="value" id="k-mem">–</div><div class="meter"><div id="k-mem-m" style="width:0"></div></div><div class="foot" id="k-mem-f" style="margin-top:4px"></div></div>
-    <div class="card tile soc" id="soc-tile"><div class="label">SoC load</div><div class="socbody"><div class="pkg"><div class="die"><div class="cores cpu" id="k-soc-cpu"></div><div class="cores gpu" id="k-soc-gpu"></div></div></div><div class="socnums"><div class="value" id="k-soc">–</div><div class="foot" id="k-soc-f"></div></div></div></div>
+    <div class="card tile soc" id="soc-tile"><div class="label">SoC load</div><div class="socbody"><div class="pkg"><div class="die"><div class="cores cpu" id="k-soc-cpu"></div><div class="cores gpu" id="k-soc-gpu"></div></div></div><div class="socnums"><div class="value" id="k-soc">–</div><div class="minor" id="k-soc-c"></div><div class="foot" id="k-soc-f"></div></div></div></div>
     <div class="card tile"><div class="label">Claude Code sessions</div><div class="value" id="k-cc">–</div><div class="foot" id="k-cc-f"></div></div>
   </section>
 
@@ -603,7 +607,15 @@ function renderNow() {
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
   guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
-  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels);
+  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('tiles (cut lines)', tipCut);
+}
+
+function tipCut() {      // a tile line too long for its column ends in an ellipsis (never a second line): its whole text is its tooltip
+  for (const e of document.querySelectorAll('.kpis .value, .kpis .minor, .kpis .foot')) {
+    const cut = e.scrollWidth > e.clientWidth + 1;
+    if (cut && (!e.title || e.dataset.cut)) { e.title = e.textContent; e.dataset.cut = '1'; }
+    else if (!cut && e.dataset.cut) { e.removeAttribute('title'); delete e.dataset.cut; }
+  }
 }
 
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
@@ -844,10 +856,11 @@ function renderSoc() {         // the chip at work: each CPU core lit by its own
   const gp = c && c.gpu_pct != null ? c.gpu_pct : null;
   [...gpu.children].forEach(x => x.style.setProperty('--u', gp != null ? lit(gp) : '.12'));
   gpu.classList.toggle('busy', gp != null && gp >= 50);
-  $('k-soc').replaceChildren(gp != null ? `GPU ${gp}%` : '–', el('small', {}, c && c.cpu_pct != null ? `CPU ${c.cpu_pct}%` : ''));
+  $('k-soc').textContent = gp != null ? `GPU ${gp}%` : '–';                  // GPU on the value line, CPU on its own line below:
+  $('k-soc-c').textContent = c && c.cpu_pct != null ? `CPU ${c.cpu_pct}%` : '';  // both always fit beside the chip, never wrapped
   const away = (S.peers || []).filter(p => p.soc && p.soc.gpu_pct != null).map(p => `${p.name} GPU ${p.soc.gpu_pct}%`);
-  const f = $('k-soc-f');
-  f.textContent = c ? [(c.name || '').replace(/^Apple /, ''), ...away].filter(Boolean).join(' · ') : 'live after the gateway restarts';
+  const f = $('k-soc-f');                // the peers' GPUs (this chip's name is in the tooltip); the chip's name when there are none
+  f.textContent = c ? (away.length ? away.join(' · ') : (c.name || '').replace(/^Apple /, '')) : 'live after the gateway restarts';
   $('soc-tile').title = c ? `${c.name}: ${n} CPU cores (each lit by its load), ${g} GPU cores${c.gpu_mem_gb != null ? `, ${c.gpu_mem_gb} GB in use by the GPU` : ''}` : '';
 }
 function renderAbout() {                // the one footer line: version, license, credit, source
