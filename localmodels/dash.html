@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__HUB_NAME__</title>
-<link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='%233987e5'/%3E%3C/svg%3E">
+<link rel="icon" id="favicon" href="data:,">
 <style>
 :root {
   color-scheme: light;
@@ -915,9 +915,13 @@ document.addEventListener('click', ev => {
   guard('charts', renderCharts);
 });
 const THEMES = ['auto', 'light', 'dark'];
-function paintIcon() {             // the tab's dot: the page's own blue (--s1), in whichever theme is showing
-  const c = getComputedStyle(document.documentElement).getPropertyValue('--s1').trim() || '#3987e5';
-  $('favicon').href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5" fill="${c}"/></svg>`);
+function paintIcon() {             // the tab's icon: a chip on a board (gold pins, a gold die), in the theme's own colors
+  const v = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const pins = [11, 15, 19].map(p => `<rect x="${p}" y="6" width="2" height="3"/><rect x="${p}" y="23" width="2" height="3"/>`
+    + `<rect x="6" y="${p}" width="3" height="2"/><rect x="23" y="${p}" width="3" height="2"/>`).join('');
+  $('favicon').href = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    + `<rect width="32" height="32" rx="7" fill="${v('--p1')}"/><g fill="${v('--gold')}">${pins}</g>`
+    + `<rect x="9" y="9" width="14" height="14" rx="2" fill="${v('--silicon')}"/><rect x="13" y="13" width="6" height="6" rx="1" fill="${v('--gold')}"/></svg>`);
 }
 function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; paintIcon(); }
 try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paintIcon); } catch (e) {}
