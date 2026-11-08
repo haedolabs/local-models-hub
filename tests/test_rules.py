@@ -439,6 +439,34 @@ def test_maintenance(box):
     L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
 
 
+def test_privacy_check(box):
+    print('publish: the privacy check reads what is new since the last release against a word list kept outside the repo')
+    import subprocess
+    from localmodels import cli
+    repo = os.path.join(box, 'repo'); os.makedirs(repo)
+    g = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout
+    g('init', '-q'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T')
+    open(os.path.join(repo, 'a.txt'), 'w').write('old line written by Pat Sample\n')
+    g('add', '.'); g('commit', '-q', '-m', 'first'); g('tag', '-a', 'v1.0.0', '-m', 'release')
+    words = os.path.join(box, 'words.txt')
+    open(words, 'w').write('# a comment\npat\nsample\n\\bzephyr\\b\nproject-x\nallow: zephyr-free\nallow: sample\\.org/pat\n')
+    with open(os.path.join(repo, 'a.txt'), 'a') as f: f.write('this is zephyr-free and fine\nthe zephyr notes\nsee sample.org/pat for more\n')
+    open(os.path.join(repo, 'project-x-notes.md'), 'w').write('nothing here\n')
+    g('add', '.'); g('commit', '-q', '-m', 'notes for Pat')
+    r = cli.private_check(repo, words)
+    where, texts = [h[0] for h in r['hits']], [h[1] for h in r['hits']]
+    t('a line from before the last release is not read again', not any('old line' in x for x in texts), r['hits'])
+    t('a new line holding a word is caught', any('the zephyr notes' in x for x in texts), r['hits'])
+    t('an allowed phrase and an allowed address pass', not any('zephyr-free' in x or 'sample.org/pat' in x for x in texts), r['hits'])
+    t('a new file whose name holds a word is caught', any('project-x-notes.md' in w for w in where), where)
+    t('a commit message is read too (it goes public with the history)', any(w.startswith('commit ') for w in where), where)
+    t('it says what it read: since the last release tag, so many lines, files and messages',
+      r['status'] == 'hits' and r['since'] == 'v1.0.0' and r['lines'] == 4 and r['files'] == 1 and r['commits'] == 1, {k: r[k] for k in ('status', 'since', 'lines', 'files', 'commits')})
+    t('no word list: it says the check was skipped, never a silent pass', cli.private_check(repo, os.path.join(box, 'none.txt'))['status'] == 'skipped')
+    open(words, 'w').write('nothing-matches-this\n[unclosed\n')
+    t('nothing new holds a word: clean (a line that is not a valid pattern is read as plain text)', cli.private_check(repo, words)['status'] == 'clean')
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -453,6 +481,7 @@ def main():
         test_first_settings()
         test_runs()
         test_maintenance(box)
+        test_privacy_check(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

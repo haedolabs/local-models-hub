@@ -57,7 +57,7 @@ git clone https://github.com/matthaedo/local-models-hub.git ~/local-models
 
 Then point clients at `http://localhost:1235/v1` (any API key). In Claude Code sessions the MCP tools `status`, `guide`, `ask`, `batch`, `job_status` and `swap_check` appear under `local-models`.
 
-**Publishing a new version** (the maintainer): `localmodels publish` runs the tests, stamps the version, commits, tags and pushes; plugin users get it on `/plugin update`.
+**Publishing a new version** (the maintainer): `localmodels publish` (patch bump) or `localmodels publish --version X.Y.0` runs the sandbox tests, `claude plugin validate`, and a privacy check, then stamps the version, commits, tags and pushes; plugin users get it on `/plugin update`. The privacy check reads every line added since the last tag, every new file name and every commit message against a word list kept outside the repo (`~/Library/Application Support/LocalModels/private-words.txt`: one regex per line, `allow: <regex>` for exceptions) and refuses to push on a match. `--dry` runs the checks only.
 
 ## Settings
 
