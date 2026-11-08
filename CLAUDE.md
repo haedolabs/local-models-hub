@@ -6,13 +6,16 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 - `localmodels/gateway.py` — the gateway: attributes each request, acquires a slot, forwards to LM Studio, logs one line, holds and resends across a crash.
 - `localmodels/llmshare.py` — the sharing rules: slot locks, leases, the swap lock, the model listing, the readers of the shared state.
 - `localmodels/models.py`, `crashes.py`, `recycle.py` — the instance manager: replicas kept loaded, crashed instances reloaded, instances recycled before the crash threshold.
+- `localmodels/runs.py`, `maint.py` — batch and job progress with finish times; maintenance windows.
 - `localmodels/peers.py` — other Macs' gateways as more replicas of a family: the shared token, a peer's report, the front's link (polls, backoff, free slots, model fingerprints), the network checks.
 - `localmodels/agent.py` — local agents: the tool loop, read-only file tools, JSON answers, retries.
 - `localmodels/mcp_server.py` — the MCP tools and the detached job runner.
 - `localmodels/whois.py`, `sessions.py` — who is behind a connection; every Claude Code session on the Mac.
 - `localmodels/web.py`, `dash.html`, `dash.py` — the dashboard and the terminal dash.
+- `localmodels/names.py`, `errors.py`, `demo.py`, `icon.py` — display names and screenshot mode; the error recorder; the synthetic workload of `localmodels demo`; the icon, drawn from the dashboard's theme tokens.
 - `localmodels/cli.py`, `bin/localmodels` — the command.
 - `tests/` — sandbox tests with a fake LM Studio (two gateways for peers); `tools/` — measurements.
+- `docs/` — the README's pictures, taken in screenshot mode (`localmodels present on`) during `localmodels demo`.
 
 ## Working on it
 - After any change: `localmodels check` (it runs the sandbox tests against the installed gateway), then `localmodels install` (launchd runs a copy of the code; `localmodels` reports *stale code* until then). A new rule gets a sandbox test first.
