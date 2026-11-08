@@ -434,17 +434,20 @@ def peer_cmd(a):
         if not ps: print(f'no peer named {w[1]}' if len(w) == 2 else 'no peers configured: localmodels peer add <name> <address>'); return 2
         bad = 0
         for p in ps:
-            print('gateway poll: ' + p['words'])
             tok, here = peers.token(), None
             try:
                 req = urllib.request.Request(p['url'] + '/hub/health', headers={'X-Hub-Token': tok or ''})
                 peers._open(req, timeout=peers.CONNECT).read(); here = 'connected, token accepted'
             except urllib.error.HTTPError as e: here = f"connected, HTTP {e.code}" + (' (peer-token mismatch)' if e.code in (401, 403) else '')
             except OSError as e: here = peers.reach_words(e)
+            if p['state'] == 'down' and here.startswith('connected'):    # a process's first connection after the link comes up can
+                time.sleep(2)                                            # fail while macOS evaluates its Local Network policy: poll once more
+                p = next((q for q in (door_link(force=True) or {}).get('peers') or [] if q['name'] == p['name']), p)
+            print('gateway poll: ' + p['words'])
             print(f'  terminal probe: {here}')
             if p['state'] == 'down' and here.startswith('connected'):
-                print('  terminal connects but the gateway does not: macOS Local Network privacy is blocking the gateway (a LaunchAgent). '
-                      'System Settings → Privacy & Security → Local Network → enable python3, then: localmodels peer test')
+                print('  terminal connects but the gateway does not (two polls): macOS Local Network privacy is blocking the gateway (a LaunchAgent). '
+                      'System Settings → Privacy & Security → Local Network → enable Python (python3), then: localmodels peer test')
             iface, port = peers.route_of(p['host'])
             print(f"  route: {port or iface or 'none'}" + (f' ({iface})' if iface and port and iface not in port else '')
                   + (f" · {peers.route_words(iface, {iface: port} if port else {})}" if peers.route_words(iface, {iface: port} if port else {}) else ''))

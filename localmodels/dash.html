@@ -165,7 +165,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <article class="card"><div class="card-head"><div><h2>Requests by project</h2><div class="hint" id="req-hint"></div></div><button class="btn" data-table="req">table</button></div>
       <div class="legend" id="req-legend"></div><div class="chart" id="req"></div></article>
     <article class="card"><div class="card-head"><div><h2>Memory used</h2><div class="hint" id="mem-hint">sampled every 15 s</div></div><button class="btn" data-table="mem">table</button></div>
-      <div class="chart" id="mem"></div></article>
+      <div class="legend" id="mem-legend"></div><div class="chart" id="mem"></div></article>
   </section>
 
   <section class="row c">
@@ -276,8 +276,9 @@ function crosshair(f, xs, onAt) {
   hit.addEventListener('blur', () => { line.setAttribute('visibility', 'hidden'); hideTip(); });
   f.svg.append(line, hit);
 }
-function legend(box, items) {
+function legend(box, items) {                              // an empty legend takes no space
   box.replaceChildren(...items.map(it => el('span', {}, el('i', {class: it.line ? 'key-line' : 'key-rect', style: `background:${it.color}`}), it.name)));
+  box.style.display = items.length ? '' : 'none';
 }
 function tableView(box, head, rows) {
   const n = rowsThatFit(box, 23, 24);
@@ -412,26 +413,37 @@ function renderRequests() {
   box.replaceChildren(f.svg);
 }
 
-function renderMemory() {
+function renderMemory() {                    // this Mac, and each peer stacked on top of it; the top line is the memory of the hosts present
   const box = $('mem'); if (!H) return;
-  const M = H.memory;
+  const M = H.memory, away = Object.keys(M.hosts || {}), stacked = away.length > 0;
+  const series = [{name: M.name || 'this Mac', color: 'var(--s1)', v: M.used}].concat(away.map((k, j) => ({name: k, color: `var(--s${2 + j % 7})`, v: M.hosts[k]})));
+  legend($('mem-legend'), stacked ? series.map(s => ({name: s.name, color: s.color})) : []);
   if (!M.t.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No samples yet: the gateway samples memory every 15 s.')); return; }
+  const cap = M.cap && M.cap.length === M.t.length ? M.cap : M.t.map(() => M.total), gb = v => v == null ? '–' : v.toFixed(1) + ' GB';
+  const sum = M.t.map((_, i) => series.reduce((a, s) => a + (s.v[i] || 0), 0));
   if (tables.mem) {
-    const rows = []; for (let i = M.t.length - 1; i >= 0; i -= 4) rows.push([clockS(M.t[i]), M.used[i].toFixed(1) + ' GB']);
-    return tableView(box, ['time', 'memory used'], rows);
+    const rows = []; for (let i = M.t.length - 1; i >= 0; i -= 4) rows.push([clockS(M.t[i]), ...series.map(s => gb(s.v[i])), ...(stacked ? [gb(sum[i])] : [])]);
+    return tableView(box, ['time', ...(stacked ? series.map(s => s.name).concat(['total']) : ['memory used'])], rows);
   }
-  const f = frame(box, H.start, H.now, M.total, v => v + ' GB');
-  const xs = M.t.map(f.x);
-  let d = ''; xs.forEach((x, i) => d += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(M.used[i]).toFixed(1));
-  f.svg.append(sv('path', {d: d + `L${xs[xs.length - 1].toFixed(1)},${f.y(0)}L${xs[0].toFixed(1)},${f.y(0)}Z`, fill: 'var(--s1)', 'fill-opacity': 0.1}));
-  f.svg.append(sv('path', {d, fill: 'none', stroke: 'var(--s1)', 'stroke-width': 2, 'stroke-linejoin': 'round'}));
-  const yy = f.y(M.total);
-  f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
-  const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${M.total} GB`; f.svg.append(lt);
-  const li = M.used.length - 1;
-  f.svg.append(sv('circle', {cx: xs[li], cy: f.y(M.used[li]), r: 4, fill: 'var(--s1)', stroke: 'var(--surface)', 'stroke-width': 2}));
-  const vt = sv('text', {x: xs[li] + 8, y: f.y(M.used[li]) + 4}); vt.textContent = M.used[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
-  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(M.t[i]), [{name: 'memory used', color: 'var(--s1)', line: true, value: M.used[i].toFixed(1) + ' GB'}]));
+  const f = frame(box, H.start, H.now, Math.max(...cap), v => v + ' GB');
+  const xs = M.t.map(f.x), line = ys => xs.map((x, i) => (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(ys[i]).toFixed(1)).join('');
+  let base = M.t.map(() => 0);
+  for (const s of series) {
+    const hi = base.map((b, i) => b + (s.v[i] || 0)), d = line(hi);
+    let back = ''; for (let i = xs.length - 1; i >= 0; i--) back += 'L' + xs[i].toFixed(1) + ',' + f.y(base[i]).toFixed(1);
+    f.svg.append(sv('path', {d: d + back + 'Z', fill: s.color, 'fill-opacity': stacked ? 0.22 : 0.1}));
+    f.svg.append(sv('path', {d, fill: 'none', stroke: s.color, 'stroke-width': 2, 'stroke-linejoin': 'round'}));
+    base = hi;
+  }
+  const li = M.t.length - 1, flat = cap.every(c => c === cap[li]), yy = f.y(cap[li]);
+  if (flat) f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
+  else f.svg.append(sv('path', {d: line(cap), fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 1}));
+  const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${cap[li]} GB`; f.svg.append(lt);
+  f.svg.append(sv('circle', {cx: xs[li], cy: f.y(sum[li]), r: 4, fill: series[series.length - 1].color, stroke: 'var(--surface)', 'stroke-width': 2}));
+  const vt = sv('text', {x: xs[li] + 8, y: f.y(sum[li]) + 4}); vt.textContent = sum[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
+  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(M.t[i]), stacked
+    ? series.map(s => ({name: s.name, color: s.color, value: gb(s.v[i])})).concat([{name: 'total', color: 'var(--ink-2)', line: true, value: `${gb(sum[i])} of ${cap[i]} GB`}])
+    : [{name: 'memory used', color: 'var(--s1)', line: true, value: gb(M.used[i])}]));
   box.replaceChildren(f.svg);
 }
 
@@ -445,7 +457,9 @@ function renderCharts() {
   $('k-req').textContent = full(reqTot.reduce((a, b) => a + b, 0));
   const np = Object.keys(Q.by).length;
   $('k-req-f').textContent = `${rangeWords()} · ${np} project${np === 1 ? '' : 's'}`;
-  $('mem-hint').textContent = `every 15 seconds; the line across the top is the Mac's ${H.memory.total} GB`;
+  const MM = H.memory, capNow = MM.cap && MM.cap.length ? MM.cap[MM.cap.length - 1] : MM.total;
+  $('mem-hint').textContent = Object.keys(MM.hosts || {}).length ? `every 15 seconds, stacked by host; top line: total memory, ${capNow} GB`
+    : `every 15 seconds; the line across the top is the Mac's ${MM.total} GB`;
 }
 function rangeWords() { return {15: 'last 15 minutes', 60: 'last hour', 360: 'last 6 hours', 1440: 'last 24 hours'}[RANGE]; }
 
@@ -482,11 +496,15 @@ function renderNow() {
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
   $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${S.waits7.waits} queue waits > 2 s, ${S.waits7.minutes} min total`;
-  const m = S.mac, share = m.used / Math.max(1, m.total);
-  $('k-mem').replaceChildren(String(Math.round(m.used)), el('small', {}, `of ${Math.round(m.total)} GB`));
+  const m = S.mac, P = S.pool || {used: m.used, total: m.total, hosts: [{name: 'this Mac', used: m.used, total: m.total}]};
+  const fill = h => h.used / Math.max(1, h.total), share = fill(P), worst = Math.max(...P.hosts.map(fill));   // color: the fullest host
+  const hue = v => v > 0.92 ? 'var(--critical)' : v > 0.85 ? 'var(--warning)' : '';
+  $('k-mem').replaceChildren(String(Math.round(P.used)), el('small', {}, `of ${Math.round(P.total)} GB`));
   const meter = $('k-mem-m'); meter.style.width = Math.round(share * 100) + '%';
-  meter.style.background = share > 0.92 ? 'var(--critical)' : share > 0.85 ? 'var(--warning)' : 'var(--s1)';
-  $('k-mem-f').textContent = (share > 0.92 ? 'almost full · ' : share > 0.85 ? 'getting full · ' : '') + `${Math.round(m.free)} GB free on disk`;
+  meter.style.background = hue(worst) || 'var(--s1)';
+  $('k-mem-f').replaceChildren(...(P.hosts.length > 1
+    ? P.hosts.flatMap((h, i) => [i ? ' · ' : '', el('span', {style: hue(fill(h)) ? `color:${hue(fill(h))}` : ''}, `${h.name} ${Math.round(h.used)}/${Math.round(h.total)}`)])
+    : [(share > 0.92 ? 'almost full · ' : share > 0.85 ? 'getting full · ' : '') + `${Math.round(m.free)} GB free on disk`]));
   const work = S.claude.filter(c => c.working);
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
@@ -541,7 +559,7 @@ function renderModels() {
     el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.label || d.state}`))));
   const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id)));
   if (!fams.length) { box.replaceChildren(...down, down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
-    legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat(there.length ? [{name: 'free', color: 'var(--track)'}] : [])); return; }
+    legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)}))); return; }
   box.replaceChildren(...down, ...fams.map(f => {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
     const head = el('div', {}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'},
@@ -574,7 +592,7 @@ function renderModels() {
     });
     return el('div', {class: 'fam'}, head, ...rows, ...away.map(p => peerRow(p, f.id, p.families[f.id], seen)));
   }), ...there);
-  legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat([{name: 'free', color: 'var(--track)'}]));
+  legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})));
 }
 
 // this Mac's peers: each family a peer serves for it is one more copy, after this Mac's own (its slots colored by project)
@@ -596,7 +614,7 @@ function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more
     return b;
   }));
   return el('div', {class: 'copy', title: p.words || ''}, el('span', {class: 'nm'}, p.name), slots,
-    el('span', {class: 'st'}, `${f.busy}/${f.slots} slots active · ${f.here} from this gateway · ${f.free_here} available${linkWords(p)}`));
+    el('span', {class: 'st'}, `${f.busy}/${f.slots} active · ${f.here} from this gateway · ${f.free_here} free${linkWords(p)}`));
 }
 function peersOf(id) { return ((S && S.peers) || []).filter(p => p.state === 'up' && p.families && p.families[id] && p.families[id].match); }
 function peerBlocks(seen, local) {      // a family only a peer has (the others' peer copies sit under this Mac's families)

@@ -256,7 +256,7 @@ def reach_words(e):
         return "ECONNREFUSED: peer gateway not listening on the link (check its hub is running and `localmodels peer serve` is set on it)"
     if n == errno.EHOSTUNREACH:
         return ("EHOSTUNREACH: if the link is up and `localmodels peer test` connects from a terminal, macOS Local Network "
-                "privacy is blocking the gateway (a LaunchAgent): System Settings → Privacy & Security → Local Network → enable python3")
+                "privacy is blocking the gateway (a LaunchAgent): System Settings → Privacy & Security → Local Network → enable Python (python3)")
     if n == errno.EHOSTDOWN: return 'EHOSTDOWN: peer not on the link (asleep, or cable disconnected)'
     if n == errno.ENETUNREACH: return "ENETUNREACH: no route to the peer's subnet (Thunderbolt Bridge down, or static address missing)"
     if isinstance(e, (socket.timeout, TimeoutError)) or n == errno.ETIMEDOUT: return 'ETIMEDOUT: no response (peer asleep or overloaded, or cable disconnected)'
@@ -464,9 +464,12 @@ def report(front=None):
             w = models.guardrail_words(keeper['gpu'], size / 2**30, guardrail_mode())
             if w: keeper['warnings'].append(f'{base}: {w}')
     for base, w in recycle.held_back().items(): keeper['warnings'].append(f'{base}: {w}')
+    from . import dash
+    try: used, total = dash.memory(); mem = dict(used=round(used, 1), total=round(total, 1))   # for the front's memory pool
+    except Exception: mem = None
     return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
-                keeper=keeper)
+                keeper=keeper, memory=mem)
 
 
 # ---------------------------------------------------------------- the front's side: the link
@@ -651,7 +654,8 @@ class Link:
                          rtt_ms=round(p.rtt * 1000, 1) if p.rtt is not None else None, route=dict(interface=p.route[0], port=p.route[1]),
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
                          address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, families=fams,
-                         maintenance=rep.get('maintenance'), keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'))
+                         maintenance=rep.get('maintenance'), keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
+                         memory=rep.get('memory') if p.state in ('up', 'maintenance') else None)
                 d['words'] = words(d)
                 out.append(d)
         return out

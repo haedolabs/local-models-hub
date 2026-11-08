@@ -94,6 +94,9 @@ def main():
 
 def run(box):
     for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
+    from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
+    llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')   # (the repo's defaults apply)
+    _peers.STATE, _peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
     llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
     crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
     crashes._seen_state.update(at=0.0, st={})
