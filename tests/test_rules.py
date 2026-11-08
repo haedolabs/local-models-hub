@@ -55,7 +55,7 @@ def reset(since):
 def test_recycle():
     print('the recycle policy (800,000 tokens processed since load: drain; 560,000 and idle: recycle at once)')
     real = llmshare.settings
-    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=dict(tokens=800000, soft=560000, before_batch=0.5))}
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=dict(tokens=800000, written=0, soft=560000, before_batch=0.5))}
     llmshare.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
     since = time.time() - 3 * 3600
     reset(since)
@@ -116,6 +116,19 @@ def test_recycle():
     recycle.plan([row(B), row(C2, context=4096)], {})
     j = recycle.job()
     t("a copy loaded with other settings (LM Studio's own loading) is recycled to the family's", j and j['copy'] == C2 and 'settings' in j['why'], j and j['why'])
+
+    print('the written count: long answers reach their threshold by tokens written first')
+    fam[B]['recycle'] = dict(tokens=300000, written=150000, soft=220000, before_batch=0.5)
+    reset(since); served(C2, 32, written_each=5000, prompt_each=1500)     # 208,000 processed (69%), 160,000 written (107%)
+    v = recycle.view(rows)['copies'][C2]
+    t('the view says the written count leads, against its own threshold', v['by'] == 'written' and v['share'] == 1.07 and v['band']['written'] == 150000, v)
+    w = recycle.plan(rows, busy); j = recycle.job()
+    t('past 150,000 written though under 300,000 processed: it drains, and the words say both counts', j and j['copy'] == C2 and '160,000 written' in j['why']
+      and 'or 150,000 written' in j['why'], j and j['why'])
+    reset(since); served(C2, 23, written_each=5000, prompt_each=1500)     # 115,000 written: 77%, past the soft share (73%)
+    recycle.plan(rows, {}); j = recycle.job()
+    t('idle past the soft share of the written threshold: recycled now', j and j['copy'] == C2 and 'idle at 76%' in j['why'], j and j['why'])
+    t('the default counts tokens written', recycle.thresholds({})['written'] == 150000 and recycle.thresholds(dict(recycle=dict(written=0)))['written'] == 0)
     llmshare.settings = real
 
 
