@@ -377,6 +377,17 @@ def test_runs():
     old = [rec(now - 5 * 3600, run='gone', run_total=10, run_done=3)]
     t('a run nobody has touched for an hour is not shown as running', ('proj', 'gone') not in runs.progress(old, now=now))
 
+    from localmodels import dash
+    real = dash.live_runs
+    dash.live_runs = lambda: {('lab', 'survey'): dict(kind='run', project='lab', name='survey', done=153, total=842, pct=18, started=100.0,
+                                                         job=dict(name='extract files', done=105, total=360))}
+    try:
+        rows = [dict(project='lab', batch=dict(name='', done=105, total=360, pct=29, left=None, now=[]), job=None, since=200.0)]
+        dash.attach_runs(rows)
+    finally: dash.live_runs = real
+    b, j = rows[0]['batch'], rows[0]['job']
+    t("a step's own lease counts never hide the named run: the run (X-Run) is the batch, the step's phase the job",
+      b['name'] == 'survey' and (b['done'], b['total']) == (153, 842) and (j['name'], j['total']) == ('extract files', 360) and rows[0]['since'] == 100.0, rows[0])
 
 def test_maintenance(box):
     print('maintenance: announced, on, the keeper standing down, the models put back after, the notice for every session')

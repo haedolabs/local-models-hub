@@ -572,8 +572,16 @@ function renderNow() {
   mc.style.display = mt ? '' : 'none';
   if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
   // stat tiles
-  const fams = S.lmstudio.families, busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
+  const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
+  let busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
+  const hosts = [`this Mac ${busy}/${cap}`];
+  for (const p of (S.peers || []).filter(p => p.state === 'up')) {
+    let b = 0, c = 0;
+    for (const f of Object.values(p.families || {})) if (f.match) { b += f.busy || 0; c += f.slots || 0; }
+    if (c) { busy += b; cap += c; hosts.push(`${p.name} ${b}/${c}`); }
+  }
   $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} slots`));
+  $('k-ans').title = hosts.join(' · ');
   const answering = S.users.filter(u => u.answering).map(u => u.project);
   const fin = u => (u.batch && u.batch.finish) || (u.job && u.job.finish);
   const ends = S.users.filter(fin);
