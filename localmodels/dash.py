@@ -162,13 +162,15 @@ def attach_runs(out):
     live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
     for r in out:
         r.setdefault('job', None)
-        if r.get('batch'): continue
         mine = [g for g in live if g['project'] == r['project']]
-        if not mine: continue
-        g = mine[0]
-        if g['kind'] == 'run': r['batch'], r['job'] = dict(g, now=[]), g.get('job')
-        else: r['job'] = dict(g)
-        r['since'] = g['started']
+        run = next((g for g in mine if g['kind'] == 'run'), None)
+        if run:                                  # the named run (X-Run) is the batch; counts a step's own lease carries are its job
+            own = r.get('batch') if r.get('batch') and not r['batch'].get('name') else None
+            r['batch'] = dict(run, now=(own or {}).get('now') or [])
+            r['job'] = run.get('job') or (dict(own, name=own.get('phase') or None) if own else None)
+            r['since'] = run['started']
+        elif not r.get('batch') and mine:
+            r['job'], r['since'] = dict(mine[0]), mine[0]['started']
 
 
 def users(shown=True):
