@@ -370,6 +370,15 @@ def swapping(wait=120):
         h.close()
 
 
+@contextlib.contextmanager
+def flocked(path):
+    """An exclusive lock on path for the length of the block: every process that changes the same shared file takes it."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'a+') as h:
+        fcntl.flock(h, fcntl.LOCK_EX)
+        yield
+
+
 # ---------------------------------------------------------------- gateways on this Mac: the registry, roles, nudges
 def _flock_test(path):
     """Whether some process holds an exclusive lock on path: True, False when it is free, None when there is no such file.
@@ -537,6 +546,15 @@ class Role:
         if fd is not None: os.close(fd)
 
 
+def supervisor():
+    """The gateway supervisor on this Mac, while it holds run/supervisor.lock: its run/supervisor.json ({pid, run, digest,
+    started, ...}), or None."""
+    if not _flock_test(os.path.join(RUN, 'supervisor.lock')): return None
+    try: d = json.load(open(os.path.join(RUN, 'supervisor.json')))
+    except (OSError, ValueError): return None
+    return d if isinstance(d, dict) else None
+
+
 def roles():
     """{name: the pid holding it} for every role some process holds now."""
     out = {}
@@ -643,11 +661,12 @@ REMOTE = None              # the door's link to its peers (peers.LINK): it count
 
 
 class _Remote:
-    """A slot held on a peer Mac's copy (peers.Link.take), given back like a lock."""
-    def __init__(self, c): self.c = c
+    """A slot held on a peer Mac's copy (peers.Link.take: a counted lock shared by this Mac's gateways), given back like a lock."""
+    def __init__(self, c, h=None): self.c, self.h = c, h
 
     def release(self):
-        if REMOTE is not None: REMOTE.give(self.c)
+        if REMOTE is not None: REMOTE.give(self.c, self.h)
+        elif self.h is not None: Counted.give(self.h)
 
 
 def _release(h):
@@ -661,7 +680,8 @@ def _take(models):
     the model) or (None, None)."""
     for m in models:
         if ' on ' in m:
-            if REMOTE is not None and REMOTE.take(m): return _Remote(m), m
+            h = REMOTE.take(m) if REMOTE is not None else None
+            if h is not None: return _Remote(m, h), m
             continue
         d = os.path.join(SLOTS, _safe(m)); os.makedirs(d, exist_ok=True)
         for i in range(parallel_of(m)):

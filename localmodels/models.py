@@ -39,7 +39,7 @@ GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # s
 LOADER = os.path.expanduser('~/Library/LaunchAgents/com.local-models.load-at-login.plist')   # a dedicated Mac's loader from before the hub
 START_TRIES, START_GAP = 3, 30                            # loads tried at start, and seconds between them
 _gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
-_start, _woke, _sizes = {}, {'at': 0.0}, {}              # this door run: each family's load at start; LM Studio started; sizes on disk
+_sizes, _BORN = {}, time.time()                          # sizes on disk (read once a process); when this process started
 
 
 def refused(out):
@@ -185,21 +185,49 @@ def _ok_id(s):
 
 def server_up(timeout=3):
     """Whether LM Studio's server is up: only a refused connection means down (a slow answer means up and busy)."""
-    try: urllib.request.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=timeout); return True
-    except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
-    except ConnectionRefusedError: return False
-    except OSError: return True
+    return llmshare.server_up(timeout)
 
 
 def ensure_server(why='after a load'):
-    """LM Studio's server, started only when it is down (starting a running one restarts it). -> whether it answers now."""
-    if server_up(): return True
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} LM Studio's server is down ({why}): lms server start", flush=True)
-    _lms('server', 'start', timeout=60)
-    for _ in range(20):
-        if server_up(2): return True
-        time.sleep(0.5)
-    return False
+    """LM Studio's server, started only when it is down, with one start across every process (llmshare.start_server; the
+    instance manager does not wait out the request path's minute between two starts). -> whether it answers now."""
+    return llmshare.start_server(why, debounce=0)
+
+
+# ---------------------------------------------------------------- load_at_start, once per gateway run (keeper.json)
+def run_id():
+    """This gateway run: the supervisor's (LOCALMODELS_RUN in a worker, or supervisor.json's while the supervisor holds its
+    lock), so a handoff, or a supervisor restart that adopts its workers, is not a new start; else this process's own."""
+    r = os.environ.get('LOCALMODELS_RUN')
+    if r: return r
+    if llmshare._flock_test(os.path.join(llmshare.RUN, 'supervisor.lock')):
+        try: r = json.load(open(os.path.join(llmshare.RUN, 'supervisor.json'))).get('run')
+        except (OSError, ValueError, AttributeError): r = None
+        if r: return str(r)
+    return f'{os.getpid()}-{int(_BORN)}'
+
+
+def _starts(st):
+    """keeper.json 'at_start' for this run: {run, families: {family: {tries, next, done, words}}, woke}, new for a new run."""
+    a = st.get('at_start')
+    if not isinstance(a, dict) or a.get('run') != run_id(): a = st['at_start'] = dict(run=run_id(), families={}, woke=0.0)
+    return a
+
+
+def start_state(b):
+    """A family's load_at_start record in this gateway run: {tries, next, done[, words]}."""
+    a = crashes._read(fresh=True).get('at_start')
+    if isinstance(a, dict) and a.get('run') == run_id(): return dict((a.get('families') or {}).get(b) or dict(tries=0, next=0.0, done=False))
+    return dict(tries=0, next=0.0, done=False)
+
+
+def _start_update(b, **fields):
+    with crashes._state() as st: _starts(st)['families'].setdefault(b, dict(tries=0, next=0.0, done=False)).update(fields)
+
+
+def reset_start():
+    """Forget the load_at_start record (a new run starts without one anyway)."""
+    with crashes._state() as st: st.pop('at_start', None)
 
 
 def load(key, ident, context, parallel):
@@ -285,8 +313,9 @@ def keep():
 def wake(fams):
     """A dedicated Mac right after login: a family to load at start, and LM Studio not running at all (its server refuses
     connections and `lms ps` fails). Its daemon is started (lms daemon up; never stopped), once a door run. -> words or None."""
-    if _woke['at'] or not any(isinstance(f, dict) and f.get('load_at_start') for f in fams.values()) or server_up(): return None
-    _woke['at'] = time.time()
+    a = crashes._read(fresh=True).get('at_start')
+    if (isinstance(a, dict) and a.get('run') == run_id() and a.get('woke')) or not any(isinstance(f, dict) and f.get('load_at_start') for f in fams.values()) or server_up(): return None
+    with crashes._state() as st: _starts(st)['woke'] = time.time()
     ok, out = _lms('daemon', 'up', timeout=120)
     ensure_server('to load a family at start')
     return "LM Studio not running: started llmster (`lms daemon up`) for load_at_start: " + ', '.join(b for b, f in fams.items() if isinstance(f, dict) and f.get('load_at_start')) + \
@@ -308,8 +337,10 @@ def at_start(b, f, have, room):
     (then this start is done), when it was loaded or given up on in this door run, while the login loader from before the
     hub is installed (it loads it), when LM Studio refused it and nothing has changed, when the GPU may not hold it yet,
     when there is not room, or during the pause after a failed try."""
-    s = _start.setdefault(b, dict(tries=0, next=0.0, done=False))
-    if any(llmshare.family(i) == b for i in have): s['done'] = True; return False, None
+    s = start_state(b)
+    if any(llmshare.family(i) == b for i in have):
+        if not s['done']: _start_update(b, done=True)
+        return False, None
     if s['done']: return False, None
     if os.path.exists(LOADER): return False, f'{b}: load_at_start deferred to LaunchAgent com.local-models.load-at-login (`localmodels install` retires it)'
     blocked = crashes.load_blocked(b, conditions())
@@ -325,19 +356,19 @@ def at_start(b, f, have, room):
 
 def _load_at_start(b, f):
     """Load a family's first copy at start (under the swap lock): its settings' key, context and slots. -> words."""
-    s = _start.setdefault(b, dict(tries=0, next=0.0, done=False))
-    s['tries'] += 1
+    tries = start_state(b)['tries'] + 1
+    _start_update(b, tries=tries)
     ok, out = load(f.get('key') or b, b, f.get('context') or 32768, f.get('parallel') or 4)
     if ok:
-        s['done'] = True; ensure_server()                  # LM Studio may turn its server off when a model changes
-        return [f'{b}: loaded (load_at_start' + (f', attempt {s["tries"]}' if s['tries'] > 1 else '') + ')']
+        _start_update(b, done=True); ensure_server()       # LM Studio may turn its server off when a model changes
+        return [f'{b}: loaded (load_at_start' + (f', attempt {tries}' if tries > 1 else '') + ')']
     if refused(out): return [f'{b}: load_at_start failed: {refused(out)}']   # recorded: no try until something changes
-    s['next'] = time.time() + START_GAP
-    if s['tries'] >= START_TRIES:
-        s['done'] = True
-        s['words'] = f'{b}: load_at_start failed after {START_TRIES} attempts ({out[-160:]}); load manually: localmodels use {b}'
-        return [s['words']]
-    return [f'{b}: load_at_start attempt {s["tries"]}/{START_TRIES} failed, retry in {START_GAP} s: {out[-160:]}']
+    if tries >= START_TRIES:
+        words = f'{b}: load_at_start failed after {START_TRIES} attempts ({out[-160:]}); load manually: localmodels use {b}'
+        _start_update(b, next=time.time() + START_GAP, done=True, words=words)
+        return [words]
+    _start_update(b, next=time.time() + START_GAP)
+    return [f'{b}: load_at_start attempt {tries}/{START_TRIES} failed, retry in {START_GAP} s: {out[-160:]}']
 
 
 def end_maintenance():

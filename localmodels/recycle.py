@@ -39,12 +39,11 @@ from . import crashes, llmshare
 DEFAULT = dict(tokens=300_000, soft=220_000, before_batch=0.5, requests=0)
 DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try again after; between two recycles of a family; a fresh-start request lasts
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
-_held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
 
 
 def held_back():
     """The families whose recycle waits because a lone copy might not load again, with why: {family: words}."""
-    return dict(_held)
+    return dict(((crashes._read().get('recycle') or {}).get('held')) or {})
 
 
 def guardrail_off():
@@ -109,7 +108,7 @@ def drift(row, f):
 
 def _r(st):
     r = st.setdefault('recycle', {})
-    for k, v in (('job', None), ('last', {}), ('fresh', {}), ('retry_after', 0)):
+    for k, v in (('job', None), ('last', {}), ('fresh', {}), ('retry_after', 0), ('held', {})):
         r.setdefault(k, v)
     return r
 
@@ -133,8 +132,7 @@ def plan(rows, busy=None):
     r = st.get('recycle') or {}
     if r.get('job') or time.time() < (r.get('retry_after') or 0): return None
     seen, down, have = st.get('seen') or {}, st.get('down') or {}, {x['id']: x for x in rows}
-    best = None
-    _held.clear()
+    best, held = None, {}                                      # held: kept in keeper.json, so whichever gateway answers shows it
     for base, f in (llmshare.settings().get('families') or {}).items():
         th = thresholds(f)
         if not th or base in down: continue
@@ -153,11 +151,13 @@ def plan(rows, busy=None):
             elif idle and c['tokens'] >= th['soft']: why, rank = f"idle with {c['tokens']:,} tokens processed since load, past the soft threshold ({th['soft']:,})", 1 + s
             else: continue
             if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
-                _held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
+                held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
                                "the instance manager here, guardrail not Off); set LM Studio's model-loading guardrail to Off, or load it once "
                                'through the instance manager (crash recovery, or `localmodels use` after an unload)')
                 continue
             if best is None or rank > best[0]: best = (rank, i, base, c, round(s, 2), why)
+    if held != (r.get('held') or {}):
+        with crashes._state() as st2: _r(st2)['held'] = held
     if not best: return None
     _, copy, base, c, s, why = best
     with crashes._state() as st2:

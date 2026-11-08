@@ -651,7 +651,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
-                                        last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
+                                        last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting()))
         return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, POST /hub/recycle, POST /hub/client-error'))
 
 

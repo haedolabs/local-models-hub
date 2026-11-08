@@ -170,19 +170,21 @@ def test_server_probe(box):
         def do_GET(self):
             time.sleep(Slow.delay); self.send_response(200); self.send_header('Content-Length', '2'); self.end_headers(); self.wfile.write(b'[]')
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Slow); threading.Thread(target=srv.serve_forever, daemon=True).start()
-    real = L.LMSTUDIO, models._lms, models.time.sleep
-    calls = []
-    models._lms = lambda *a, **k: (calls.append(a), (True, ''))[1]
-    L.LMSTUDIO = f'http://127.0.0.1:{srv.server_address[1]}'
-    t('the server answers: no start', models.ensure_server() and not calls)
+    script, log = os.path.join(box, 'lms-probe'), os.path.join(box, 'lms-probe.log')
+    open(script, 'w').write(f'#!/bin/sh\necho "$@" >> {log}\n'); os.chmod(script, stat.S_IRWXU)
+    calls = lambda: [x for x in open(log).read().split('\n') if x] if os.path.exists(log) else []
+    real = L.LMSTUDIO, L.LMS, time.sleep
+    L.LMS, L.LMSTUDIO = script, f'http://127.0.0.1:{srv.server_address[1]}'
+    t('the server answers: no start', models.ensure_server() and not calls())
     Slow.delay = 4.0
-    t('the server is slow (busy): no start', models.ensure_server() and not calls)
+    t('the server is slow (busy): no start', models.ensure_server() and not calls())
     Slow.delay = 0.0; srv.shutdown(); port = srv.server_address[1]; srv.server_close()
     L.LMSTUDIO = f'http://127.0.0.1:{port}'
-    models.time.sleep = lambda s: None
-    up = models.ensure_server()
-    t('the connection is refused: one start, and the truth that it is still down', not up and [c[:2] for c in calls] == [('server', 'start')], calls)
-    L.LMSTUDIO, models._lms, models.time.sleep = real
+    time.sleep = lambda s: None
+    try: up = models.ensure_server()
+    finally: time.sleep = real[2]
+    t('the connection is refused: one start, and the truth that it is still down', not up and calls() == ['server start'], calls())
+    L.LMSTUDIO, L.LMS = real[0], real[1]
 
 
 def test_keep(box):
@@ -734,6 +736,65 @@ def test_shared(box):
         L.use_state(old); fresh()
 
 
+def test_registry_views(box):
+    print('the screens and the registry: gateway pids, the code a gateway runs, error records')
+    from localmodels import dash, errors, llmshare as L
+    state = os.path.join(box, 'views'); os.makedirs(state)
+    old, procs = L.use_state(state), []
+    try:
+        g, _ = helper(state, 'gateway', '60'); procs.append(g)
+        os.makedirs(L.INFLIGHT, exist_ok=True)
+        L._write(os.path.join(L.INFLIGHT, f'{os.getpid()}-1.json'), dict(hub_pid=os.getpid(), since=time.time(), state='answering', kind='batch'))
+        fresh(); real = dash._hub_pid
+        dash._hub_pid = lambda: 999999
+        pids = dash.gateway_pids()
+        t('gateway pids: the registry, and a gateway older than it by its marks (never counted as a client)', g.pid in pids and os.getpid() in pids and 999999 not in pids, pids)
+        stop(g, kill=True); os.remove(os.path.join(L.INFLIGHT, f'{os.getpid()}-1.json')); fresh()
+        t('no gateway registered: /hub/health names it', dash.gateway_pids() == {999999})
+        dash._hub_pid = real
+    finally:
+        for p in procs:
+            if p.poll() is None: stop(p, kill=True)
+        L.use_state(old); fresh()
+    tree = os.path.join(box, 'release'); os.makedirs(os.path.join(tree, 'localmodels', '__pycache__')); os.makedirs(os.path.join(tree, 'bin'))
+    open(os.path.join(tree, 'localmodels', 'a.py'), 'w').write('x = 1\n'); open(os.path.join(tree, 'bin', 'localmodels'), 'w').write('#!/bin/sh\n')
+    d1 = dash.deploy_digest(tree)
+    open(os.path.join(tree, 'localmodels', '__pycache__', 'a.cpython-39.pyc'), 'wb').write(b'cache'); open(os.path.join(tree, 'localmodels', '.DS_Store'), 'w').write('x')
+    d2 = dash.deploy_digest(tree)
+    open(os.path.join(tree, 'localmodels', 'a.py'), 'w').write('x = 2\n')
+    t('the deploy digest: 16 hex characters, blind to __pycache__ and dotfiles, changed by any code change', len(d1) == 16 and d1 == d2 != dash.deploy_digest(tree)
+      and dash.deploy_files(tree) == [os.path.join('bin', 'localmodels'), os.path.join('localmodels', 'a.py')], dash.deploy_files(tree))
+    rec = errors.record('test: the record says which process', ValueError('x'), source='test')
+    t('an error record says which process wrote it', rec and rec.get('pid') == os.getpid(), rec and {k: rec.get(k) for k in ('pid', 'gen')})
+
+
+def test_web_state(box):
+    print("the dashboard's shared files: colors.json under its lock, memory.jsonl from one sampler at a time")
+    import fcntl, threading
+    from localmodels import web
+    hold = threading.Event()
+    def holder():
+        with open(web.COLORS + '.lock', 'a+') as h:
+            fcntl.flock(h, fcntl.LOCK_EX); hold.set(); time.sleep(0.6)
+    th = threading.Thread(target=holder); th.start(); hold.wait(5)
+    t0 = time.time(); got = web.colors(['lab']); waited = time.time() - t0; th.join()
+    t('colors.json: a second writer waits for the lock another process holds', waited >= 0.4 and got.get('lab'), round(waited, 2))
+    web._mem.clear()
+    now = time.time()
+    open(web.MEMORY, 'w').write('\n'.join(json.dumps([round(now - k * 15), 50.0]) for k in (40, 30, 20)) + '\n')
+    web.load_tail(); n1 = len(web._mem)
+    open(web.MEMORY, 'a').write(json.dumps([round(now - 5), 51.0]) + '\n')
+    web.load_tail()
+    t('memory.jsonl: a gateway taking the sampler role adds only the rows newer than its own last one', n1 == 3 and len(web._mem) == 4, (n1, len(web._mem)))
+    stop, real = threading.Event(), web.dash.pool
+    web.dash.pool = lambda: dict(hosts=[dict(name='here', used=40.0, total=128.0)])
+    th = threading.Thread(target=web.sampler, args=(stop,)); th.start(); time.sleep(0.3)
+    t0 = time.time(); stop.set(); th.join(5)
+    web.dash.pool = real
+    t('the sampler samples at once, then returns as soon as it is stopped (not 15 s later)', not th.is_alive() and time.time() - t0 < 1 and web._mem[-1][1] == 40.0, web._mem[-1])
+    web._mem.clear()
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -752,6 +813,8 @@ def main():
         test_about(box)
         test_names(box)
         test_shared(box)
+        test_web_state(box)
+        test_registry_views(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

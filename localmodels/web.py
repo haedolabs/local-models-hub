@@ -36,8 +36,9 @@ _mem = collections.deque(maxlen=24 * 60 * 4)            # (time, GB used here, {
 # ---------------------------------------------------------------- colors that follow the project
 def colors(names=()):
     """{project: slot 1..7, or 0 for "other"}; a new project takes the next free slot and keeps it while it is seen;
-    when every slot is taken, the slot of the project not seen for longest (a week or more) is passed on."""
-    with _lock:
+    when every slot is taken, the slot of the project not seen for longest (a week or more) is passed on. Read and written
+    under colors.json.lock as well, so two gateways never give one slot to two projects."""
+    with _lock, llmshare.flocked(COLORS + '.lock'):
         try: d = json.load(open(COLORS))
         except (OSError, ValueError): d = {}
         if 'slots' not in d: d = dict(slots={k: v for k, v in d.items() if isinstance(v, int)}, seen={})
@@ -115,7 +116,7 @@ def _snapshot():
         fams.append(dict(id=f['id'], at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps))
     n, secs, refused = _cached('waits7', 30, lambda: llmshare.waits(7))
     out = dict(time=time.time(), clock=time.strftime('%H:%M:%S'),
-               door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting_here()),
+               door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting()),       # every live gateway's queue
                lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age())),
                settings_error=llmshare.settings_error(),
                crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7))),
@@ -229,16 +230,23 @@ def _mem_row(line):
     except (ValueError, TypeError, IndexError, KeyError): return None
 
 
-def sampler():
-    """Memory every 15 s: in memory for the chart, and on disk (a day of it) so a restart of the door keeps the picture."""
-    day = time.time() - 86400
+def load_tail():
+    """Take into this process's samples the rows of memory.jsonl newer than its last one (a day at most): at a gateway's
+    warm-up, and when it takes the memory-sampler role from another gateway."""
+    last = _mem[-1][0] if _mem else time.time() - 86400
     try:
         for line in open(MEMORY):
             x = _mem_row(line)
-            if x and x[0] >= day: _mem.append(x)
+            if x and x[0] > last: _mem.append(x)
     except OSError: pass
+
+
+def sampler(stop=None):
+    """Memory every 15 s, in the one gateway that holds the memory-sampler role: in memory for the chart, and on disk (a
+    day of it) so a restart or a handoff keeps the picture. stop: returns between two samples when it is set."""
+    load_tail()
     written = 0
-    while True:
+    while stop is None or not stop.is_set():
         try:
             t, pl = time.time(), dash.pool()
             u, o = pl['hosts'][0]['used'], {h['name']: [h['used'], h['total']] for h in pl['hosts'][1:]} or None
@@ -247,9 +255,10 @@ def sampler():
             written += 1
             if written % 240 == 0 and os.path.getsize(MEMORY) > 400_000:      # an hour of samples: keep only the last day
                 keep = [json.dumps([round(a), round(b, 1)] + ([o] if o else [])) for a, b, o in list(_mem)]
-                tmp = MEMORY + '.tmp'; open(tmp, 'w').write('\n'.join(keep) + '\n'); os.replace(tmp, MEMORY)
+                tmp = f'{MEMORY}.{os.getpid()}.tmp'; open(tmp, 'w').write('\n'.join(keep) + '\n'); os.replace(tmp, MEMORY)
         except Exception as e: errors.record('memory sampler', e)
-        time.sleep(15)
+        if stop is None: time.sleep(15)
+        elif stop.wait(15): return
 
 
 def page():

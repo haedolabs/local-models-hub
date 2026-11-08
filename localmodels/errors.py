@@ -38,8 +38,8 @@ def record(where, exc=None, words=None, trace=None, source='gateway'):
         _last[key] = [now, 0]
     if trace is None and exc is not None:
         trace = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=8))
-    rec = dict(at=round(now, 1), source=source, where=str(where)[:80], error=what, trace=str(trace or '')[-2000:],
-               **({'repeats': repeats} if repeats else {}))
+    rec = dict(at=round(now, 1), source=source, where=str(where)[:80], error=what, trace=str(trace or '')[-2000:], pid=os.getpid(),
+               **({'gen': os.environ['LOCALMODELS_GEN']} if os.environ.get('LOCALMODELS_GEN') else {}), **({'repeats': repeats} if repeats else {}))
     try: llmshare._append(FILE, rec, roll_at=ROLL_AT)
     except OSError: pass
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", flush=True)

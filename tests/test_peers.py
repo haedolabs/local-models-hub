@@ -198,6 +198,9 @@ def test_keeper(box):
     w = recycle.plan(rows, {})
     t('a lone copy past its band, never loaded by the hub here: not recycled (an unload it might not undo), and said why',
       w is None and recycle.job() is None and 'not' in (recycle.held_back().get(F) or '') and 'recycle threshold' in (recycle.held_back().get(F) or ''), (w, recycle.held_back()))
+    other = subprocess.run([sys.executable, '-c', 'import json, sys; sys.path.insert(0, sys.argv[1]); from localmodels import recycle; print(json.dumps(recycle.held_back()))', HOME],
+                           capture_output=True, text=True, env=dict(os.environ, LOCALMODELS_STATE=L.SHARED)).stdout
+    t('...and another process (any gateway answering) reads the same words from keeper.json', json.loads(other or '{}') == recycle.held_back() != {}, other[:120])
     open(os.path.join(peers.LMSTUDIO_HOME, 'settings.json'), 'w').write(json.dumps(dict(modelLoadingGuardrails=dict(mode='off'))))
     recycle._counts.update(at=0.0, by={})
     w = recycle.plan(rows, {})
@@ -238,7 +241,7 @@ def test_keeper(box):
     models.LOADER = os.path.join(box, 'no-such-agent.plist')
     L.SWAP_LOCK = os.path.join(box, 'swap.lock')
     with crashes._state() as st: st.clear()
-    models._start.clear()
+    models.reset_start()
     gpu = {'v': dict(limit_gb=36.0, set=False, total_gb=48.0, boot=False)}
     models.gpu = lambda: gpu['v']
     w = models.keep()
@@ -250,28 +253,35 @@ def test_keeper(box):
     calls.clear(); models.keep()
     t('a load that failed is tried again only after 30 s', not [c for c in calls if c[0] == 'load'], calls)
     for _ in range(3):
-        models._start[F]['next'] = 0; models.keep()
+        models._start_update(F, next=0); models.keep()
     w = models.keep()
     t('three tries in all, then it stops for this start and says how to load it by hand',
-      len([c for c in calls if c[0] == 'load']) == 2 and models._start[F].get('done') and 'localmodels use' in models._start[F].get('words', ''), (calls, models._start[F]))
-    models._start.clear(); calls.clear(); state['load'] = (True, 'Model loaded')
+      len([c for c in calls if c[0] == 'load']) == 2 and models.start_state(F).get('done') and 'localmodels use' in models.start_state(F).get('words', ''), (calls, models.start_state(F)))
+    models.reset_start(); calls.clear(); state['load'] = (True, 'Model loaded')
     models.keep(); state['rows'] = [dict(id=F, key=F, state='IDLE', size='37.75 GB', context=65536, parallel=4)]
     calls.clear(); models.keep()
-    t('loaded at start once; with it loaded, nothing more', models._start[F].get('done') and not [c for c in calls if c[0] == 'load'], (calls, models._start[F]))
+    t('loaded at start once; with it loaded, nothing more', models.start_state(F).get('done') and not [c for c in calls if c[0] == 'load'], (calls, models.start_state(F)))
     state['rows'] = []; calls.clear(); models.keep()
     t('unloaded later in the same run (a person chose): not loaded again until the door starts again', not [c for c in calls if c[0] == 'load'], calls)
-    models._start.clear(); open(os.path.join(box, 'agent.plist'), 'w').write('<plist/>'); models.LOADER = os.path.join(box, 'agent.plist')
+    os.environ['LOCALMODELS_RUN'] = 'run-a'; models.reset_start()
+    calls.clear(); models.keep(); first = [c for c in calls if c[0] == 'load']
+    calls.clear(); models.keep(); same = [c for c in calls if c[0] == 'load']
+    os.environ['LOCALMODELS_RUN'] = 'run-b'; calls.clear(); models.keep(); new = [c for c in calls if c[0] == 'load']
+    del os.environ['LOCALMODELS_RUN']
+    t('load_at_start once per gateway run, kept in keeper.json: the same run id (a handoff) never loads it again, a new run does',
+      len(first) == 1 and not same and len(new) == 1, (first, same, new))
+    models.reset_start(); open(os.path.join(box, 'agent.plist'), 'w').write('<plist/>'); models.LOADER = os.path.join(box, 'agent.plist')
     calls.clear(); w = models.keep()
     t('the login agent from before the hub is still installed: the keeper leaves loading to it (one loader at a time) and says so',
       not [c for c in calls if c[0] == 'load'] and any('load-at-login' in x for x in w), w)
-    models.LOADER = os.path.join(box, 'no-such-agent.plist'); models._start.clear()
+    models.LOADER = os.path.join(box, 'no-such-agent.plist'); models.reset_start()
     L.read_ok, models.server_up = (lambda: False), (lambda timeout=3: False)
     calls.clear(); models.keep()
     t("LM Studio not running at all on a dedicated Mac: its daemon is started (never stopped), once", ('daemon', 'up') in calls, calls)
     calls.clear(); models.keep()
     t('...and not started twice in a row', ('daemon', 'up') not in calls, calls)
     models._lms, L.settings, L.loaded, L.read_ok, L.busy_slots, L.api_models, models.free_gb, models.ensure_server, L.SWAP_LOCK, models.conditions, models.gpu, models.downloaded, models.LOADER, models.server_up = real
-    models._start.clear()
+    models.reset_start()
     with crashes._state() as st: st.clear()
 
 
@@ -470,8 +480,9 @@ def test_link_rules(box):
         L.sync()
         p = L.peers['mac']; p.state, p.cap, p.match = 'up', {F: 2}, {F: (True, None)}
         c = peers.cid(F, 'mac')
-        t('a peer up with its family matched and free slots is a copy', L.replicas(F) == [c] and L.take(c), L.replicas(F))
-        L.give(c)
+        h = L.take(c)
+        t('a peer up with its family matched and free slots is a copy', L.replicas(F) == [c] and h is not None, L.replicas(F))
+        L.give(c, h)
         L.failed(c, 503, 'no free slot'); L.failed(c, 503, 'no free slot')
         t('two requests it could not take: still up, but nothing more until the next look', p.state == 'up' and not L.take(c), (p.state, p.cap))
         L.answered(c); p.cap = {F: 2}
@@ -483,6 +494,38 @@ def test_link_rules(box):
 
 
 # ---------------------------------------------------------------- two doors
+def test_link_followers(box):
+    print("the link with several gateways: one leader writes link.json, the others follow it; peer slots are counted across all")
+    real = llmshare.settings
+    llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'mac': dict(url='http://192.168.213.9:1235')})
+    try:
+        lead, follow = peers.Link(), peers.Link(); follow.leader = False
+        lead.sync()
+        p = lead.peers['mac']; p.state, p.cap, p.match, p.first = 'up', {F: 2}, {F: (True, None)}, {F: 2}
+        p.report = dict(families={F: dict(slots=4, busy=0, copies=[])})
+        lead.write()
+        c = peers.cid(F, 'mac')
+        t("a follower takes the leader's look from link.json: state, cap, match, first", follow.replicas(F) == [c] and follow.peers['mac'].cap == {F: 2}
+          and follow.peers['mac'].first == {F: 2}, (follow.replicas(F), follow.peers.get('mac') and follow.peers['mac'].cap))
+        h1, h2 = lead.take(c), follow.take(c)
+        h3 = follow.take(c)
+        t('two gateways, cap 2: a third take is refused (the count is shared)', h1 is not None and h2 is not None and h3 is None, (h1, h2, h3))
+        t('the first-instance rule counts both gateways too', not lead.first_free(c) and not follow.first_free(c))
+        lead.give(c, h1)
+        mt, n0 = os.path.getmtime(peers.STATE), llmshare.nudged('peer-poller')
+        follow.failed(c, 503, 'no free slot')
+        t("a follower's failed request: its own cap drops, it asks the leader to look, and it never writes link.json",
+          follow.peers['mac'].cap[F] == 0 and os.path.getmtime(peers.STATE) == mt and llmshare.nudged('peer-poller') > n0, follow.peers['mac'].cap)
+        time.sleep(0.05); lead.write(); follow.checked = 0.0; follow.follow()
+        t("the leader writes again: the follower takes its look, and its own lowered cap is gone", follow.peers['mac'].cap[F] == 2, follow.peers['mac'].cap)
+        follow.give(c, h2); time.sleep(0.15); lead.write()
+        d = json.load(open(peers.STATE))
+        f = d['peers'][0]['families'][F]
+        t("link.json says which gateway wrote it, each family's first-instance slots, and the slots held now", (d.get('by') or {}).get('pid') == os.getpid()
+          and f.get('first') == 2 and f.get('here') == 0 and f.get('free_here') == 2, (d.get('by'), f))
+    finally: llmshare.settings = real
+
+
 def test_two_doors(box):
     print('two doors: this Mac and a peer, each with its own pretend LM Studio')
     front_dir, peer_dir = os.path.join(box, 'front'), os.path.join(box, 'peer')
@@ -513,11 +556,8 @@ def test_two_doors(box):
         return False
 
     # this Mac: the door in this process, like test_gateway.py, with the peer in its settings
-    for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(front_dir, name.lower()))
-    llmshare.REQUESTS, llmshare.WAITS = os.path.join(front_dir, 'requests.jsonl'), os.path.join(front_dir, 'waits.jsonl')
-    crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(front_dir, 'keeper.json'), os.path.join(front_dir, 'crashes.jsonl'), os.path.join(front_dir, 'logs')
+    llmshare.use_state(front_dir); crashes.LOGS = os.path.join(front_dir, 'logs')
     crashes._seen_state.update(at=0.0, st={})
-    peers.TOKEN_FILE, peers.STATE = os.path.join(front_dir, 'peer-token'), os.path.join(front_dir, 'link.json')
     lmstudio_home(os.path.join(front_dir, 'lmstudio'), 'model: test/family\n'); peers.LMSTUDIO_HOME = os.path.join(front_dir, 'lmstudio')
     open(peers.TOKEN_FILE, 'w').write(TOKEN + '\n'); os.chmod(peers.TOKEN_FILE, 0o600)
     peers.route_of = lambda host: ('lo0', 'Loopback')
@@ -713,22 +753,16 @@ def test_pool(box):
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-peerstest-')
     try:
-        for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
-        llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
-        from localmodels import names as _names                          # never this Mac's live settings or names
-        llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')
-        crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
-        os.makedirs(crashes.LOGS)
+        llmshare.use_state(box)                               # every shared path, every module's: never this Mac's live state
+        crashes.LOGS = os.path.join(box, 'logs'); os.makedirs(crashes.LOGS)
         crashes._seen_state.update(at=0.0, st={})
-        from localmodels import maint
-        maint.FILE = os.path.join(box, 'maintenance.json')
-        peers.STATE, peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
         peers.LMSTUDIO_HOME = os.path.join(box, 'lmstudio-home'); os.makedirs(peers.LMSTUDIO_HOME)     # never this Mac's own LM Studio settings
         test_units(box)
         test_keeper(box)
         test_commands(box)
         test_copy_model(box)
         test_link_rules(box)
+        test_link_followers(box)
         test_two_doors(box)
         test_pool(box)
     finally: shutil.rmtree(box, ignore_errors=True)

@@ -90,11 +90,54 @@ def digest(folder):
     return h.hexdigest()[:12]
 
 
+DEPLOYED = ('localmodels', os.path.join('bin', 'localmodels'), 'LICENSE', os.path.join('.claude-plugin', 'plugin.json'))
+
+
+def deploy_files(root):
+    """The files a release holds, relative to root: localmodels/ (no __pycache__, .pyc or dotfiles), bin/localmodels,
+    LICENSE and the plugin manifest (the dashboard's corner reads the last two)."""
+    out = []
+    for top in DEPLOYED:
+        p = os.path.join(root, top)
+        if os.path.isdir(p):
+            for d, dirs, files in os.walk(p):
+                dirs[:] = sorted(x for x in dirs if x != '__pycache__' and not x.startswith('.'))
+                out += [os.path.relpath(os.path.join(d, f), root) for f in files if not f.endswith('.pyc') and not f.startswith('.')]
+        elif os.path.isfile(p): out.append(top)
+    return sorted(out)
+
+
+def deploy_digest(root):
+    """What a release is: sha256 over its files' relative paths and bytes, 16 hex characters (a release folder's name, and
+    the code a gateway says it runs in /hub/health)."""
+    h = hashlib.sha256()
+    for rel in deploy_files(root):
+        try: data = open(os.path.join(root, rel), 'rb').read()
+        except OSError: continue
+        h.update(rel.encode() + b'\0'); h.update(len(data).to_bytes(8, 'big')); h.update(data)
+    return h.hexdigest()[:16]
+
+
+def health(fresh=False):
+    """The serving gateway's /hub/health, or None when none answers (cached 2 s)."""
+    def get():
+        try: return json.load(urllib.request.urlopen(llmshare.HUB + '/hub/health', timeout=1))
+        except (OSError, ValueError): return None
+    if fresh: _cache.pop('health', None)
+    return every('health', 2, get)
+
+
 def door():
-    """The hub's door: up or not, and whether launchd runs the code that is in this repo now."""
+    """The gateway: up or not; whether it runs the code in this checkout now (the serving gateway's code digest, from
+    /hub/health; for a gateway older than that, the installed copy's files); and the generations still draining."""
     up = llmshare.hub_up(fresh=True)
-    stale = every('stale', 10, lambda: os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME))
-    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(stale))
+
+    def stale():
+        h = health()
+        if h and h.get('code'): return h['code'] != deploy_digest(HOME)
+        return os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME)
+    draining = [dict(gen=r.get('gen'), pid=r['pid'], open=r.get('open')) for r in llmshare.live_gateways() if r.get('role') == 'draining']
+    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(every('stale', 10, stale)), draining=draining)
 
 
 def lmstudio():
@@ -212,7 +255,7 @@ def users(shown=True):
         for x in ('session', 'host_session', 'app', 'project', 'step'): r[x] = r[x] or f.get(x)
         r['since'] = min(r['since'], f.get('since') or time.time())
     lm = every('lmpid', 30, lambda: {p for p, (_, c) in _procs().items() if 'LM Studio' in c or '.lmstudio' in c})
-    hubs = {f.get('hub_pid') for f in llmshare.inflight()} | {_hub_pid()}
+    hubs = gateway_pids()
     for pid, n in every('direct', 3, lambda: whois.clients_of(1234, skip=lm | hubs)).items():
         who = whois.identity(pid)
         r = row(pid, who.get('project'))
@@ -245,9 +288,21 @@ def _procs():
     return out
 
 
+def gateway_pids():
+    """The gateway processes on this Mac (never counted as clients that bypass the gateway): the registry's live gateways,
+    draining ones included, and the supervisor; a gateway older than the registry by its marks, or by /hub/health when no
+    gateway is registered (a worker never asks its own port)."""
+    pids = {r['pid'] for r in llmshare.live_gateways()}
+    sup = llmshare.supervisor()
+    if sup: pids.add(sup.get('pid'))
+    pids |= {f.get('hub_pid') for f in llmshare.inflight() if llmshare.gateway_live(f.get('hub_pid')) is None}
+    if not pids and not os.environ.get('LOCALMODELS_LISTEN'): pids.add(_hub_pid())
+    return {p for p in pids if p}
+
+
 def _hub_pid():
-    try: return json.load(urllib.request.urlopen(llmshare.HUB + '/hub/health', timeout=1)).get('pid')
-    except (OSError, ValueError): return None
+    h = health()
+    return h.get('pid') if isinstance(h, dict) else None
 
 
 def claude(hours=3):

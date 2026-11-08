@@ -491,18 +491,59 @@ class Peer:
         self.refused_token, self.refused_at, self.tries_refused = None, 0.0, 0
         self.report, self.route, self.route_at = None, (None, None), 0.0
         self.strikes = []                               # when requests failed there though the peer looked up
-        self.inflight = collections.Counter()           # family -> this Mac's requests on the peer now
-        self.cap = {}                                   # family -> how many this Mac may have there, from the last look
+        self.cap = {}                                   # family -> how many this Mac (all its gateways) may have there, from the last look
         self.match = {}                                 # family -> (True, None) or (False, words)
         self.first = {}                                 # family -> the slots of the peer's first copy (filled before a second copy anywhere)
 
 
 class Link:
-    """This Mac's door and its peers: who is up, which families match, how many each may take now."""
+    """This Mac's gateways and their peers: who is up, which families match, how many each may take now. One gateway, the
+    holder of the peer-poller role (leader), looks at the peers and writes link.json; the others follow it from that file.
+    The slots held on a peer are counted lock files shared by every gateway here (llmshare.Counted)."""
     def __init__(self):
         self.lock, self.peers, self.order, self.mine, self.wrote = threading.RLock(), {}, [], {}, 0.0
+        self.leader = True               # a gateway that runs alone leads; a worker follows until it holds the peer-poller role
+        self.followed, self.checked, self._held = None, 0.0, {}
         try: self.mine = (json.load(open(STATE)).get('mine') or {}) if os.path.exists(STATE) else {}
         except (OSError, ValueError): self.mine = {}
+
+    def held(self, name, fam):
+        """How many requests this Mac's gateways have on a peer's family now (its counted lock files; cached 0.1 s)."""
+        k, now = (name, fam), time.time()
+        hit = self._held.get(k)
+        if hit and now - hit[0] < 0.1: return hit[1]
+        n = llmshare.Counted(name, fam).held()
+        self._held[k] = (now, n)
+        return n
+
+    def follow(self):
+        """A follower takes the leader's look from link.json when it changed (checked at most every 0.5 s): each peer's
+        state, address, caps, matches and first-instance slots, in order. A cap it lowered itself lasts until then."""
+        if self.leader: return
+        now = time.time()
+        if now - self.checked < 0.5: return
+        self.checked = now
+        try: m = os.path.getmtime(STATE)
+        except OSError: return
+        if m == self.followed: return
+        try: d = json.load(open(STATE))
+        except (OSError, ValueError): return
+        self.followed, conf = m, configured()
+        with self.lock:
+            peers_, order = {}, []
+            for e in d.get('peers') or []:
+                name = e.get('name') if isinstance(e, dict) else None
+                if not name or name not in conf: continue
+                p = self.peers.get(name) or Peer(name)
+                p.url, p.host = conf[name]['url'], conf[name]['host']
+                p.state, p.why = e.get('state') or 'new', e.get('why')
+                fams = {b: f for b, f in (e.get('families') or {}).items() if isinstance(f, dict)}
+                p.cap = {b: int(f.get('cap') or 0) for b, f in fams.items()}
+                p.match = {b: (bool(f.get('match')), f.get('why')) for b, f in fams.items()}
+                p.first = {b: int(f.get('first') or 0) for b, f in fams.items()}
+                p.seen_at = float(e.get('seen') or 0)
+                peers_[name] = p; order.append(name)
+            self.peers, self.order = peers_, order
 
     def sync(self):
         """Peers added to or taken out of the settings since the last look."""
@@ -580,33 +621,40 @@ class Link:
         """The copies on peers a request for this family may go to now (each peer is one copy, with the slots it has
         free for this Mac): peers up, the family matched, not skipped for this request."""
         fam = llmshare.family(model)
+        self.follow()
         if not self.peers or fam not in (llmshare.settings().get('families') or {}): return []
         with self.lock:
             return [cid(fam, n) for n in self.order if n in self.peers and n not in skip and self.peers[n].state == 'up'
                     and self.peers[n].match.get(fam, (False,))[0] and self.peers[n].cap.get(fam, 0) > 0]
 
     def take(self, c):
-        """Hold one of a peer's slots for a request (llmshare.slot_any calls it): never more than the peer said it had free."""
+        """Hold one of a peer's slots for a request (llmshare.slot_any calls it): never more than the peer offers this
+        Mac, counted across all of this Mac's gateways. -> the slot (give it back with give), or None."""
         fam, name = split(c)
+        self.follow()
         with self.lock:
             p = self.peers.get(name)
-            if not p or p.state != 'up' or p.inflight[fam] >= p.cap.get(fam, 0): return False
-            p.inflight[fam] += 1
-            return True
+            if not p or p.state != 'up': return None
+            cap = p.cap.get(fam, 0)
+        h = llmshare.Counted(name, fam).take(cap)
+        self._held.pop((name, fam), None)
+        return h
 
     def first_free(self, c):
         """Whether this Mac's requests on a peer's copy still fit in that peer's first copy (a batch fills each Mac's
         first copy before a second copy on any one Mac)."""
         fam, name = split(c)
+        self.follow()
         with self.lock:
             p = self.peers.get(name)
-            return bool(p) and p.inflight[fam] < min(p.cap.get(fam, 0), p.first.get(fam, 0))
+            if not p: return False
+            limit = min(p.cap.get(fam, 0), p.first.get(fam, 0))
+        return self.held(name, fam) < limit
 
-    def give(self, c):
+    def give(self, c, h=None):
         fam, name = split(c)
-        with self.lock:
-            p = self.peers.get(name)
-            if p and p.inflight[fam] > 0: p.inflight[fam] -= 1
+        if h is not None: llmshare.Counted.give(h)
+        self._held.pop((name, fam), None)
 
     def target(self, c):
         """Where to send a request for a copy on a peer, and the headers that let it in: (url, {header: value})."""
@@ -620,17 +668,24 @@ class Link:
         take it now (no more is sent there until the next look)."""
         fam, name = split(c)
         hd = {k.lower(): v for k, v in (headers or {}).items()}
+        mh = hd.get('x-hub-maintenance') or ''
+        if not self.leader:                               # a follower: its own lower cap until the leader's next look, which
+            with self.lock:                               # it asks for now; link.json is the leader's alone
+                p = self.peers.get(name)
+                if not p: return
+                if code in (0, 401, 403) or mh.startswith('on'): p.cap = {}
+                else: p.cap[fam] = max(0, llmshare.Counted(name, fam).held() - 1)     # the exact count, never the cached one
+            llmshare.nudge('peer-poller'); return
         with self.lock:
             p = self.peers.get(name)
             if not p: return
-            mh = hd.get('x-hub-maintenance') or ''
             if code in (401, 403): p.state, p.why, p.refused_token, p.refused_at, p.cap = 'refused', f'auth failed (HTTP {code}): peer-token mismatch', token(), time.time(), {}
             elif mh.startswith('on'):
                 p.state, p.why, p.cap = 'maintenance', 'maintenance window active' + (f" ({mh.split('why=', 1)[1]})" if 'why=' in mh else ''), {}
                 p.next_at = time.time() + POLL
             elif code == 0: self._down(p, words)
             else:                                        # it could not take it now: nothing more until the next look
-                p.cap[fam] = p.inflight.get(fam, 0) - 1 if p.inflight.get(fam, 0) > 0 else 0
+                p.cap[fam] = max(0, llmshare.Counted(name, fam).held() - 1)   # the requests there now (exact), this one included, less one
                 p.next_at = 0.0
                 p.strikes = [t for t in p.strikes if t > time.time() - STRIKE_WINDOW] + [time.time()]
                 if len(p.strikes) >= STRIKES:            # its look is fine but its requests fail: back off as if it were down
@@ -654,9 +709,9 @@ class Link:
                 fams = {}
                 for b, f in ((p.report or {}).get('families') or {}).items() if p.state in ('up', 'maintenance') else ():
                     good, why = p.match.get(b, (False, None))
-                    cap = p.cap.get(b, 0)
-                    fams[b] = dict(match=good, why=why, slots=f.get('slots'), busy=f.get('busy'), cap=cap, here=p.inflight.get(b, 0),
-                                   free_here=max(0, cap - p.inflight.get(b, 0)), copies=f.get('copies') or [], holders=f.get('holders') or {},
+                    cap, here = p.cap.get(b, 0), self.held(name, b)
+                    fams[b] = dict(match=good, why=why, slots=f.get('slots'), busy=f.get('busy'), cap=cap, here=here, first=p.first.get(b, 0),
+                                   free_here=max(0, cap - here), copies=f.get('copies') or [], holders=f.get('holders') or {},
                                    answering=f.get('answering') or {}, fingerprint=f.get('fingerprint'))
                 rep = p.report or {}
                 d = dict(name=name, url=p.url, host=p.host, state=p.state, why=p.why, seen=round(p.seen_at, 1) if p.seen_at else None,
@@ -671,24 +726,33 @@ class Link:
         return out
 
     def write(self):
+        """link.json, the leader's look for every screen and every follower (a follower never writes it)."""
+        if not self.leader: return
         try:
             os.makedirs(os.path.dirname(STATE), exist_ok=True)
-            llmshare._write(STATE, dict(at=round(time.time(), 1), me=me(), peers=self.view(), mine=self.mine))
+            llmshare._write(STATE, dict(at=round(time.time(), 1), me=me(), peers=self.view(), mine=self.mine,
+                                        by=dict(pid=os.getpid(), gen=os.environ.get('LOCALMODELS_GEN'))))
             self.wrote = time.time()
-        except OSError: pass
+        except OSError as e: errors.record('peer link: write link.json', e)
 
 
 LINK = Link()
 
 
-def poller():
-    """The door's look at its peers: every second it looks at those that are due (each every 2 s while up), and at once
-    after a request to one failed."""
-    while True:
+def poller(stop=None):
+    """The peer-poller role's loop, in one gateway on this Mac: it alone looks at the peers and writes link.json. Every
+    second it looks at those that are due (each every 2 s while up); at once after a request to one failed here (WAKE);
+    at all of them when another gateway touched run/nudge-peer-poller, and when it takes the role. stop: it returns
+    between two looks, a follower again."""
+    LINK.leader, seen, force = True, llmshare.nudged('peer-poller'), True
+    while stop is None or not stop.is_set():
         try:
-            if LINK.peers or configured(): LINK.poll()
+            if LINK.peers or configured(): LINK.poll(force=force)
         except Exception as e: errors.record('peer poller', e)
-        WAKE.wait(1.0); WAKE.clear()
+        if WAKE.wait(1.0): WAKE.clear()
+        n = llmshare.nudged('peer-poller')
+        force, seen = n > seen, max(n, seen)
+    LINK.leader = False
 
 
 # ---------------------------------------------------------------- every screen reads the front's look from link.json
