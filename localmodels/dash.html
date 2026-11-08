@@ -74,7 +74,7 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 .fam:last-child { margin-bottom: 0; }
 .fam-name { font-weight: 600; }
 .fam-meta { color: var(--ink-2); font-size: 11.5px; }
-.copy { display: grid; grid-template-columns: 62px auto 1fr; align-items: center; gap: calc(4px * var(--mk, 1)) calc(10px * var(--mk, 1)); margin-top: calc(6px * var(--mk, 1)); }
+.copy { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; align-items: center; gap: calc(4px * var(--mk, 1)) calc(10px * var(--mk, 1)); margin-top: calc(6px * var(--mk, 1)); }
 .copy + .copy { margin-top: calc(6px * var(--mk, 1) + var(--gap, 0px)); }        /* room left over goes between rows, not under the name */
 #models-body.compact .copy { display: inline-flex; align-items: center; gap: calc(6px * var(--mk, 1)); margin: calc(5px * var(--mk, 1)) calc(14px * var(--mk, 1)) 0 0; }
 #models-body.compact .copy .st, #models-body.compact .copy .band { display: none; }
@@ -84,16 +84,19 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 #models-body.cols .fam { break-inside: avoid; }
 .copy .nm { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (min-height: 701px) and (min-width: 1101px) { .wrap.peers { grid-template-rows: auto auto auto minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr) auto; } }
-.slots { display: inline-flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); }
+.slots { display: flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); min-width: 0; }   /* the modules share the row's free width */
+#models-body.compact .slots { display: inline-flex; }
+#models-body.compact .slot { flex: none; width: calc(30px * var(--mk, 1)); }
 .slot {                    /* a slot as a memory module: the board (gray when free, the project's color when active), its chips, */
   position: relative; overflow: hidden;      /* and gold contacts along the bottom edge, broken by the key notch */
-  width: calc(30px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
+  flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
   border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px;
-  background: repeating-linear-gradient(90deg, rgba(0, 0, 0, .3) 0 17%, transparent 17% 25%) 50% 28% / 82% 42% no-repeat var(--track);
+  background: linear-gradient(90deg, rgba(0, 0, 0, .3) 72%, transparent 72%) 50% 28% / calc(12px * var(--mk, 1)) 42% space no-repeat var(--track);
+  background-origin: content-box; padding: 0 7%; box-sizing: border-box;
   -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
           mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
 }
-.slot:not(.on) { background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .16) 0 17%, transparent 17% 25%); }
+.slot:not(.on) { background-image: linear-gradient(90deg, rgba(0, 0, 0, .16) 72%, transparent 72%); }
 .slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
   background: repeating-linear-gradient(90deg, #d4a72c 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
 .slot:not(.on)::after { opacity: .45; }
@@ -106,7 +109,7 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 @keyframes current { 0% { transform: translateX(0); opacity: 0; } 12% { opacity: 1; } 60% { transform: translateX(322%); opacity: 1; } 70%, 100% { transform: translateX(322%); opacity: 0; } }
 @keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.4); } }
 @media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
-.copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .bandpct { display: none; }
 #models-body.tight .band { display: none; }
 #models-body.tight .bandpct { display: inline; }
