@@ -300,6 +300,17 @@ def test_keep(box):
       and rec and f'unloaded {C2} when asked to unload {B}' in rec[-1].get('why', ''), (unloads, loads, words, rec[-1:]))
     t('...counted neither as a crash nor as a recycle', counted() == n0, (n0, counted()))
     models.unload = fake_unload
+
+    unloads.clear(); loads.clear(); reset(time.time() - 3 * 3600); served(B, 130)          # copy 1 due, but copy 2 is the older instance
+    listings[:] = [[row(C2), row(B)]]; api['ids'] = {C2: 65536, B: 65536}
+    words = models.keep()
+    rec = [r for r in crashes.records(1) if r.get('event') == 'recycled']
+    t("copy 1 due while copy 2 is older (LM Studio unloads the oldest by copy 1's name): copy 2 is recycled first, and says why",
+      unloads == [C2] and loads == [C2] and rec and rec[-1]['model'] == C2 and 'so that ' + B + ' becomes the oldest' in (rec[-1].get('why') or ''), (unloads, words))
+    with crashes._state() as st: st['recycle']['last'][B] = time.time() - 200
+    unloads.clear(); loads.clear(); listings[:] = [[row(B), row(C2)]]
+    words = models.keep()
+    t('then copy 1, now the oldest: its own recycle unloads it', unloads == [B] and loads == [B] and recycle.job() is None, (unloads, words))
     L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
     with crashes._state() as st: st['down'] = {}
 
