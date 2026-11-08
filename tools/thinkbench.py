@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""thinkbench - the loaded model with thinking on against off, on four everyday local-agent jobs, through the door.
+"""thinkbench - the loaded model with thinking on against off, on four everyday local-agent jobs, through the gateway.
 
   python3 tools/thinkbench.py [--model ID] [--runs 2] [--anyway]
 
 Each job runs with thinking on and off side by side (the same load for both), --runs times: a consistency check (a memo
 with a wrong weekday and a sum that does not add up), an extraction (its dates and amounts as JSON), and two lookups in
-this folder with the agents' read-only tools. It prints, per setting: how many answers were right, the time answering
-(from the door's own log: waits for a turn left out) and the tokens written. A report goes to
+this folder with the agents' read-only tools. It prints, per setting: how many answers were right, the generation time
+(from the gateway's request log, queue time excluded) and the tokens generated. A report goes to
 ~/Library/Logs/LocalModels/thinkbench-<time>.json. It refuses to start while a batch is using the models (--anyway: start
 regardless). Run it when the model changes; GUIDE.md ("Thinking") keeps what it found.
 
@@ -89,7 +89,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--model'); ap.add_argument('--runs', type=int, default=2); ap.add_argument('--anyway', action='store_true')
     a = ap.parse_args()
-    if not llmshare.hub_up(fresh=True): sys.exit("the hub's door is closed: localmodels start")
+    if not llmshare.hub_up(fresh=True): sys.exit("gateway down: localmodels start")
     busy = [d for d in llmshare.leases() if d.get('kind') == 'batch']
     if busy and not a.anyway:
         print('a batch is using the models (' + ', '.join(sorted({d.get('project') or '?' for d in busy})) + '): try later, or --anyway'); return 3

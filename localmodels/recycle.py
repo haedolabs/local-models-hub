@@ -98,7 +98,7 @@ def drift(row, f):
     want_c, want_p = int(f.get('context') or 0), int(f.get('parallel') or 0)
     bad = []
     if want_c and row.get('context') and int(row['context']) != want_c: bad.append(f"context {row['context']:,} instead of {want_c:,}")
-    if want_p and row.get('parallel') and int(row['parallel']) != want_p: bad.append(f"{row['parallel']} at once instead of {want_p}")
+    if want_p and row.get('parallel') and int(row['parallel']) != want_p: bad.append(f"{row['parallel']} slots instead of {want_p}")
     return ' and '.join(bad) or None
 
 
@@ -142,10 +142,10 @@ def plan(rows, busy=None):
             s = share(c, th)
             idle = not busy.get(llmshare._safe(i)) and have[i].get('state') == 'IDLE'
             wrong = drift(have[i], f)
-            if s >= 1: why, rank = f"its band: {c['tokens']:,} tokens processed since it was loaded ({c['requests']} requests), the limit {th['tokens']:,}", 3 + s
-            elif wrong and idle: why, rank = f'its settings are not the family\'s ({wrong})', 2.5
-            elif fresh and s >= th['before_batch']: why, rank = f"a batch is starting and it has {c['tokens']:,} tokens processed since it was loaded, past {int(th['before_batch'] * 100)}% of its band of {th['tokens']:,}", 2 + s
-            elif idle and c['tokens'] >= th['soft']: why, rank = f"it is idle and has {c['tokens']:,} tokens processed since it was loaded, past the soft limit of {th['soft']:,}", 1 + s
+            if s >= 1: why, rank = f"recycle threshold reached: {c['tokens']:,} tokens processed since load ({c['requests']} requests), threshold {th['tokens']:,}", 3 + s
+            elif wrong and idle: why, rank = f'load parameters differ from the family settings ({wrong})', 2.5
+            elif fresh and s >= th['before_batch']: why, rank = f"batch starting with {c['tokens']:,} tokens processed since load, past {int(th['before_batch'] * 100)}% of its recycle threshold ({th['tokens']:,})", 2 + s
+            elif idle and c['tokens'] >= th['soft']: why, rank = f"idle with {c['tokens']:,} tokens processed since load, past the soft threshold ({th['soft']:,})", 1 + s
             else: continue
             if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
                 _held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
@@ -159,7 +159,7 @@ def plan(rows, busy=None):
         rr = _r(st2)
         if rr['job']: return None
         rr['job'] = dict(copy=copy, family=base, state='draining', since=time.time(), why=why, counts=c, share=s)
-    return f'{copy} is draining for a recycle ({why})'
+    return f'{copy}: draining for recycle ({why})'
 
 
 def ready(rows, busy):
@@ -178,9 +178,9 @@ def give_up_if_stuck():
     with crashes._state() as st:
         r = _r(st)
         if r['job'] and r['job']['state'] == 'draining':
-            crashes._record(dict(event='recycle given up', family=j['family'], model=j['copy'], why=f'still busy after {DRAIN_MAX // 60} minutes'))
+            crashes._record(dict(event='recycle given up', family=j['family'], model=j['copy'], why=f'still active after {DRAIN_MAX // 60} min of draining'))
             r['job'], r['retry_after'] = None, time.time() + RETRY
-    return f"{j['copy']} stayed busy for {DRAIN_MAX // 60} minutes: its recycle waits another {RETRY // 60}"
+    return f"{j['copy']}: still active after {DRAIN_MAX // 60} min of draining; recycle deferred {RETRY // 60} min"
 
 
 def reloading(copy):
@@ -246,5 +246,5 @@ def recent(days=7):
 def words(j):
     """A recycle in progress, in a line."""
     if not j: return ''
-    state = 'draining: nothing new goes to it until its requests finish' if j['state'] == 'draining' else 'unloading and loading it again'
-    return f"{j['copy']} is being recycled ({state}; {j['why']})"
+    state = 'draining: no new requests routed to it until in-flight requests complete' if j['state'] == 'draining' else 'unload and reload in progress'
+    return f"{j['copy']}: recycling ({state}; {j['why']})"

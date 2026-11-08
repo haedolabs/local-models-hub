@@ -101,7 +101,7 @@ def _snapshot():
         for c in f['copies']:
             hold = [dict(project=p, n=n) for p, n in holders.get(c['id'], collections.Counter()).most_common()]
             other = max(0, c.get('busy', 0) - sum(h['n'] for h in hold))         # held by a program that went straight in
-            if other: hold.append(dict(project='straight to LM Studio', n=other))
+            if other: hold.append(dict(project='direct to LM Studio', n=other))
             cps.append(dict(id=c['id'], state=c['state'], parallel=c['parallel'], busy=c.get('busy', 0), context=c['context'],
                             size=c.get('size'), holders=hold, served=view['copies'].get(c['id']),
                             recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs))
@@ -125,7 +125,7 @@ def _snapshot():
             for f in (p.get('families') or {}).values(): f['holders'] = {names.project(k): v for k, v in (f.get('holders') or {}).items()}
         out['link'] = dict(me=peers.me(), serving=peers.serving(), listening=peers.LISTEN.get('words'), problems=peers.problems())
     except Exception as e: out['peers'], out['link'] = [], dict(problems=[f'could not read the peers: {type(e).__name__}: {e}'])
-    out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'straight to LM Studio']
+    out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'direct to LM Studio']
                            + [k for p in out['peers'] for f in (p.get('families') or {}).values() for k in f['holders']])
     return out
 
@@ -230,4 +230,4 @@ def sampler():
 
 def page():
     try: return open(PAGE, 'rb').read().replace(b'__HUB_NAME__', NAME.encode())     # one name, from the package
-    except OSError: return b'<p>dash.html is missing from the hub</p>'
+    except OSError: return b'<p>dash.html is missing from the installed code (localmodels install)</p>'

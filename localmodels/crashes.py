@@ -237,8 +237,8 @@ def watch(rows, listed_at=None, busy=None):
             f = st.get('fatal') or {}
             died = now - f.get('at', 0) < 600 or restarted
             if base in fams or died:
-                why = (f"its engine stopped (Fatal Python error: {f['words']})" if now - f.get('at', 0) < 600 else
-                       "LM Studio's server started again and it was not loaded back" if restarted else 'it went away with no unload and no request on it')
+                why = (f"engine terminated (Fatal Python error: {f['words']})" if now - f.get('at', 0) < 600 else
+                       "LM Studio's server restarted and the instance was not reloaded" if restarted else 'instance disappeared with no unload and no request on it')
                 last[i] = now
                 _record(dict(at=now, event='crash', model=i, family=base, cause=why, error=None, served=_served(i, seen[i].get('since')), found='as it happened'))
                 d = down.setdefault(base, dict(crashed=now, models=[], state='loading again'))
@@ -262,12 +262,12 @@ def watch(rows, listed_at=None, busy=None):
             if d['state'] == 'left down':
                 if now - d.get('since', now) > 86400: del down[base]; continue   # on the dash for a day, then only in the record
                 if now - d.get('retry_at', d.get('since', now)) < RETRY_LEFT: continue
-                d.update(state='loading again', why='tried once more after an hour', retry_at=now, fails=0)
+                d.update(state='loading again', why='hourly retry', retry_at=now, fails=0)
             reloads = st.setdefault('reloads', {})                              # reloads that worked, per copy
             tries = max([len([t for t in reloads.get(i) or [] if t > now - WINDOW]) for i in (d.get('models') or ids)] or [0])
-            why = ('the hub never saw how it was loaded, so it cannot load it the same way' if not key else
-                   f'it crashed again after {tries} reloads of one copy within an hour' if tries >= CAP else
-                   'it could not be loaded again within an hour' if now - d['crashed'] > GIVE_UP else None)
+            why = ('its load parameters were never observed, so it cannot be reloaded with the same settings' if not key else
+                   f'crashed again after {tries} reloads of one instance within an hour' if tries >= CAP else
+                   'not reloaded within an hour' if now - d['crashed'] > GIVE_UP else None)
             if why:
                 d.update(state='left down', why=why, since=now, retry_at=now)
                 _record(dict(event='left down', family=base, why=why)); continue
@@ -313,7 +313,7 @@ def loaded(base, ids, ok, seconds, words=''):
             if d:
                 d['fails'] = int(d.get('fails') or 0) + 1
                 d['next_try'] = time.time() + min(300, 60 * 2 ** (d['fails'] - 1))
-                d['why'] = 'the last load failed: ' + str(words)[-120:]
+                d['why'] = 'last load failed: ' + str(words)[-120:]
 
 
 def load_ok(base):
@@ -360,7 +360,7 @@ def swapped(to):
     with _state() as st:
         for base in list((st.get('down') or {})):
             if base == llmshare.family(to): _record(dict(event='back', family=base, by='localmodels use'))
-            else: _record(dict(event='cancelled', family=base, why=f'a swap to {to} came first'))
+            else: _record(dict(event='cancelled', family=base, why=f'superseded by a swap to {to}'))
             del st['down'][base]
 
 
@@ -408,6 +408,7 @@ def down():
     out = []
     for base, d in (_read(fresh=True).get('down') or {}).items():
         out.append(dict(family=base, crashed=d.get('crashed'), models=d.get('models') or [], state=d.get('state'), why=d.get('why'),
+                        label=LABEL.get(d.get('state'), d.get('state')),
                         which=_which(base, d.get('models') or []),
                         words=f"{base} crashed at {time.strftime('%H:%M', time.localtime(d.get('crashed') or 0))} ({_which(base, d.get('models') or [])}); "
                               + _state_words(base, d.get('state'), d.get('why'))))
@@ -423,15 +424,18 @@ def _dur(s):
 def _which(base, models):
     n = int(((llmshare.settings().get('families') or {}).get(base) or {}).get('copies', 1))
     if n < 2: return 'the model'
-    if len(set(models)) >= n: return 'both copies' if n == 2 else f'all {n} copies'
-    return ', '.join('copy ' + (re.match(r'.*:(\d+)$', m) or [0, '1'])[1] for m in sorted(set(models)))
+    if len(set(models)) >= n: return 'both replicas' if n == 2 else f'all {n} replicas'
+    return ', '.join('replica ' + (re.match(r'.*:(\d+)$', m) or [0, '1'])[1] for m in sorted(set(models)))
+
+
+LABEL = {'left down': 'left unloaded', 'loading again': 'reloading', 'waiting for room': 'reload pending (memory)', 'cancelled': 'reload cancelled'}
 
 
 def _state_words(base, state, why):
-    if state == 'left down': return f'left down: {why}. Load it by hand: localmodels use {base} (the hub tries again every hour)'
-    if state == 'waiting for room': return 'waiting for room to load it again' + (f' ({why})' if why else '')
-    if state == 'loading again': return 'the hub is loading it again; requests only it could answer wait meanwhile' + (f' ({why})' if why else '')
-    if state == 'cancelled': return f'not loaded again: {why}'
+    if state == 'left down': return f'left unloaded: {why}. Reload manually: localmodels use {base} (the instance manager retries hourly)'
+    if state == 'waiting for room': return 'reload pending: insufficient memory' + (f' ({why})' if why else '')
+    if state == 'loading again': return 'reloading; requests only it can serve are held' + (f' ({why})' if why else '')
+    if state == 'cancelled': return f'reload cancelled: {why}'
     return state or ''
 
 
@@ -466,20 +470,20 @@ def history(days=7):
         d = now.get(x['family'])
         if d and not x['back'] and x['state'] != 'cancelled' and abs((d.get('crashed') or 0) - x['at']) < 120: x['state'], x['why'] = d.get('state'), d.get('why')
         if x['back']:
-            x['then'] = (f"loaded again by the hub {_dur(x['back'] - x['at'])} later" if x['by'] == 'the hub' else
-                         f"back {_dur(x['back'] - x['at'])} later, loaded by {x['by']}")
-        else: x['then'] = _state_words(x['family'], x['state'], x['why']) or 'not loaded again yet'
+            x['then'] = (f"reloaded by the instance manager after {_dur(x['back'] - x['at'])}" if x['by'] == 'the hub' else
+                         f"back after {_dur(x['back'] - x['at'])}, loaded " + ('outside the gateway' if x['by'] == 'someone else' else f"by {x['by']}"))
+        else: x['then'] = _state_words(x['family'], x['state'], x['why']) or 'not reloaded yet'
     return list(reversed(out))
 
 
 def brief(x):
-    """One crash in a few words, for an 80-column dash: '02 Mar 04:15, both copies · back after 18 s'."""
+    """One crash in a few words, for an 80-column dash: '02 Mar 04:15, both replicas · back after 18 s'."""
     when = time.strftime('%d %b %H:%M', time.localtime(x['at']))
-    return f"{when}, {x['which']} · " + (f"back after {_dur(x['back'] - x['at'])}" + (' (the hub)' if x['by'] == 'the hub' else '') if x['back'] else x['state'] or 'not back yet')
+    return f"{when}, {x['which']} · " + (f"back after {_dur(x['back'] - x['at'])}" + (' (instance manager)' if x['by'] == 'the hub' else '') if x['back'] else LABEL.get(x['state'], x['state']) or 'not back yet')
 
 
 def words(x):
-    """One crash in a line: '02 Mar 04:15 qwen/qwen3.6-35b-a3b, both copies: RuntimeError: ... · 12 requests failed · ...'."""
+    """One crash in a line: '02 Mar 04:15 qwen/qwen3.6-35b-a3b, both replicas: RuntimeError: ... · 12 requests failed · ...'."""
     return (f"{time.strftime('%d %b %H:%M', time.localtime(x['at']))} {x['family']}, {x['which']}: {x['error'] or x['cause']}"
             + (f" · {x['failed']} request{'s' if x['failed'] != 1 else ''} failed" if x['failed'] else '') + f" · {x['then']}")
 

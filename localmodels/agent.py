@@ -33,7 +33,7 @@ THINK_OFF = {'reasoning_effort': 'none'}              # LM Studio gives Qwen 3.6
                                                       # 'low', 'medium' and 'high' all mean on, and 'off' is refused
 RETRY_WAITS, WAIT_DOWN = (5, 15, 45, 120, 300), 3600  # pauses between tries when the model is down; the most a job waits in all
 TRANSIENT = re.compile(r'crashed|no models? (?:are |is )?loaded|not loaded|model_not_found|unload|not answering|dropped the connection|cut the answer|'
-                       r'bringing it back|no free .*slot|loading it again', re.I)
+                       r'bringing it back|reloading|no free .*slot|loading it again', re.I)
 SYSTEM = ("You are a local helper on this Mac. You do one well-defined job with tools that only read, and report "
           "exactly what you found. Check with the tools; never guess. Give evidence as file paths with line numbers. You "
           "cannot change anything. Use plain words. If something is unclear or missing, say so plainly.")
@@ -54,7 +54,7 @@ def loaded_model(want=None, prefer=()):
     """-> (model info, None) or (None, why not). want: this model id, or the first loaded one (those in prefer first)."""
     try: d = get('/api/v0/models')
     except (OSError, ValueError):
-        return None, ("LM Studio's server is not answering: start it (LM Studio's Developer tab, or ~/.lmstudio/bin/lms server start)")
+        return None, ("LM Studio server unreachable: start it in LM Studio's Developer tab, or run ~/.lmstudio/bin/lms server start")
     ms = [m for m in d.get('data', []) if m.get('state') == 'loaded' and m.get('type') in ('llm', 'vlm') and (not want or m.get('id') == want)]
     prefer = list(prefer or [])
     ms.sort(key=lambda m: prefer.index(m['id']) if m['id'] in prefer else len(prefer))
@@ -313,7 +313,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                 if not again or time.time() - t_first >= wait_down: raise
                 pause = pause or RETRY_WAITS[min(k, len(RETRY_WAITS) - 1)]; k += 1
                 usage['retries'] += 1
-                step(f'the model did not answer ({what[:60]}): trying again in {pause} s')
+                step(f'request failed ({what[:60]}): retrying in {pause} s')
                 time.sleep(pause)
         u = r.get('usage') or {}
         usage['prompt'] += u.get('prompt_tokens') or 0; usage['completion'] += u.get('completion_tokens') or 0

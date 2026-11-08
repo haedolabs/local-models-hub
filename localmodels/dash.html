@@ -73,7 +73,7 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 .fam:last-child { margin-bottom: 0; }
 .fam-name { font-weight: 600; }
 .fam-meta { color: var(--ink-2); font-size: 11.5px; }
-.copy { display: grid; grid-template-columns: 52px auto 1fr; align-items: center; gap: 4px 10px; margin-top: 6px; }
+.copy { display: grid; grid-template-columns: 62px auto 1fr; align-items: center; gap: 4px 10px; margin-top: 6px; }
 .copy .nm { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (min-height: 701px) and (min-width: 1101px) { .wrap.peers { grid-template-rows: auto auto auto minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr) auto; } }
 .slots { display: inline-flex; gap: 2px; }
@@ -133,45 +133,45 @@ footer b { color: var(--ink-2); font-weight: 600; }
 <body>
 <div class="wrap">
   <header>
-    <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">every project and Claude session using LM Studio on this Mac</span></div>
-    <div class="chips"><span>Charts: the last</span>
+    <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
+    <div class="chips"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
+      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
       <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
   </header>
   <div>
-    <div id="banner"><b>The door is not answering.</b> <span class="ink2">Open it with <code>localmodels start</code>; this page picks up again by itself.</span></div>
+    <div id="banner"><b>Gateway unreachable.</b> <span class="ink2">Start it with <code>localmodels start</code>; this page reconnects automatically.</span></div>
     <div id="alerts"></div>
   </div>
 
   <section class="kpis">
-    <div class="card tile"><div class="label">Answering now</div><div class="value" id="k-ans">–</div><div class="foot" id="k-ans-f"></div></div>
-    <div class="card tile"><div class="label">Waiting for a turn</div><div class="value" id="k-wait">–</div><div class="foot" id="k-wait-f"></div></div>
-    <div class="card tile"><div class="label">Tokens a second</div><div class="value" id="k-tok">–</div><div class="foot" id="k-tok-f">last minute, all projects</div></div>
+    <div class="card tile"><div class="label">Active requests</div><div class="value" id="k-ans">–</div><div class="foot" id="k-ans-f"></div></div>
+    <div class="card tile"><div class="label">Queued</div><div class="value" id="k-wait">–</div><div class="foot" id="k-wait-f"></div></div>
+    <div class="card tile"><div class="label">Throughput</div><div class="value" id="k-tok">–</div><div class="foot" id="k-tok-f">tokens/s, last minute, all projects</div></div>
     <div class="card tile"><div class="label">Requests</div><div class="value" id="k-req">–</div><div class="foot" id="k-req-f"></div></div>
     <div class="card tile"><div class="label">Memory used</div><div class="value" id="k-mem">–</div><div class="meter"><div id="k-mem-m" style="width:0"></div></div><div class="foot" id="k-mem-f" style="margin-top:4px"></div></div>
     <div class="card tile"><div class="label">Claude Code sessions</div><div class="value" id="k-cc">–</div><div class="foot" id="k-cc-f"></div></div>
   </section>
 
   <section class="row a">
-    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">each box is one answer slot (a filled box is answering, colored by its project); the thin bar is the copy's work since it was loaded against its recycle band</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
-    <article class="card"><div class="card-head"><div><h2>Answers at once, by project</h2><div class="hint" id="ans-hint">the line across the top is how many the loaded copies answer at once; the right edge is now</div></div><button class="btn" data-table="ans">table</button></div>
+    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one box per slot (filled: active, colored by project); bar: tokens processed since load against the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
+    <article class="card"><div class="card-head"><div><h2>Concurrent requests, by project</h2><div class="hint" id="ans-hint">top line: total slots across loaded instances; right edge: now</div></div><button class="btn" data-table="ans">table</button></div>
       <div class="legend" id="ans-legend"></div><div class="chart" id="ans"></div></article>
   </section>
 
   <section class="row b">
-    <article class="card"><div class="card-head"><div><h2>Tokens a second</h2><div class="hint">words the models write, all projects together (finished requests)</div></div><button class="btn" data-table="tok">table</button></div>
+    <article class="card"><div class="card-head"><div><h2>Throughput</h2><div class="hint">completion tokens/s, all projects (completed requests)</div></div><button class="btn" data-table="tok">table</button></div>
       <div class="chart" id="tok"></div></article>
     <article class="card"><div class="card-head"><div><h2>Requests by project</h2><div class="hint" id="req-hint"></div></div><button class="btn" data-table="req">table</button></div>
       <div class="legend" id="req-legend"></div><div class="chart" id="req"></div></article>
-    <article class="card"><div class="card-head"><div><h2>Memory used</h2><div class="hint" id="mem-hint">sampled every 15 seconds</div></div><button class="btn" data-table="mem">table</button></div>
+    <article class="card"><div class="card-head"><div><h2>Memory used</h2><div class="hint" id="mem-hint">sampled every 15 s</div></div><button class="btn" data-table="mem">table</button></div>
       <div class="chart" id="mem"></div></article>
   </section>
 
   <section class="row c">
-    <article class="card"><h2>Using the models now</h2><div class="hint">every program with a request in, or one in the last two minutes; a batch shows its progress, a request its step</div><div class="body" id="users"></div></article>
-    <article class="card"><h2>Claude Code sessions</h2><div class="hint">every session that wrote in the last three hours, newest first</div><div class="body" id="claude"></div></article>
-    <article class="card"><h2>Last requests</h2><div class="hint">through the hub; never the content</div><div class="body" id="recent"></div></article>
+    <article class="card"><h2>Clients</h2><div class="hint">processes with a request in flight or a lease held (2 min idle); batch and job progress per run</div><div class="body" id="users"></div></article>
+    <article class="card"><h2>Claude Code sessions</h2><div class="hint">sessions active in the last 3 h, newest first</div><div class="body" id="claude"></div></article>
+    <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
 
   <footer><span id="mac"></span><span id="events"></span><span id="foot"></span><span id="about"></span></footer>
@@ -193,7 +193,7 @@ function el(tag, attrs, ...kids) {
 }
 function sv(tag, attrs) { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); return e; }
 function color(project) {
-  if (project === 'straight to LM Studio') return 'var(--other)';
+  if (project === 'direct to LM Studio') return 'var(--other)';
   const slot = COLORS[project];
   return slot ? `var(--s${slot + 1})` : 'var(--other)';    // slot 1 (blue) is "all projects together"
 }
@@ -219,7 +219,7 @@ function left(s) { return span(s) + ' left'; }
 function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
 function ticks(max, n = 4) { const s = niceMax(max / n); const out = []; for (let v = 0; v <= max + 1e-9; v += s) out.push(+v.toFixed(6)); return out; }
 function short(model) { return String(model || '?').replace(/^[^/]+\//, ''); }
-function kindWords(k) { return {batch: 'batch', chat: 'chat', ask: 'question', eval: 'test', test: 'test'}[k] || 'requests'; }
+function kindWords(k) { return k || 'other'; }
 function merge(c) { if (c) Object.assign(COLORS, c); }
 function rowsThatFit(box, rowPx = 25, headPx = 26) { return Math.max(2, Math.floor((box.clientHeight - headPx - 4) / rowPx)); }
 function tableIn(box, head, rows, more) {
@@ -307,7 +307,7 @@ function crashIn(a, b) { return crashList().find(c => c.at >= a && c.at < b); }
 function renderAnswering() {
   const box = $('ans'); if (!H) return;
   const names = projectsIn(H.answering).filter(p => H.answering[p].some(v => v > 0.001));
-  const items = names.map(p => ({name: p, color: color(p)})).concat([{name: 'waiting for a turn', color: 'var(--ink-2)', line: true}]);
+  const items = names.map(p => ({name: p, color: color(p)})).concat([{name: 'queued', color: 'var(--ink-2)', line: true}]);
   legend($('ans-legend'), items);
   const t = i => H.start + (i + 0.5) * H.step, n = H.n;
   if (tables.ans) {
@@ -316,7 +316,7 @@ function renderAnswering() {
       const avg = a => (a.slice(i, i + per).reduce((s, v) => s + v, 0) / Math.min(per, n - i));
       rows.push([clock(H.start + i * H.step), ...names.map(p => avg(H.answering[p]).toFixed(1)), avg(H.waiting).toFixed(1)]);
     }
-    return tableView(box, ['minute', ...names, 'waiting'], rows.reverse());
+    return tableView(box, ['minute', ...names, 'queued'], rows.reverse());
   }
   const tot = Array.from({length: n}, (_, i) => names.reduce((s, p) => s + H.answering[p][i], 0));
   const ymax = niceMax(Math.max(H.at_once || 0, ...tot, ...H.waiting, 1));
@@ -338,14 +338,14 @@ function renderAnswering() {
   if (H.at_once) {
     const yy = f.y(H.at_once);
     f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
-    const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = `${H.at_once} at once`; f.svg.append(tx);
+    const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = `${H.at_once} slots`; f.svg.append(tx);
   }
   markEvents(f, H.start, H.start + n * H.step);
   crosshair(f, xs, (i, cx, cy) => {
     const c = crashIn(H.start + i * H.step - H.step, H.start + (i + 1) * H.step);
     showTip(cx, cy, clockS(H.start + i * H.step) + ' – ' + clockS(H.start + (i + 1) * H.step),
       names.map(p => ({name: p, color: color(p), value: H.answering[p][i].toFixed(1)})).concat(
-        [{name: 'all answering', color: 'var(--s1)', value: tot[i].toFixed(1)}, {name: 'waiting', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)}],
+        [{name: 'all active', color: 'var(--s1)', value: tot[i].toFixed(1)}, {name: 'queued', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)}],
         c ? [{name: `crash, ${c.which}`, color: 'var(--critical)', line: true, value: clockS(c.at)}] : []));
   });
   box.replaceChildren(f.svg);
@@ -357,7 +357,7 @@ function renderTokens() {
   if (tables.tok) {
     const rows = [], per = Math.max(1, Math.round(60 / H.step));
     for (let i = 0; i < n; i += per) rows.push([clock(H.start + i * H.step), full(H.tokens.slice(i, i + per).reduce((s, v) => s + v, 0) / Math.min(per, n - i))]);
-    return tableView(box, ['minute', 'tokens a second'], rows.reverse());
+    return tableView(box, ['minute', 'tokens/s'], rows.reverse());
   }
   const ymax = niceMax(Math.max(...H.tokens, 10));
   const f = frame(box, H.start, H.start + n * H.step, ymax);
@@ -415,7 +415,7 @@ function renderRequests() {
 function renderMemory() {
   const box = $('mem'); if (!H) return;
   const M = H.memory;
-  if (!M.t.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No samples yet: the door samples memory every 15 seconds.')); return; }
+  if (!M.t.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No samples yet: the gateway samples memory every 15 s.')); return; }
   if (tables.mem) {
     const rows = []; for (let i = M.t.length - 1; i >= 0; i -= 4) rows.push([clockS(M.t[i]), M.used[i].toFixed(1) + ' GB']);
     return tableView(box, ['time', 'memory used'], rows);
@@ -454,9 +454,9 @@ function renderNow() {
   if (!S) return;
   merge(S.colors);
   $('clock').textContent = 'updated ' + S.clock;
-  chip('chip-door', S.door.up, `the door is open on :${S.door.port}`, 'the door is closed');
+  chip('chip-door', S.door.up, `gateway: listening on :${S.door.port}`, 'gateway: down');
   const lmOk = S.lmstudio.server === 'on';
-  chip('chip-lm', lmOk, S.lmstudio.listing_ok === false ? `LM Studio's server is on; its model listing is unsure (${Math.round(S.lmstudio.listing_age / 60)} min old)` : "LM Studio's server is on", "LM Studio's server is off");
+  chip('chip-lm', lmOk, S.lmstudio.listing_ok === false ? `LM Studio: server up; model listing stale (${Math.round(S.lmstudio.listing_age / 60)} min old)` : 'LM Studio: server up', 'LM Studio: server down');
   if (lmOk && S.lmstudio.listing_ok === false) $('chip-lm').querySelector('i').style.background = 'var(--warning)';
   const ps = S.peers || [], up = ps.filter(p => p.state === 'up'), serve = S.link && S.link.serving ? (S.link.listening || 'serving as a peer') : '';
   $('chip-peers').style.display = ps.length || serve ? '' : 'none';
@@ -473,15 +473,15 @@ function renderNow() {
   if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
   // stat tiles
   const fams = S.lmstudio.families, busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
-  $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} at once`));
+  $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} slots`));
   const answering = S.users.filter(u => u.answering).map(u => u.project);
   const fin = u => (u.batch && u.batch.finish) || (u.job && u.job.finish);
   const ends = S.users.filter(fin);
   $('k-ans-f').textContent = ends.length ? `${ends[0].project}: ${ends[0].batch && ends[0].batch.finish ? 'batch' : 'job'} done about ${finishAt(fin(ends[0]))}`
-    : answering.length ? [...new Set(answering)].join(', ') : 'nothing answering';
+    : answering.length ? [...new Set(answering)].join(', ') : 'idle';
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
-  $('k-wait-f').textContent = waiting ? `${q.people || 0} for a person, ${q.others || 0} batch and other · people first` : `last 7 days: ${S.waits7.waits} waits over 2 s, ${S.waits7.minutes} min in all`;
+  $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${S.waits7.waits} queue waits > 2 s, ${S.waits7.minutes} min total`;
   const m = S.mac, share = m.used / Math.max(1, m.total);
   $('k-mem').replaceChildren(String(Math.round(m.used)), el('small', {}, `of ${Math.round(m.total)} GB`));
   const meter = $('k-mem-m'); meter.style.width = Math.round(share * 100) + '%';
@@ -503,9 +503,9 @@ function renderAlerts() {
     const left = d.state === 'left down';
     out.push(el('div', {class: 'alert ' + (left ? 'critical' : 'warning'), role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
       el('span', {}, el('b', {}, `${d.family} crashed at ${clock(d.crashed)}`), ' ', el('span', {class: 'ink2'}, `(${d.which}). `),
-        left ? el('span', {}, `Left down: ${d.why}. Load it by hand: `, el('code', {}, `localmodels use ${d.family}`), '; the hub tries again every hour.')
-             : el('span', {}, d.state === 'waiting for room' ? `Waiting for room to load it again${d.why ? ' (' + d.why + ')' : ''}; requests only it could answer wait meanwhile.`
-                                                              : 'The hub is loading it again; the other copies keep answering, and requests only it could answer wait meanwhile.'))));
+        left ? el('span', {}, `Left unloaded: ${d.why}. Load manually: `, el('code', {}, `localmodels use ${d.family}`), '; the instance manager retries hourly.')
+             : el('span', {}, d.state === 'waiting for room' ? `Reload pending: insufficient memory${d.why ? ' (' + d.why + ')' : ''}; requests for it are held.`
+                                                              : 'Reloading; remaining replicas keep serving, requests for it are held.'))));
   }
   if (S.recycle && S.recycle.words) out.push(el('div', {class: 'alert info', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '↻'), el('span', {}, S.recycle.words)));
   for (const p of S.peers || []) {
@@ -517,15 +517,15 @@ function renderAlerts() {
     for (const w of said) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, w)));
   }
   for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peer settings: '), w)));
-  if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'The settings file could not be read: '), S.settings_error, ' The last good settings stand.')));
+  if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file unreadable: '), S.settings_error, ' Last valid settings in effect.')));
   $('alerts').replaceChildren(...out);
 }
 
 function renderEvents() {
   const cs = crashList(), rs = recycleList().filter(r => r.event === 'recycled');
   const bits = [el('b', {}, 'Last 7 days: ')];
-  bits.push(cs.length ? `${cs.length} crash${cs.length === 1 ? '' : 'es'} (last ${day(cs[0].at)} ${clock(cs[0].at)}, ${cs[0].which}: ${cs[0].then}; ${cs.reduce((s, c) => s + (c.failed || 0), 0)} requests failed in all)` : 'no crashes');
-  bits.push(' · ' + (rs.length ? `${rs.length} cop${rs.length === 1 ? 'y' : 'ies'} recycled before the band (last ${day(rs[0].at)} ${clock(rs[0].at)}: ${short(rs[0].model)} after ${compact(rs[0].tokens)} tokens, back in ${Math.round(rs[0].seconds || 0)} s)` : 'no copy recycled yet'));
+  bits.push(cs.length ? `${cs.length} crash${cs.length === 1 ? '' : 'es'} (last ${day(cs[0].at)} ${clock(cs[0].at)}, ${cs[0].which}: ${cs[0].then}; ${cs.reduce((s, c) => s + (c.failed || 0), 0)} requests failed)` : 'no crashes');
+  bits.push(' · ' + (rs.length ? `${rs.length} recycle${rs.length === 1 ? '' : 's'} before the threshold (last ${day(rs[0].at)} ${clock(rs[0].at)}: ${short(rs[0].model)} after ${compact(rs[0].tokens)} tokens, back in ${Math.round(rs[0].seconds || 0)} s)` : 'no recycles'));
   bits.push(' · ', el('span', {class: 'muted'}, 'localmodels crashes for the list'));
   $('events').replaceChildren(...bits);
 }
@@ -538,36 +538,36 @@ function chip(id, ok, yes, no) {
 function renderModels() {
   const box = $('models-body'), fams = S.lmstudio.families;
   const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
-    el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.state}`))));
+    el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.label || d.state}`))));
   const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id)));
   if (!fams.length) { box.replaceChildren(...down, down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
     legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat(there.length ? [{name: 'free', color: 'var(--track)'}] : [])); return; }
   box.replaceChildren(...down, ...fams.map(f => {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
     const head = el('div', {}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'},
-      `${f.copies.length > 1 ? f.copies.length + ' copies · ' : ''}${f.at_once} at once · ${f.busy} busy · ${f.size} GB · ${full(f.copies[0].context)} context`
+      `${f.copies.length > 1 ? f.copies.length + ' replicas · ' : ''}${f.at_once} slots · ${f.busy} active · ${f.size} GB · ${full(f.copies[0].context)} context`
       + (away.length ? ` · +${more} slots on peer ${away.map(p => p.name).join(', ')}` : '')));
     const rows = f.copies.map((c, k) => {
       const boxes = [];
       for (const h of c.holders) for (let j = 0; j < h.n; j++) { boxes.push(h.project); seen.add(h.project); }
-      while (boxes.length < c.busy) boxes.push('straight to LM Studio');
+      while (boxes.length < c.busy) boxes.push('direct to LM Studio');
       const slots = el('span', {class: 'slots'}, ...Array.from({length: c.parallel}, (_, j) => {
         const p = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: p ? `background:${color(p)}` : ''});
         const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${c.id} · slot ${j + 1}`,
-          [{name: p || 'free', color: p ? color(p) : 'var(--track)', value: p ? 'answering' : 'free'}]); };
+          [{name: p || 'free', color: p ? color(p) : 'var(--track)', value: p ? 'active' : 'free'}]); };
         b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt);
         b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
         return b;
       }));
-      const state = c.down ? el('span', {class: 'badge down'}, 'down: loading again') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for a recycle' : 'recycling')
-        : el('span', {}, (c.busy ? 'working' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy} of ${c.parallel} busy`,
-            el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of recycle band` : ''));
-      const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `copy ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
+      const state = c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
+        : el('span', {}, (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`,
+            el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of recycle threshold` : ''));
+      const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `replica ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
       if (sv_) {
         const sh = sv_.share == null ? null : Math.min(1, sv_.share);
         const bar = el('div', {class: 'bar'}, el('div', {style: `width:${Math.round((sh || 0) * 100)}%;background:${sh > 0.95 ? 'var(--critical)' : sh > 0.7 ? 'var(--warning)' : 'var(--s1)'}`}));
-        if (sv_.band && sv_.band.soft) bar.append(el('i', {style: `left:${Math.round(100 * sv_.band.soft / sv_.band.tokens)}%`, title: 'the soft limit: recycled when idle'}));
-        parts.push(el('div', {class: 'band'}, `loaded ${clock(sv_.since)} · ${compact(sv_.tokens)} tokens since`, sv_.band ? bar : el('span', {class: 'muted'}, '· not recycled'),
+        if (sv_.band && sv_.band.soft) bar.append(el('i', {style: `left:${Math.round(100 * sv_.band.soft / sv_.band.tokens)}%`, title: 'soft threshold: recycled when idle'}));
+        parts.push(el('div', {class: 'band'}, `loaded ${clock(sv_.since)} · ${compact(sv_.tokens)} tokens since`, sv_.band ? bar : el('span', {class: 'muted'}, '· recycling off'),
           sv_.band ? `${Math.round((sv_.share || 0) * 100)}% of ${compact(sv_.band.tokens)}` : '', sv_.drift ? el('span', {class: 'badge warn'}, sv_.drift) : ''));
       }
       return el('div', {class: 'copy'}, ...parts);
@@ -587,16 +587,16 @@ function linkWords(p) {
 function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more row under the family, its slots colored by project
   const boxes = [];
   for (const [proj, n] of Object.entries(f.holders || {})) for (let j = 0; j < n; j++) { boxes.push(proj); seen.add(proj); }
-  while (boxes.length < f.busy) boxes.push('straight to LM Studio');
+  while (boxes.length < f.busy) boxes.push('direct to LM Studio');
   const slots = el('span', {class: 'slots'}, ...Array.from({length: f.slots || 0}, (_, j) => {
     const pr = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: pr ? `background:${color(pr)}` : ''});
     const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${id} @ peer ${p.name} · slot ${j + 1}`,
-      [{name: pr || 'free', color: pr ? color(pr) : 'var(--track)', value: pr ? 'busy' : 'free'}]); };
+      [{name: pr || 'free', color: pr ? color(pr) : 'var(--track)', value: pr ? 'active' : 'free'}]); };
     b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt); b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
     return b;
   }));
   return el('div', {class: 'copy', title: p.words || ''}, el('span', {class: 'nm'}, p.name), slots,
-    el('span', {class: 'st'}, `${f.busy}/${f.slots} slots busy · ${f.here} from this gateway · ${f.free_here} available${linkWords(p)}`));
+    el('span', {class: 'st'}, `${f.busy}/${f.slots} slots active · ${f.here} from this gateway · ${f.free_here} available${linkWords(p)}`));
 }
 function peersOf(id) { return ((S && S.peers) || []).filter(p => p.state === 'up' && p.families && p.families[id] && p.families[id].match); }
 function peerBlocks(seen, local) {      // a family only a peer has (the others' peer copies sit under this Mac's families)
@@ -634,16 +634,16 @@ function progress(u) {             // the batch (the whole run) and the job (the
 
 function renderUsers() {
   const box = $('users'), us = S.users;
-  if (!us.length) { box.replaceChildren(el('div', {class: 'empty'}, 'Nothing is using a local model right now.')); return; }
+  if (!us.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No active clients.')); return; }
   const head = ['project', 'what', 'now', 'model', 'running', 'Claude session'].map(h => el('th', {}, h));
   const rows = [];
   for (const u of us) {
     const b = u.batch || {};
     let now;
-    if (u.answering || u.waiting) now = el('span', {}, el('span', {class: 'badge live'}, `${u.answering} answering`), u.waiting ? ' ' : '', u.waiting ? el('span', {class: 'badge'}, `${u.waiting} waiting`) : '');
+    if (u.answering || u.waiting) now = el('span', {}, el('span', {class: 'badge live'}, `${u.answering} active`), u.waiting ? ' ' : '', u.waiting ? el('span', {class: 'badge'}, `${u.waiting} queued`) : '');
     else if (u.direct) now = el('span', {class: 'badge'}, `${u.direct} connected`);
-    else now = el('span', {class: 'muted'}, 'between requests');
-    const flag = u.direct && u.via !== 'hub' ? el('div', {}, el('span', {class: 'badge warn'}, 'straight to LM Studio, not through the hub')) : '';
+    else now = el('span', {class: 'muted'}, 'idle (lease held)');
+    const flag = u.direct && u.via !== 'hub' ? el('div', {}, el('span', {class: 'badge warn'}, 'direct to LM Studio (bypasses the gateway)')) : '';
     const prog = progress(u);
     rows.push(el('tr', {},
       el('td', {}, el('span', {class: 'dot', style: `background:${color(u.project)}`}), u.project),
@@ -664,7 +664,7 @@ function renderUsers() {
 
 function renderClaude() {
   const box = $('claude'), cs = S.claude;
-  if (!cs.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No Claude Code session wrote in the last three hours.')); return; }
+  if (!cs.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No Claude Code session active in the last 3 h.')); return; }
   const head = ['project', 'now', 'session', ''].map(h => el('th', {}, h));
   const rows = cs.map(c => {
     const bits = [];
@@ -681,17 +681,17 @@ function renderClaude() {
 
 function renderRecent() {
   const box = $('recent');
-  if (!R.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No requests through the hub yet.')); return; }
-  const head = ['time', 'project', 'what', 'copy', 's', 'waited', 'out', ''].map((h, i) => el('th', {class: i >= 4 && i <= 6 ? 'num' : ''}, h));
+  if (!R.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No requests through the gateway yet.')); return; }
+  const head = ['time', 'project', 'kind/step', 'instance', 's', 'queued s', 'out', ''].map((h, i) => el('th', {class: i >= 4 && i <= 6 ? 'num' : ''}, h));
   const rows = R.map(r => el('tr', {},
     el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
     el('td', {}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
     el('td', {title: r.step || ''}, kindWords(r.kind), r.step ? el('div', {class: 'muted'}, r.step) : ''),
-    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'peer ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? 'copy ' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : 'copy 1'),
+    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'peer ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? '#' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : '#1'),
     el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
     el('td', {class: 'num'}, (+r.waited || 0) >= 0.1 ? (+r.waited).toFixed(1) : '–'),
     el('td', {class: 'num'}, full(r.out_tokens)),
-    el('td', {}, r.status === 499 ? el('span', {class: 'badge', title: r.note || ''}, 'hung up') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
+    el('td', {}, r.status === 499 ? el('span', {class: 'badge', title: r.note || ''}, '499 client closed') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
       : r.tries > 1 ? el('span', {class: 'badge cycle', title: r.note || ''}, 'resent, answered') : '')));
   tableIn(box, head, rows, 'localmodels log for the day');
 }
@@ -700,7 +700,7 @@ function renderMac() {
   const m = S.mac, top = (S.top || []).slice(0, 3);
   $('mac').replaceChildren(el('b', {}, 'The Mac: '), `load ${m.load && m.load[0] ? m.load[0] : '?'} · ${Math.round(m.free)} GB free on disk · busiest: `
     + top.map(t => `${t.name} ${Math.round(t.cpu)}% / ${t.mem.toFixed(1)} GB`).join(', ') + ` · swaps refused in 7 days: ${S.waits7.refused}`);
-  $('foot').textContent = 'Names, times and token counts only, never what anyone sent. In a terminal: localmodels, or localmodels dash.';
+  $('foot').textContent = 'Metadata only (projects, timestamps, token counts); no prompt or completion content. CLI: localmodels, localmodels dash.';
   const ab = S.about;                // the version this door runs, its license and its source, from the hub's own files
   if (ab) {
     const link = (href, text) => el('a', {href, target: '_blank', rel: 'noopener noreferrer'}, text);
@@ -714,7 +714,7 @@ function renderMac() {
 
 // ---------------------------------------------------------------- fetching, and holding the last picture while it reloads
 async function get(path) { const r = await fetch(path, {cache: 'no-store'}); if (!r.ok) throw new Error(path + ' ' + r.status); return r.json(); }
-function online(ok) { $('banner').style.display = ok ? 'none' : 'block'; document.body.classList.toggle('offline', !ok); if (!ok) chip('chip-door', false, '', 'the door is not answering'); }
+function online(ok) { $('banner').style.display = ok ? 'none' : 'block'; document.body.classList.toggle('offline', !ok); if (!ok) chip('chip-door', false, '', 'gateway: unreachable'); }
 async function tick(name, fn) {                              // one fetch of each kind at a time: a slow door never piles them up
   if (inflight[name]) return;
   inflight[name] = true;

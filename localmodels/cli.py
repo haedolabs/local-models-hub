@@ -1,18 +1,18 @@
 """cli - `localmodels`: every hub job as one command that prints a short summary.
 
-  localmodels                    what is using the local models now, in a few lines
+  localmodels                    status: gateway, LM Studio instances, peers, clients, admission queue
   localmodels open               the dashboard in the browser (http://localhost:1235)
   localmodels dash               the live console in a terminal (--once, --json)
-  localmodels log [--hours 24]   the hub's requests by project
+  localmodels log [--hours 24]   request log by project: count, tokens, active and queued time
   localmodels swapcheck [model ...]   may these models be unloaded or reloaded now? (exit 0 yes, 3 no)
-  localmodels use <model> [--context N] [--parallel N] [--dry]   swap to a model (all its copies, for a family)
-  localmodels keep               one pass of the door's keeper: a crashed model loaded again, missing copies, a recycle due
-  localmodels recycle [model] | --status   ask for fresh copies before a batch (copies past half their band are recycled
-                                 first) | each copy's work since it was loaded against its band
+  localmodels use <model> [--context N] [--parallel N] [--dry]   load a model (all replicas, for a family), unloading the rest
+  localmodels keep               one instance-manager pass: crash reloads, missing replicas, due recycles
+  localmodels recycle [model] | --status   request fresh instances before a batch (instances past before_batch of
+                                 their threshold recycle first) | tokens since load against the recycle threshold
   localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off
-                                 tell every program and Claude session the local models go down for a while; while on,
-                                 new requests get 503 with Retry-After and the keeper stands down; off loads again what was
-                                 loaded. With no words: what is set, and which batches would run into it
+                                 announce a maintenance window (X-Hub-Maintenance, dashboard, MCP status, Claude Code
+                                 hook); while active, new requests get 503 + Retry-After and the instance manager pauses;
+                                 off reloads the families loaded at its start. No arguments: the window and overlapping runs
   localmodels name               each project as seen and as shown on every screen, with its batches, jobs and scripts
   localmodels name project <as seen> <shown>            what every screen calls a project (a folder or an X-Project)
   localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
@@ -34,17 +34,17 @@
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
                                  (--no-think: no thinking: several times faster, for lookups and extraction)
   localmodels batch <jobs.json> [--dir FOLDER] [--parallel N]
-  localmodels jobs               the last local-agent jobs started through the hub
+  localmodels jobs               recent local-agent jobs started through the gateway
   localmodels prune [--days 30]  remove local-agent job folders and logs older than N days (they hold prompts and answers)
-  localmodels check              the hub's self-test
+  localmodels check              self-test: sandbox suites, then live checks against the installed gateway
   localmodels install [--wait MINUTES] [--plugin] [--dry] [--no-claude]
                                  set the hub up on this Mac; run it again after changing the hub's code (it waits for a
-                                 moment with no request passing through the door: 1.5 minutes unless told longer).
+                                 moment with no request in flight: 1.5 minutes unless --wait says longer).
                                  --plugin: installed as a Claude Code plugin, which brings the tools. --dry: say what
                                  would be done, write nothing. --no-claude: no MCP registration, no signpost line
   localmodels uninstall          undo install
-  localmodels start | stop | restart     the hub's door (start on an open door does nothing; restart waits for quiet)
-  localmodels gateway            the door in the foreground (what launchd runs)
+  localmodels start | stop | restart     the gateway (start is a no-op when running; restart waits for no requests in flight)
+  localmodels gateway            run the gateway in the foreground (what launchd runs)
   localmodels mcp                the MCP server (Claude Code starts it)
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
                                  the version stamped, committed, tagged and pushed (--dry: the checks only)
@@ -61,10 +61,11 @@ LOGS = os.path.expanduser('~/Library/Logs/LocalModels')
 PY = shutil.which('python3') or sys.executable or '/usr/bin/python3'   # the PATH's python3 (a stable link, e.g. /opt/homebrew/bin/python3), not a versioned Cellar path
 BINS = ('/opt/homebrew/bin', '/usr/local/bin', os.path.expanduser('~/.local/bin'))
 SIGNPOST_FILE = os.path.expanduser('~/.claude/CLAUDE.md')
-SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {HOME}/GUIDE.md "
-            f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never straight to LM Studio's port 1234. "
+_HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.path.expanduser('~') + os.sep) else HOME
+SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
+            f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_door.py', 'test_agent.py', 'test_peers.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -115,55 +116,55 @@ def status():
     from . import maint
     mt = maint.view()
     if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + (' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
-    print(f"the hub's door: {'open on ' + llmshare.HUB if d['up'] else 'closed (localmodels start)'}"
-          + (' · runs older code: localmodels install' if d['up'] and d['stale'] else ''))
-    print(f"LM Studio: server {lm['server']} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
-          + ('' if llmshare.read_ok() else ' · (the last listing failed: this is the one before)'))
-    if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (the last good settings stand)')
+    print(f"gateway: {'listening on ' + llmshare.HUB if d['up'] else 'down (localmodels start)'}"
+          + (' · stale code: localmodels install' if d['up'] and d['stale'] else ''))
+    print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
+          + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
+    if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (last valid settings in effect)')
     for line in peer_lines(d['up']): print(line)
     try:
         v = recycle.view(lm['models'])
         if v['copies']:
-            print('  since loaded: ' + ' · '.join(f"{dash.short(i)} {c['tokens'] / 1000:.0f}k tokens" + (f" ({int(100 * c['share'])}% of its band)" if c.get('share') is not None else '')
+            print('  tokens since load: ' + ' · '.join(f"{dash.short(i)} {c['tokens'] / 1000:.0f}k" + (f" ({int(100 * c['share'])}% of recycle threshold)" if c.get('share') is not None else '')
                                               for i, c in v['copies'].items()))
         if v.get('job'): print('  ' + recycle.words(v['job']))
-    except Exception as e: print(f'  (could not read the copies\' work: {e})')
+    except Exception as e: print(f'  (could not read per-instance token counts: {e})')
     for line in crash_lines(): print(line)
-    print('using the models now:' if users else 'using the models now: nothing')
+    print('clients:' if users else 'clients: none')
     for r in users:
         b = r.get('batch') or {}
-        state = (f"{r['answering']} answering" + (f", {r['waiting']} waiting" if r['waiting'] else '')) if r['answering'] or r['waiting'] else \
-            f"{r['direct']} connected straight to LM Studio (not through the hub)" if r['direct'] else 'between requests'
+        state = (f"{r['answering']} active" + (f", {r['waiting']} queued" if r['waiting'] else '')) if r['answering'] or r['waiting'] else \
+            f"{r['direct']} direct connections to LM Studio (bypassing the gateway)" if r['direct'] else 'idle (lease held)'
         who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
         print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or r.get('job') or {}).get('started') else 'since'} {ago(r['since'])}"
               + (track_words('batch', b) if b.get('total') else '') + track_words('job', r.get('job')) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
     work = [c for c in cs if c['working']]
-    print(f"Claude Code: {len(work)} working" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
+    print(f"Claude Code sessions: {len(work)} active" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
           + f", {len(cs) - len(work)} idle in the last 3 hours")
     lh = dash.last_hour()
-    if lh: print('last hour through the hub: ' + '; '.join(f"{p} {v['requests']} requests, {v['tokens']:,} tokens" for p, v in lh.items()))
+    if lh: print('last hour via the gateway: ' + '; '.join(f"{p} {v['requests']} requests, {v['tokens']:,} tokens" for p, v in lh.items()))
     n, secs, refused = llmshare.waits(7)
-    print(f'last 7 days: {n} waits for a turn ({secs / 60:.1f} min in all), {refused} swaps refused')
+    print(f"last 7 days: {n} queue wait{'s' if n != 1 else ''} > 2 s ({secs / 60:.1f} min total), {refused} swap{'s' if refused != 1 else ''} refused")
     return 0
 
 
 def log(hours=24):
     from . import names
     rows = [names.request(r) for r in llmshare.requests_log(hours)]
-    if not rows: print(f'no requests through the hub in the last {hours:g} hours'); return 0
-    print(f'the last {hours:g} hours through the hub: {len(rows)} requests')
+    if not rows: print(f'no requests through the gateway in the last {hours:g} hours'); return 0
+    print(f'the last {hours:g} hours via the gateway: {len(rows)} requests')
     for p, v in sorted(llmshare.by_project(rows).items(), key=lambda x: -x[1]['requests']):
         kinds = {}
         for d in rows:
             if (d.get('project') or '?') == p: kinds[d.get('kind') or 'other'] = kinds.get(d.get('kind') or 'other', 0) + 1
         print(f"  {p}: {v['requests']} requests ({', '.join(f'{n} {k}' for k, n in kinds.items())}), {v['tokens']:,} tokens, "
-              f"{v['seconds'] / 60:.1f} min answering, {v['waited'] / 60:.1f} min waiting for a turn")
+              f"{v['seconds'] / 60:.1f} min active, {v['waited'] / 60:.1f} min queued")
     bad = [d for d in rows if (d.get('status') or 0) >= 400 and d.get('status') != 499]
     gone = [d for d in rows if d.get('status') == 499]
     resent = [d for d in rows if (d.get('tries') or 1) > 1]
-    if bad: print(f"  {len(bad)} answered with an error (e.g. {bad[-1].get('status')} for {bad[-1].get('project')}: {bad[-1].get('note') or ''})")
-    if resent: print(f"  {len(resent)} sent again by the door after the model crashed; {sum(1 for d in resent if d.get('status') == 200)} then answered")
-    if gone: print(f"  {len(gone)} dropped because the program hung up while it waited")
+    if bad: print(f"  {len(bad)} returned errors (e.g. {bad[-1].get('status')} for {bad[-1].get('project')}: {bad[-1].get('note') or ''})")
+    if resent: print(f"  {len(resent)} retried by the gateway after an instance crash; {sum(1 for d in resent if d.get('status') == 200)} succeeded")
+    if gone: print(f"  {len(gone)} dropped: client closed the connection while queued (499)")
     return 0
 
 
@@ -181,20 +182,20 @@ def crashes_cmd(days=7, scan=False):
     from . import crashes, recycle
     if scan:
         n = crashes.scan(days)
-        print(f"read LM Studio's logs of the last {days:g} days: {n} crash{'es' if n != 1 else ''} the hub had no record of, recorded now")
+        print(f"scanned LM Studio's logs for the last {days:g} days: {n} crash{'es' if n != 1 else ''} missing from the crash record, now recorded")
     xs = crashes.history(days)
     print(f"LM Studio crashed {len(xs)} time{'s' if len(xs) != 1 else ''} in the last {days:g} days" + (':' if xs else ''))
     for x in xs:
         print('  ' + crashes.words(x))
         for s in x.get('served') or []:
-            print(f"    {s['model']} had answered {s['requests']} requests ({s.get('tokens', s['written']):,} tokens processed) since {ago(s['since'])}")
+            print(f"    {s['model']} had served {s['requests']} requests ({s.get('tokens', s['written']):,} tokens processed) since {ago(s['since'])}")
     rs = recycle.recent(days)
-    print(f"copies recycled: {sum(1 for r in rs if r['event'] == 'recycled')}" + (':' if rs else ''))
+    print(f"recycles: {sum(1 for r in rs if r['event'] == 'recycled')}" + (':' if rs else ''))
     for r in rs[:12]:
         when = time.strftime('%d %b %H:%M', time.localtime(r['at']))
         print(f"  {when} {r.get('model')}: " + (f"{r.get('tokens') or 0:,} tokens processed in {r.get('hours') or 0:.1f} h, back in {r.get('seconds') or 0:.0f} s" if r['event'] == 'recycled' else f"given up ({r.get('why')})"))
     down = crashes.down()
-    print('down now: ' + '; '.join(d['words'] for d in down) if down else 'down now: nothing (every model that crashed is loaded again, or was let go)')
+    print('down now: ' + '; '.join(d['words'] for d in down) if down else 'down now: none (every crashed instance reloaded or released)')
     return 0
 
 
@@ -391,7 +392,7 @@ def peer_cmd(a):
         print(f'peer {name} added: {u[0]} ({llmshare.MODELS}; the gateway polls it within seconds)')
         if peers.address_words(u[1]): print(f'  warning: {peers.address_words(u[1])}')
         print('  ' + token_words())
-        print('next (GUIDE.md, Peers, lists every step and which need a person):')
+        print('next steps (GUIDE.md, Peers, lists each one and which are manual):')
         print(f'  1. copy peer-token to {name}: {token_copy(f"<user>@{u[1]}")}')
         print(f'  2. on {name}: localmodels peer serve {u[1]}')
         print('  3. here: localmodels peer test')
@@ -459,14 +460,14 @@ def recycle_cmd(a):
     if '--status' in a:
         v = recycle.view(llmshare.loaded(fresh=True))
         for i, c in v['copies'].items():
-            band = f" · band {c['band']['tokens']:,} (soft {c['band']['soft']:,}): {int(100 * c['share'])}%" if c.get('band') else ' · not recycled (no settings)'
+            band = f" · threshold {c['band']['tokens']:,} (soft {c['band']['soft']:,}): {int(100 * c['share'])}%" if c.get('band') else ' · recycling off (no settings)'
             print(f"{i}: {c['tokens']:,} tokens processed ({c['requests']} requests) since {ago(c['since'])}{band}" + (f" · {c['drift']}" if c.get('drift') else ''))
         print(recycle.words(v['job']) if v.get('job') else 'no recycle in progress')
         return 0
     model = next((x for x in a if not x.startswith('-')), None) or next(iter(llmshare.settings().get('families') or {}), None)
     if not model: print('no family in the settings'); return 1
     r = llmshare.hub_post('/hub/recycle', dict(model=model))
-    if r is None: print("the hub's door is closed: localmodels start"); return 1
+    if r is None: print("gateway down: localmodels start"); return 1
     print(f"{model}: {r.get('note')}" if r.get('ok') else f"{model}: {r.get('note') or r.get('error')}")
     return 0 if r.get('ok') else 1
 
@@ -474,7 +475,7 @@ def recycle_cmd(a):
 def swapcheck(models):
     models = models or [r['id'] for r in llmshare.loaded(fresh=True)]
     why = llmshare.swap_blockers(models)
-    if why: print('not now: ' + '; '.join(why)); return 3
+    if why: print('swap refused: ' + '; '.join(why)); return 3
     print(f"safe to unload or reload {', '.join(models) or 'nothing (no model loaded)'}: nothing is using {'it' if len(models) == 1 else 'them'}")
     return 0
 
@@ -490,14 +491,14 @@ def use(a):
 def keep():
     from . import models
     did = models.keep()
-    print('; '.join(did) if did else 'nothing to do: every family whose first copy is loaded has all its copies, nothing is due for a recycle')
+    print('; '.join(did) if did else 'nothing to do: every family with its first instance loaded has all replicas; no recycle due')
     return 0
 
 
 def jobs(n=8):
     from . import mcp_server
     ds = sorted(glob.glob(os.path.join(mcp_server.AGENTS, '*', '*')), key=os.path.getmtime)[-n:]
-    if not ds: print('no local-agent jobs started through the hub yet'); return 0
+    if not ds: print('no local-agent jobs started through the gateway yet'); return 0
     for d in ds:
         job = os.path.relpath(d, mcp_server.AGENTS)
         st = mcp_server.job_status(job)
@@ -665,7 +666,7 @@ def _fitted():
 
 def _fitted_words(s):
     if not s.get('families'): return 'no model managed yet: ' + s.get('why', '')
-    return '; '.join(f"{k} as {f['copies']} {'copy' if f['copies'] == 1 else 'copies'} of {f['parallel']} answers at once, context {f['context']:,}"
+    return '; '.join(f"{k}: {f['copies']} replica{'' if f['copies'] == 1 else 's'} × {f['parallel']} slots, context {f['context']:,}"
                      for k, f in s['families'].items())
 
 
@@ -674,10 +675,10 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
     if dry:
         if os.path.exists(llmshare.MODELS): print(f'would keep the settings: {llmshare.MODELS}')
         else: print(f'would write the settings file {llmshare.MODELS}, fitted to this Mac: {_fitted_words(_fitted())}')
-        print(f"would copy the door's code to {INSTALLED} and start it at login as {LABEL} ({PLIST}) with {PY}, after a moment with no request passing through")
-        if plugin: print("would leave the hub's tools and the rules to the Claude Code plugin (no registration, no signpost line)")
+        print(f"would copy the gateway's code to {INSTALLED} and start it at login as {LABEL} ({PLIST}) with {PY}, after a moment with no request passing through")
+        if plugin: print("would leave the hub's MCP tools and the rules to the Claude Code plugin (no registration, no signpost line)")
         elif no_claude: print('would register nothing with Claude Code and add no signpost line (--no-claude)')
-        else: print(f"would register the hub's tools for every Claude Code session (claude mcp add --scope user local-models), add one signpost line to {SIGNPOST_FILE}, "
+        else: print(f"would register the hub's MCP tools for every Claude Code session (claude mcp add --scope user local-models), add one signpost line to {SIGNPOST_FILE}, "
                     f"and add the maintenance hook to {SETTINGS_FILE} (silent unless maintenance is set)")
         print(f"would link the localmodels command into the first writable of {', '.join(BINS)}")
         if retire_loader(dry=True): print(retire_loader(dry=True))
@@ -687,11 +688,11 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
     if not os.path.exists(llmshare.MODELS):
         os.makedirs(llmshare.SHARED, exist_ok=True); fitted = _fitted()
         with open(llmshare.MODELS, 'w') as f: json.dump(fitted, f, indent=1); f.write('\n')
-        print(f'0. the settings file {llmshare.MODELS} written, fitted to this Mac: {_fitted_words(fitted)} (edit it; the door reads it as it changes)')
+        print(f'0. the settings file {llmshare.MODELS} written, fitted to this Mac: {_fitted_words(fitted)} (edit it; the gateway reloads it on change)')
     else: print(f'0. the settings: {llmshare.MODELS}')
     running = _loaded() or any(_loaded(o) for o in OLD_LABELS)
     if running and not quiet(wait):
-        print(f'the door stayed busy for {wait / 60:.1f} minutes ({len(llmshare.inflight())} requests passing through): nothing changed; '
+        print(f'the gateway stayed busy for {wait / 60:.1f} minutes ({len(llmshare.inflight())} requests in flight): nothing changed; '
               'try again when it is quiet, or: localmodels install --wait 480')
         return 3
     with llmshare.swapping(wait=120) as got:                    # no load or recycle half done when the door restarts
@@ -701,9 +702,9 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
                 _launchctl('bootout', f'{uid}/{o}')
                 try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{o}.plist'))
                 except OSError: pass
-                print(f'   (the door under its old name {o} is stopped; it comes back as {LABEL})')
+                print(f'   (the gateway under its old label {o} is stopped; it restarts as {LABEL})')
         deploy()
-        print(f'1. the door\'s code copied to {INSTALLED} ({digest(INSTALLED)})')
+        print(f'1. gateway code copied to {INSTALLED} ({digest(INSTALLED)})')
         plist = _plist()
         try: changed = plistlib.load(open(PLIST, 'rb')) != plist
         except (OSError, ValueError): changed = True
@@ -713,10 +714,10 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         elif _loaded(): r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}')
         else: r = _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
-    print(f"2. the door starts at login ({PLIST}): {'open on ' + llmshare.HUB if up else 'NOT answering: ' + (r.stderr.strip() or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
+    print(f"2. gateway starts at login ({PLIST}): {'listening on ' + llmshare.HUB if up else 'NOT responding: ' + (r.stderr.strip() or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
     if up and retire_loader(dry=True): print('   ' + retire_loader())
     if plugin:
-        print("3. the hub's tools come with the Claude Code plugin (its .mcp.json): nothing registered here")
+        print("3. the hub's MCP tools come with the Claude Code plugin (its .mcp.json): nothing registered here")
         print("4. no signpost line: the plugin's skill carries the rules into every session")
     elif no_claude:
         print('3. nothing registered with Claude Code (--no-claude)')
@@ -727,16 +728,24 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
             want = [PY, os.path.join(HOME, 'bin', 'localmodels'), 'mcp']
             cur = subprocess.run([claude, 'mcp', 'get', 'local-models'], capture_output=True, text=True)
             if cur.returncode == 0 and all(x in cur.stdout for x in want) and 'User' in cur.stdout:
-                print('3. the hub\'s tools are already registered for every Claude Code session (local-models)')
+                print('3. the hub\'s MCP tools are already registered for every Claude Code session (local-models)')
             else:
                 subprocess.run([claude, 'mcp', 'remove', '--scope', 'user', 'local-models'], capture_output=True, text=True)
                 r = subprocess.run([claude, 'mcp', 'add', '--scope', 'user', 'local-models', '--', *want], capture_output=True, text=True)
-                print('3. the hub\'s tools registered for every Claude Code session (local-models)' if r.returncode == 0 else
+                print('3. the hub\'s MCP tools registered for every Claude Code session (local-models)' if r.returncode == 0 else
                       f'3. could not register the tools: {(r.stderr or r.stdout).strip()[:300]}')
-        else: print('3. the claude command is not on PATH: register the tools by hand (GUIDE.md, setting up)')
+        else: print('3. the claude command is not on PATH: register the MCP tools manually (GUIDE.md, setting up)')
         os.makedirs(os.path.dirname(SIGNPOST_FILE), exist_ok=True)
         text = open(SIGNPOST_FILE).read() if os.path.exists(SIGNPOST_FILE) else ''
-        if 'local-models hub signpost' in text: print(f'4. the signpost line is already in {SIGNPOST_FILE}')
+        lines = text.split('\n')
+        mine = [i for i, l in enumerate(lines) if 'local-models hub signpost' in l]
+        if len(mine) == 1 and lines[mine[0]] == SIGNPOST: print(f'4. the signpost line is already in {SIGNPOST_FILE}')
+        elif mine:                                          # the line install owns: brought to the current wording, once
+            lines = [SIGNPOST if i == mine[0] else l for i, l in enumerate(lines) if i == mine[0] or i not in mine]
+            tmp = f'{SIGNPOST_FILE}.{os.getpid()}.tmp'
+            with open(tmp, 'w') as f: f.write('\n'.join(lines))
+            os.replace(tmp, SIGNPOST_FILE)
+            print(f'4. the signpost line updated in {SIGNPOST_FILE}')
         else:
             with open(SIGNPOST_FILE, 'a') as f: f.write(('' if not text or text.endswith('\n') else '\n') + SIGNPOST + '\n')
             print(f'4. the signpost line added to {SIGNPOST_FILE}')
@@ -759,10 +768,10 @@ def uninstall():
         try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{label}.plist'))
         except OSError: pass
     shutil.rmtree(INSTALLED, ignore_errors=True)
-    print('1. the door is stopped and no longer starts at login')
+    print('1. gateway stopped; it no longer starts at login')
     claude = shutil.which('claude')
     if claude: subprocess.run([claude, 'mcp', 'remove', '--scope', 'user', 'local-models'], capture_output=True, text=True)
-    print('2. the hub\'s tools are no longer registered')
+    print('2. the hub\'s MCP tools are no longer registered')
     if os.path.exists(SIGNPOST_FILE):
         lines = [l for l in open(SIGNPOST_FILE).read().split('\n') if 'local-models hub signpost' not in l]
         tmp = SIGNPOST_FILE + '.tmp'; open(tmp, 'w').write('\n'.join(lines)); os.replace(tmp, SIGNPOST_FILE)
@@ -844,7 +853,7 @@ def maintenance_cmd(a):
     words = [x for x in a if x != 'maintenance']
     if words[:1] == ['off']:
         for line in models.end_maintenance(): print(line)
-        print('the hub is back to normal: requests are answered, the keeper keeps the copies loaded')
+        print('maintenance ended: requests are admitted again and the instance manager resumes')
         return 0
     if not words:
         mt = maint.view()
@@ -873,8 +882,8 @@ def maintenance_cmd(a):
         print('say when: localmodels maintenance in 15m | at 20:30 | now | after-batches [for 30m] [why ...]'); return 2
     m = maint.announce(start=start, minutes=minutes, why=' '.join(why), after_batches=after)
     print('set: ' + maint.words(m))
-    print('  every answer from the door now carries X-Hub-Maintenance; the dash, `localmodels`, the status tool and the')
-    print('  Claude Code hook say it; when it starts, new requests get 503 with Retry-After and the keeper stands down')
+    print('  every gateway response now carries X-Hub-Maintenance; the dashboard, `localmodels`, the status tool and the')
+    print('  Claude Code hook report it; once active, new requests get 503 + Retry-After and the instance manager pauses')
     from . import names
     for g in sorted(dash.live_runs().values(), key=lambda g: g['started']):
         if m.get('start') and g.get('finish') and g['finish'] > m['start']:
@@ -883,7 +892,7 @@ def maintenance_cmd(a):
     rows = llmshare.loaded(fresh=True)
     if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
     n = len(llmshare.inflight())
-    if n: print(f'waiting for the {n} requests being answered to finish (up to 10 min) ...')
+    if n: print(f'waiting for {n} active requests to complete (up to 10 min) ...')
     if quiet(wait=600, still=3): print('quiet: nothing is being answered. Go ahead. When done: localmodels maintenance off')
     else: print(f'{len(llmshare.inflight())} requests are still being answered after 10 min; they finish on their own. When done: localmodels maintenance off')
     return 0
@@ -891,17 +900,17 @@ def maintenance_cmd(a):
 
 def door(verb):
     uid = f'gui/{os.getuid()}'
-    if verb == 'start' and _loaded() and llmshare.hub_up(fresh=True): print(f'the door is open already on {llmshare.HUB}'); return 0
+    if verb == 'start' and _loaded() and llmshare.hub_up(fresh=True): print(f'gateway already listening on {llmshare.HUB}'); return 0
     if verb in ('stop', 'restart') and _loaded() and not quiet():
-        print(f'the door is busy ({len(llmshare.inflight())} requests passing through for 90 s): left open; try again when it is quiet')
+        print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle')
         return 3
     if verb == 'stop':
-        r = _launchctl('bootout', f'{uid}/{LABEL}'); print('the door is closed until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()); return r.returncode
+        r = _launchctl('bootout', f'{uid}/{LABEL}'); print('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()); return r.returncode
     if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
     if verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
     else: r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
-    print(f"the door is {'open on ' + llmshare.HUB if up else 'not answering: see ' + os.path.join(LOGS, 'gateway.log')}")
+    print(f"gateway {'listening on ' + llmshare.HUB if up else 'not responding: see ' + os.path.join(LOGS, 'gateway.log')}")
     return 0 if up else 1
 
 
@@ -925,23 +934,23 @@ def check():
     from . import crashes, dash, mcp_server, whois
     ok = []
     def t(name, good, note=''): ok.append(good); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
-    t('the door answers', llmshare.hub_up(fresh=True), llmshare.HUB)
+    t('gateway responds', llmshare.hub_up(fresh=True), llmshare.HUB)
     try:
         page = urllib.request.urlopen(llmshare.HUB + '/', timeout=5).read()
         snap = json.load(urllib.request.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
         t('the dashboard answers', NAME.encode() in page and b'__HUB_NAME__' not in page and 'lmstudio' in snap, f'{llmshare.HUB}/ (localmodels open)')
     except (OSError, ValueError) as e: t('the dashboard answers', False, str(e))
-    try: models = json.load(urllib.request.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio answers through the door', True, f'{len(models)} models listed')
-    except OSError as e: t('LM Studio answers through the door', False, str(e))
-    t('the lms command is found', lms_found(), llmshare.LMS if lms_found() else f"not at {llmshare.LMS} and not on PATH: open LM Studio once and run ~/.lmstudio/bin/lms bootstrap, or set LMS; without it the hub keeps no copies and reloads nothing")
+    try: models = json.load(urllib.request.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
+    except OSError as e: t('LM Studio reachable via the gateway', False, str(e))
+    t('the lms command is found', lms_found(), llmshare.LMS if lms_found() else f"not at {llmshare.LMS} and not on PATH: open LM Studio once and run ~/.lmstudio/bin/lms bootstrap, or set LMS; without it the instance manager cannot load, reload or recycle instances")
     rows = llmshare.loaded(fresh=True)
     ids = {r['id'] for r in rows}
-    t('the model listing reads whole', llmshare.read_ok(), f"{len(rows)} loaded" if llmshare.read_ok() else 'lms ps failed or is unsure: the keeper waits for a good one')
+    t('the model listing reads whole', llmshare.read_ok(), f"{len(rows)} loaded" if llmshare.read_ok() else 'lms ps failed or partial: the instance manager waits for a complete listing')
     for base, f in (llmshare.settings().get('families') or {}).items():
         if base not in ids: continue                       # the keeper loads copies only while the first one is loaded
         want = llmshare.copy_ids(base, f.get('copies', 1))
         have = [c for c in want if c in ids]
-        t(f'{base} has its copies', len(have) == len(want), f'{len(have)} of {len(want)} loaded, {llmshare.at_once(base)} answers at once')
+        t(f'{base}: all replicas loaded', len(have) == len(want), f'{len(have)}/{len(want)} loaded, {llmshare.at_once(base)} slots')
     from . import peers
     for p in peers.view():
         t(f"peer {p['name']}: reachable over the link", p['state'] == 'up', p['words'])
@@ -953,12 +962,12 @@ def check():
         t(f'{name[5:-3]}: the sandbox tests pass', good, note)
     down = crashes.down()
     t('no model is down after a crash', not down, '; '.join(d['words'] for d in down) or 'localmodels crashes for the record')
-    if dash.door()['stale']: print("  skip the keeper's look (the door runs older code until localmodels install)")
+    if dash.door()['stale']: print("  skip instance-manager check (the gateway runs stale code until localmodels install)")
     else:
         seen = time.time() - (crashes._read(fresh=True).get('at') or 0)
-        t("the keeper looks every 20 s (crashes, copies, recycles)", seen < 90, f'last look {seen:.0f} s ago')
+        t("instance manager polls every 20 s (crashes, replicas, recycles)", seen < 90, f'last look {seen:.0f} s ago')
     me = whois.identity(os.getpid())
-    t('whois names this program', me.get('project') is not None, f"{me.get('project')} · {me.get('app')}")
+    t('whois identifies the client process', me.get('project') is not None, f"{me.get('project')} · {me.get('app')}")
     loaded = [r['id'] for r in rows]
     busy = sum(llmshare.busy_slots().values())
     if loaded and llmshare.hub_up() and busy < llmshare.at_once():
@@ -969,10 +978,10 @@ def check():
         except OSError as e: got = False
         time.sleep(0.3)
         mine = [d for d in llmshare.requests_log(0.5) if d.get('at', 0) >= t0 and d.get('project') == 'local-models' and d.get('kind') == 'test']
-        t('a request through the door is answered and logged', got and bool(mine),
-          f"{mine[-1].get('project')} · {mine[-1].get('kind')} · {mine[-1].get('seconds')} s" + (f" (waited {mine[-1].get('waited')} s for a turn)" if (mine[-1].get('waited') or 0) > 2 else '')
+        t('test request through the gateway completed and logged', got and bool(mine),
+          f"{mine[-1].get('project')} · {mine[-1].get('kind')} · {mine[-1].get('seconds')} s" + (f" (queued {mine[-1].get('waited')} s)" if (mine[-1].get('waited') or 0) > 2 else '')
           if mine else 'nothing logged')
-    else: print('  skip a request through the door (no model loaded, the door closed, or every slot busy with a batch)')
+    else: print('  skip test request (no model loaded, gateway down, or every slot busy)')
     p = subprocess.run([PY, os.path.join(HOME, 'bin', 'localmodels'), 'mcp'], input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
                        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n', capture_output=True, text=True, timeout=30)
     names = []
@@ -980,7 +989,7 @@ def check():
         try: names += [x['name'] for x in json.loads(line).get('result', {}).get('tools', [])]
         except (ValueError, AttributeError): pass
     t('the tools answer (MCP)', set(names) == {x['name'] for x in mcp_server.TOOLS}, ', '.join(names))
-    t('the door runs this code', not dash.door()['stale'], 'localmodels install refreshes it' if dash.door()['stale'] else digest(HOME))
+    t('gateway runs this code', not dash.door()['stale'], 'localmodels install refreshes it' if dash.door()['stale'] else digest(HOME))
     print(f"{sum(ok)} of {len(ok)} ok")
     return 0 if all(ok) else 1
 

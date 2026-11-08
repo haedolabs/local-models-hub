@@ -17,36 +17,36 @@ AGENTS = os.path.expanduser('~/Library/Logs/LocalModels/agents')
 GUIDE = os.path.join(HOME, 'GUIDE.md')
 INSTRUCTIONS = (
     "Local models on this Mac (LM Studio) are shared by every project and Claude Code session through the local-models hub "
-    "(the full rules: the guide tool). To use a local model, send OpenAI-style requests to http://localhost:1235/v1 or Anthropic-style ones to http://localhost:1235 (the hub), "
-    "never straight to LM Studio's port 1234: the hub takes turns for everyone, names your project and session itself, and "
-    "logs who used what (never the content). Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
-    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and the time left. The status tool says which models are loaded and how many answers at once they give: "
-    "a batch should send that many (the hub gives each a turn; the rest wait). For bulk reading jobs, use ask and batch here "
-    "(local agents that only read your project's folder) instead of Claude multi-agent workflows. "
-    "Their answers are leads to check, not verdicts. Never stop LM Studio's server; before unloading or reloading a model, call "
-    "swap_check, and if it names anyone, do not swap. Report briefly, in plain words.")
+    "(full rules: the guide tool). Send OpenAI-compatible requests to http://localhost:1235/v1 or Anthropic-compatible ones to http://localhost:1235 (the gateway), "
+    "never directly to LM Studio's port 1234: the gateway runs admission control across all clients, attributes each request to its project and session, and "
+    "logs metadata only (never content). Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
+    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA. The status tool lists the loaded models and their total concurrent slots (at_once): "
+    "a batch should keep that many requests in flight (the gateway queues the rest). For bulk read-only jobs, use ask and batch here "
+    "(local agents with read-only tools scoped to your project's folder) instead of Claude multi-agent workflows. "
+    "Treat their answers as leads to verify, not verdicts. Never stop LM Studio's server; before unloading or reloading a model, call "
+    "swap_check, and if it names anyone, do not swap. Report briefly.")
 _o = lambda props, req=(): {'type': 'object', 'properties': props, 'required': list(req)}
 TOOLS = [
-    {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each copy\'s work since it was loaded against its '
-     'recycle band), the hub, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every program using a model by '
+    {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each instance\'s tokens since load against its '
+     'recycle threshold), the gateway, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every client using a model by '
      'project and Claude session (batches with their progress), crashes and recycles, and the last hour by project.',
      'inputSchema': _o({})},
-    {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (where to send requests, "
-     "leases, swaps, local agents, logs). section=... reads one part; no section: the Now card and the section list.",
+    {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (endpoints, "
+     "leases, swaps, local agents, logs). section=... reads one part; no section: the Now section and the section list.",
      'inputSchema': _o({'section': {'type': 'string'}})},
     {'name': 'ask', 'description': "One local agent on the loaded model: it answers one well-defined question, reading "
-     "files in this project's folder with tools that only read (read_files=false: no files, just the model). schema=... "
-     "asks for the answer as JSON matching a JSON Schema. think=false turns the model's thinking off: several times faster "
-     "and as right for lookups and extraction; leave it on (the default) for checks and judgment. Waits up to "
-     "wait_seconds (default 120), else returns a job id for job_status. Treat the answer as a lead to check.",
+     "files in this project's folder with read-only tools (read_files=false: no files, model only). schema=... "
+     "constrains the answer to JSON matching a JSON Schema. think=false disables the model's thinking: several times faster "
+     "and as accurate for lookups and extraction; leave it on (the default) for checks and judgment. Blocks up to "
+     "wait_seconds (default 120), else returns a job id for job_status. Treat the answer as a lead to verify.",
      'inputSchema': _o({'prompt': {'type': 'string'}, 'read_files': {'type': 'boolean'}, 'schema': {'type': 'object'}, 'think': {'type': 'boolean'},
                         'max_turns': {'type': 'integer', 'minimum': 1, 'maximum': 40}, 'max_tokens': {'type': 'integer', 'minimum': 256, 'maximum': 32000},
                         'folder': {'type': 'string'}, 'wait_seconds': {'type': 'integer', 'minimum': 0, 'maximum': 600}}, ['prompt'])},
-    {'name': 'batch', 'description': "Many local-agent jobs side by side (bulk reading: checking many files, summarising "
-     "many documents), each with tools that only read this project's folder. jobs: [{label, prompt, schema?, think?}] "
-     "(think=false: no thinking, for lookups and extraction). parallel: how many at once (default: what the loaded copies "
-     "answer at once). Returns a job id at once; follow it with job_status. A job whose request fails because the model is "
-     "down waits and tries again for up to an hour. The answers are leads to check.",
+    {'name': 'batch', 'description': "Many local-agent jobs in parallel (bulk reading: checking many files, summarising "
+     "many documents), each with read-only tools scoped to this project's folder. jobs: [{label, prompt, schema?, think?}] "
+     "(think=false: no thinking, for lookups and extraction). parallel: concurrency (default: the total slots of the loaded "
+     "replicas). Returns a job id immediately; poll it with job_status. A job whose request fails because the model is "
+     "down retries with backoff for up to an hour. Treat the answers as leads to verify.",
      'inputSchema': _o({'jobs': {'type': 'array', 'items': _o({'label': {'type': 'string'}, 'prompt': {'type': 'string'},
                         'schema': {'type': 'object'}, 'max_turns': {'type': 'integer'}, 'max_tokens': {'type': 'integer'}, 'think': {'type': 'boolean'}}, ['prompt'])},
                         'parallel': {'type': 'integer', 'minimum': 1, 'maximum': 16}, 'folder': {'type': 'string'}}, ['jobs'])},
@@ -54,7 +54,7 @@ TOOLS = [
      'results=true adds every answer (capped); label=... one job\'s full answer.',
      'inputSchema': _o({'job': {'type': 'string'}, 'label': {'type': 'string'}, 'results': {'type': 'boolean'}}, ['job'])},
     {'name': 'swap_check', 'description': 'Whether these models may be unloaded or reloaded now (a swap, a context change): '
-     'empty blockers means yes; otherwise who is using them. Never swap when it names anyone.',
+     'empty blockers means yes; otherwise the clients using them. Never swap when it names anyone.',
      'inputSchema': _o({'models': {'type': 'array', 'items': {'type': 'string'}}})},
 ]
 
@@ -70,7 +70,7 @@ def status():
     s = dict(time=time.strftime('%H:%M:%S'), door=dash.door(), lmstudio=dash.lmstudio(), users=dash.users(),
              claude=dash.claude(), last_hour=dash.last_hour())
     lm = s['lmstudio']
-    out = dict(ok=True, hub=('open' if s['door']['up'] else 'closed') + f" on {llmshare.HUB}", dashboard=f'{llmshare.HUB}/',
+    out = dict(ok=True, hub=('gateway listening' if s['door']['up'] else 'gateway down') + f" on {llmshare.HUB}", dashboard=f'{llmshare.HUB}/',
                lmstudio=f"server {lm['server']}; " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded'),
                at_once=llmshare.at_once() if lm['families'] or _peers_up() else 0, using_now=[],
                claude_sessions=dict(working=sum(c['working'] for c in s['claude']), idle=sum(not c['working'] for c in s['claude'])),
@@ -78,23 +78,23 @@ def status():
     try:
         v = recycle.view(lm['models'])
         out['copies'] = {i: (f"{c['tokens']:,} tokens processed since {time.strftime('%H:%M', time.localtime(c['since']))}"
-                             + (f" ({int(100 * c['share'])}% of its recycle band)" if c.get('share') is not None else '')) for i, c in v['copies'].items()}
+                             + (f" ({int(100 * c['share'])}% of its recycle threshold)" if c.get('share') is not None else '')) for i, c in v['copies'].items()}
         if v.get('job'): out['recycling'] = recycle.words(v['job'])
     except Exception as e: out['copies'] = f'could not read: {e}'
     from . import maint
     mt = maint.view()
     if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
-    if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error() + ' (the last good settings stand)'
+    if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error() + ' (last valid settings remain in effect)'
     from . import cli
     lines = cli.peer_lines(s['door']['up'])
     if lines: out['peers'] = [x.strip() for x in lines]          # at_once counts the peers' free slots for this Mac too
     cr = dash.crash_view()
     if cr['down'] or cr['last']:
-        out['crashes'] = [f"down after a crash now: {d['words']}" for d in cr['down']] + ([f"last crash: {cr['last']}"] if cr['last'] else [])
+        out['crashes'] = [f"down after a crash: {d['words']}" for d in cr['down']] + ([f"last crash: {cr['last']}"] if cr['last'] else [])
     for r in s['users']:
         b = r.get('batch') or {}
         out['using_now'].append(dict(project=r['project'], kind=dash.kind_words(r), models=r['models'],
-                                     state=f"{r['answering']} answering, {r['waiting']} waiting" + (f", {r['direct']} straight to LM Studio (not through the hub)" if r['direct'] else ''),
+                                     state=f"{r['answering']} active, {r['waiting']} queued" + (f", {r['direct']} direct to LM Studio (bypassing the gateway)" if r['direct'] else ''),
                                      since=time.strftime('%H:%M', time.localtime(r['since'])), claude_session=r.get('title') or (bool(r.get('session')) or None),
                                      step=r.get('step'), progress=f"{b['done']} of {b['total']}" if b.get('total') else None,
                                      batch_done_about=time.strftime('%H:%M', time.localtime(b['finish'])) if b.get('finish') else None,

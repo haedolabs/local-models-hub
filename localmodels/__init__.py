@@ -1,18 +1,18 @@
 """localmodels - the local-models hub: one LM Studio on this Mac, shared by every project and Claude Code session.
 
 The instructions for any project live in GUIDE.md at the root of this repo; the code:
-  llmshare    the sharing rules (slots with people first, leases, swap checks) and the shared state's readers
-  gateway     the hub's door: the same API as LM Studio, on its own port, applying the rules to every request,
+  llmshare    the sharing rules (slot locks with interactive priority, leases, swap checks) and the shared state's readers
+  gateway     the reverse proxy: LM Studio's API on its own port, with admission control on every request,
               holding and resending across a crash
-  models      the models LM Studio holds, kept the way the settings say (models.json), recycled, and swaps
-  crashes     when LM Studio's engine crashes: notice it, record it, load the model again
-  recycle     a copy recycled before the amount of work at which the engine has crashed
-  peers       other Macs' hubs as more copies of a family, over the Thunderbolt Bridge
-  whois       which project, Claude session and program is behind a connection
+  models      the instance manager: replicas kept as the settings say (models.json), recycles, swaps
+  crashes     engine crash detection from LM Studio's logs, the crash record, reloads
+  recycle     pre-emptive recycling: an instance reloaded before the token count at which the engine has crashed
+  peers       other Macs' gateways as more replicas of a family, over the Thunderbolt Bridge
+  whois       which project, Claude session and process is behind a connection
   sessions    every Claude Code session on this Mac, by project
   agent       local agents: one well-defined job on the loaded model, with tools that only read
-  dash        the live console of all of it; web and dash.html, the dashboard the door serves
-  mcp_server  the hub's tools for every Claude Code session (registered once, or shipped by the plugin)
+  dash        the terminal dashboard; web and dash.html, the web dashboard the gateway serves
+  mcp_server  the hub's MCP tools for every Claude Code session (registered once, or shipped by the plugin)
   cli         the `localmodels` command
 """
 import os

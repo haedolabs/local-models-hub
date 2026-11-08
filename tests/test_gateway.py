@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The door's rules (localmodels/gateway.py), tested against a pretend LM Studio on a random port: hold-and-resend across a
+"""The gateway's rules (localmodels/gateway.py), tested against a pretend LM Studio on a random port: hold-and-resend across a
 crash-shaped failure (LM Studio's words, a dropped connection, or a copy gone from the listing), 503 with Retry-After when
 the resend fails too, a genuine 400 passed through, routing around a copy that is down or draining, a named copy that is
 not there, nothing loaded, a hold that runs out, a program that hangs up while it waits or during the answer, people
 before batches in the queue, a chunked request body, a route with a trailing slash, a model left down, and every API
 LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
-loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_door.py
+loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_gateway.py
 """
 import http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
@@ -136,7 +136,7 @@ def run(box):
         row_ = rows_logged()[0]
         t('LM Studio says the model crashed: the request is sent again and answered', code == 200 and r and r['choices'][0]['message']['content'] == 'OK a'
           and [s[2] for s in Fake.seen] == ['crash', 'ok'], (code, Fake.seen))
-        t('the log says it took two tries, in classified words', row_.get('tries') == 2 and row_.get('note') == 'LM Studio answered 400: the model crashed', {k: row_.get(k) for k in ('tries', 'note', 'status')})
+        t('the log says it took two tries, in classified words', row_.get('tries') == 2 and row_.get('note') == 'LM Studio returned HTTP 400: model crashed', {k: row_.get(k) for k in ('tries', 'note', 'status')})
         plan('crash', 'crash')
         code, r, h = ask(tag='b')
         t('failing twice: 503 with Retry-After, never LM Studio\'s 400', code == 503 and h.get('Retry-After') == str(gateway.RETRY_AFTER), (code, h.get('Retry-After')))
@@ -146,14 +146,14 @@ def run(box):
         plan('reset', 'ok')
         code, r, h = ask(tag='r')
         row_ = rows_logged()[0]
-        t('LM Studio drops the connection before answering: sent again, answered, no server start', code == 200 and row_.get('tries') == 2 and 'dropped' in (row_.get('note') or ''), (code, row_.get('note')))
+        t('LM Studio drops the connection before answering: sent again, answered, no server start', code == 200 and row_.get('tries') == 2 and 'closed the connection' in (row_.get('note') or ''), (code, row_.get('note')))
         plan('odd', 'ok')
         Fake.on_odd = lambda: rows.pop(0) if rows and rows[0]['id'] == F else None
         code, r, h = ask(tag='s')
         Fake.on_odd = None
         row_ = rows_logged()[0]
         t('a 400 with unknown words from a copy that is gone from the listing: treated as a crash, answered by the other copy',
-          code == 200 and Fake.seen[-1][0] == F2 and 'gone' in (row_.get('note') or ''), (code, Fake.seen, row_.get('note')))
+          code == 200 and Fake.seen[-1][0] == F2 and 'no longer listed' in (row_.get('note') or ''), (code, Fake.seen, row_.get('note')))
         rows.insert(0, row(F))
 
         print('the door: copies that are down, draining, missing or left down')
@@ -172,7 +172,7 @@ def run(box):
         with crashes._state() as st: st['down'] = {}
         th.join(30)
         row_ = rows_logged()[0]
-        t('both copies down: held until one is back, then answered', got.get('code') == 200 and held_state == 'waiting: the model crashed and is loading again'
+        t('both copies down: held until one is back, then answered', got.get('code') == 200 and held_state == 'held: reloading after a crash'
           and 2 <= row_.get('held', 0) < 8, (got.get('code'), held_state, row_.get('held')))
         old_hold, crashes.HOLD = crashes.HOLD, 2
         with crashes._state() as st: st['down'] = {F: dict(crashed=time.time(), models=[F, F2], state='loading again')}
@@ -225,7 +225,7 @@ def run(box):
         for x in ths + [batch, chat]: x.join(30)
         tags = [s_[1] for s_ in Fake.seen]
         ghost_rows = [r_ for r_ in rows_logged(6) if r_.get('status') == 499]
-        t('a program that hung up while waiting is dropped, not sent', 'ghost' not in tags and len(ghost_rows) == 1 and 'hung up' in ghost_rows[0].get('note', ''), (tags, [g.get('note') for g in ghost_rows]))
+        t('a program that hung up while waiting is dropped, not sent', 'ghost' not in tags and len(ghost_rows) == 1 and 'client closed' in ghost_rows[0].get('note', ''), (tags, [g.get('note') for g in ghost_rows]))
         t('the chat request got the next free slot before the batch request that came first', tags.index('chat') < tags.index('batch'), tags)
         plan('slow'); Fake.slow = 5.0
         s = raw(F, 'leaver', kind='test')
@@ -234,7 +234,7 @@ def run(box):
         freed = llmshare.busy_slots()
         row_ = rows_logged()[0]
         t('a program that hangs up during a long answer: the door hangs up on LM Studio, the slot is free within seconds',
-          not freed.get(llmshare._safe(F)) and row_.get('status') == 499 and 'during the answer' in (row_.get('note') or ''), (freed, row_.get('status'), row_.get('note')))
+          not freed.get(llmshare._safe(F)) and row_.get('status') == 499 and 'during the response' in (row_.get('note') or ''), (freed, row_.get('status'), row_.get('note')))
         time.sleep(2.5); Fake.slow = 3.0
         plan('slow', 'slow'); Fake.slow = 6.0
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'busy{i}', kind='batch')) for i in range(2)]
@@ -277,7 +277,7 @@ def run(box):
         s.close()
         row_ = rows_logged()[0]
         t('a stream that breaks off ends with an error event and [DONE]; the row says cut; the keeper looks',
-          b'"content":"One"' in data and b'cut the answer short' in data and data.rstrip().endswith(b'data: [DONE]') and 'cut' in (row_.get('note') or '') and crashes.WAKE.is_set(),
+          b'"content":"One"' in data and b'stream truncated' in data and data.rstrip().endswith(b'data: [DONE]') and 'truncated' in (row_.get('note') or '') and crashes.WAKE.is_set(),
           (data[-120:], row_.get('note')))
         plan()
         code, r, h = ask(tag='caps', path='/v1/CHAT/completions')
@@ -362,7 +362,7 @@ def run(box):
         for what, path, want in (('anthropic', '/v1/messages', (12, 5)), ('responses', '/v1/responses', (7, 4)), ('native-sse', '/api/v1/chat', (9, 6))):
             data, row_ = streamed(what, path)
             t(f'{path} streamed: its own last event ends it whole, nothing added, nothing flagged',
-              data.rstrip().endswith(b'}') and b'cut the answer short' not in data and b'[DONE]' not in data and not row_.get('note') and not crashes.WAKE.is_set(),
+              data.rstrip().endswith(b'}') and b'stream truncated' not in data and b'[DONE]' not in data and not row_.get('note') and not crashes.WAKE.is_set(),
               (data[-80:], row_.get('note')))
             t(f'{path} streamed: its tokens are counted (they feed the recycle band)', (row_.get('prompt_tokens'), row_.get('completion_tokens')) == want,
               (row_.get('prompt_tokens'), row_.get('completion_tokens')))
@@ -373,11 +373,11 @@ def run(box):
           (code, row_.get('prompt_tokens'), row_.get('completion_tokens')))
         data, row_ = streamed('anthropic-cut', '/v1/messages')
         t('an Anthropic stream that breaks off ends with an Anthropic error event, no [DONE]; the row says cut; the keeper looks',
-          b'event: error' in data and b'"type": "error"' in data and b'api_error' in data and b'[DONE]' not in data and 'cut' in (row_.get('note') or '') and crashes.WAKE.is_set(),
+          b'event: error' in data and b'"type": "error"' in data and b'api_error' in data and b'[DONE]' not in data and 'truncated' in (row_.get('note') or '') and crashes.WAKE.is_set(),
           (data[-160:], row_.get('note')))
         data, row_ = streamed('anthropic-error', '/v1/messages')
         t("a stream LM Studio ends with its own error event: passed as it is, nothing added; the row says so; the keeper looks",
-          data.rstrip().endswith(b'crashed"}}') and b'cut the answer short' not in data and 'with an error' in (row_.get('note') or '') and crashes.WAKE.is_set(),
+          data.rstrip().endswith(b'crashed"}}') and b'stream truncated' not in data and 'with an error' in (row_.get('note') or '') and crashes.WAKE.is_set(),
           (data[-100:], row_.get('note')))
         saved = list(rows); rows.clear(); plan()
         req = urllib.request.Request(url + '/v1/messages', data=json.dumps(dict(model=F, messages=[])).encode(), headers={'Content-Type': 'application/json', 'X-Kind': 'test'})

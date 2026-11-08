@@ -433,7 +433,7 @@ def swap_blockers(models):
     fams = {family(m) for m in ms}                        # a run on one copy may be sent to any copy of it next
     loaded(fresh=True)
     if not _ps['ok']:
-        return ["LM Studio did not say which models it holds (lms ps failed): try again in a moment"]
+        return ["lms ps failed, so the loaded models are unknown; retry shortly"]
     for d in sorted(leases(), key=lambda d: d.get('since', 0)):
         hit = sorted({m for m in d.get('models') or [] if family(m) in fams})
         if (d.get('pid') == os.getpid() and d.get('via') != 'hub') or not hit: continue
@@ -441,12 +441,12 @@ def swap_blockers(models):
         if key in seen: continue
         seen.add(key)
         since = time.strftime('%H:%M', time.localtime(float(d.get('since') or 0)))
-        what = 'requests through the hub' if d.get('via') == 'hub' and d.get('kind') == 'other' else f"a {d.get('kind')}"
+        what = 'requests via the gateway' if d.get('via') == 'hub' and d.get('kind') == 'other' else f"a {d.get('kind')}"
         why.append(f"{what} in the {d.get('project')} project{' on ' + str(d['from']) if d.get('from') else ''} (since {since}) is using {', '.join(hit)}")
     if not why:
         for r in loaded():
             if r['id'] in ms and r['state'] in ('GENERATING', 'PROCESSING'):
-                why.append(f"{r['id']} is answering something right now (LM Studio's own chat, or another app)")
+                why.append(f"{r['id']} is generating now (LM Studio's chat or another client, outside the gateway)")
     if why: _note('swap refused', ','.join(sorted(ms)))
     return why
 
@@ -570,19 +570,19 @@ def waits(days=7):
 
 def main():
     ms = loaded(fresh=True)
-    print('LM Studio holds: ' + (', '.join(f"{r['id']} ({r['state'].lower()}, {r['parallel']} at once, context {r['context']:,})" for r in ms)
-                                 or 'no model') + ('' if read_ok() else ' (the last listing failed: this is the one before)'))
-    print(f"the hub's door ({HUB}): " + ('on' if hub_up(fresh=True) else 'off: projects go straight to LM Studio'))
+    print('LM Studio loaded: ' + (', '.join(f"{r['id']} ({r['state'].lower()}, {r['parallel']} slots, context {r['context']:,})" for r in ms)
+                                 or 'none') + ('' if read_ok() else ' (last listing failed; showing the previous one)'))
+    print(f"gateway ({HUB}): " + ('listening' if hub_up(fresh=True) else 'down: clients connect directly to LM Studio'))
     ls = leases()
     for d in sorted(ls, key=lambda d: d.get('since', 0)):
-        print(f"  {d['project']}: {'requests through the hub' if d.get('via') == 'hub' else d['kind']} on {', '.join(d['models'])} "
+        print(f"  {d['project']}: {'requests via the gateway' if d.get('via') == 'hub' else d['kind']} on {', '.join(d['models'])} "
               f"since {time.strftime('%H:%M:%S', time.localtime(d['since']))} (pid {d['pid']})")
-    if not ls: print('  no run is using a model')
+    if not ls: print('  no active leases')
     b = busy_slots()
-    print('  requests running: ' + (', '.join(f'{m}: {n}' for m, n in b.items()) if b else 'none'))
+    print('  active requests: ' + (', '.join(f'{m}: {n}' for m, n in b.items()) if b else 'none'))
     n, secs, refused = waits(7)
-    print(f'  last 7 days: {n} requests waited for a slot ({secs / 60:.1f} min in all), {refused} swaps refused '
-          '(a model another run was using). Rising numbers mean the projects are waiting on each other.')
+    print(f'  last 7 days: {n} requests queued for a slot ({secs / 60:.1f} min total), {refused} swaps refused '
+          '(model in use by another run). Rising counts mean contention between projects.')
     return 0
 
 

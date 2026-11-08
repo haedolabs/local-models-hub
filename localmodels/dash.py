@@ -6,12 +6,12 @@ session on this Mac, and how busy the Mac is. Reads only.
   localmodels dash --json      machine output
   localmodels dash --no-color
 
-LM STUDIO      its server, the hub's door, each loaded model: working or idle, how many at once, its memory, each
-               copy's work since it was loaded against its recycle band, a copy down or being recycled
-USING THEM     every program using a model now, by project: through the hub or straight to LM Studio, which Claude
-               session started it, the step it is on, a batch's progress and what each of its agents is doing
+LM STUDIO      server state, gateway state, each loaded instance: generating or idle, slots, memory, tokens processed
+               since load against the recycle threshold, instances down or being recycled, peer replicas
+CLIENTS        every process with a request in flight or a lease held, by project: via the gateway or direct to LM
+               Studio, its Claude Code session, current step, batch and job progress, local agent jobs
 CLAUDE CODE    every Claude Code session of the last three hours, by project: working or idle, subagents, workflows
-LAST HOUR      the hub's requests by project: how many, tokens, time spent waiting for a turn
+LAST HOUR      requests through the gateway by project: count, tokens, time queued
 THE MAC        the programs using the most processor and memory; the bar: time, memory, load, free disk
 """
 import glob, hashlib, json, os, re, shutil, subprocess, sys, time, urllib.request
@@ -106,9 +106,9 @@ def lmstudio():
 def family_words(f):
     """A loaded model in a few plain words: 'qwen/qwen3.6-35b-a3b as 2 copies, 8 at once (3 busy, 75.5 GB)'."""
     m = f['copies'][0]
-    state = 'working' if f['busy'] or any(c['state'] in ('GENERATING', 'PROCESSING') for c in f['copies']) else m['state'].lower()
-    if len(f['copies']) > 1: return f"{f['id']} as {len(f['copies'])} copies, {f['at_once']} at once ({state}, {f['busy']} busy, {f['size']:.1f} GB)"
-    return f"{f['id']} {state} ({f['at_once']} at once, {f['busy']} busy, {m.get('size')})"
+    state = 'generating' if f['busy'] or any(c['state'] in ('GENERATING', 'PROCESSING') for c in f['copies']) else m['state'].lower()
+    if len(f['copies']) > 1: return f"{f['id']}: {len(f['copies'])} replicas, {f['at_once']} slots ({state}, {f['busy']} active, {f['size']:.1f} GB)"
+    return f"{f['id']}: 1 instance, {f['at_once']} slots ({state}, {f['busy']} active, {m.get('size')})"
 
 
 def families(models):
@@ -298,10 +298,7 @@ def crash_view():
 
 
 def kind_words(r):
-    if r.get('kind') == 'batch': return 'batch'
-    if r.get('kind') in ('eval', 'test'): return 'test'
-    if r.get('kind') in ('chat', 'ask'): return r['kind']
-    return 'requests'
+    return r.get('kind') or 'other'
 
 
 def running(s=None):
@@ -318,8 +315,8 @@ def running(s=None):
                          since=time.time(), pct=None, left=None, idle=True))
     for r in s['users']:
         b = r.get('batch') or {}
-        state = 'straight to LM Studio' if r['direct'] and not r['answering'] else \
-            f"{r['answering']} answering" + (f", {r['waiting']} waiting" if r['waiting'] else '') if r['answering'] or r['waiting'] else 'between requests'
+        state = 'direct to LM Studio' if r['direct'] and not r['answering'] else \
+            f"{r['answering']} active" + (f", {r['waiting']} queued" if r['waiting'] else '') if r['answering'] or r['waiting'] else 'idle (lease held)'
         what = f"{r['project']}: {kind_words(r)} on {', '.join(short(m) for m in r['models'][:2]) or 'a model'} · {state}" + (f" · {r['step']}" if r.get('step') else '')
         rows.append(dict(kind=r.get('kind') if r.get('kind') in ('batch', 'chat') else 'local', what=what, since=r['since'],
                          pct=b.get('pct'), left=b.get('left'), by='claude' if r.get('session') or r.get('host_session') else None))
@@ -363,19 +360,19 @@ def show(s, w=80, h=24):
     sections = []
     # LM Studio and the door
     lm, dr = s['lmstudio'], s['door']
-    srv = k('on', 'g', 'B') if lm['server'] == 'on' else k('off', 'r', 'B')
-    hub = (k('open', 'g', 'B') if dr['up'] else k('closed', 'r', 'B')) + f" on :{dr['port']}" + \
-          (k(' · runs older code: localmodels install', 'y') if dr['up'] and dr['stale'] else '')
-    L = [f"  server {srv} · the hub's door {hub}"]
+    srv = k('up', 'g', 'B') if lm['server'] == 'on' else k('down', 'r', 'B')
+    hub = (k('listening', 'g', 'B') if dr['up'] else k('down', 'r', 'B')) + f" on :{dr['port']}" + \
+          (k(' · stale code: localmodels install', 'y') if dr['up'] and dr['stale'] else '')
+    L = [f"  LM Studio server {srv} · gateway {hub}"]
     if s.get('maintenance'): L.append('  ' + k('⚠ ' + s['maintenance']['words'][:w - 6], 'r' if s['maintenance']['phase'] == 'on' else 'y', 'B'))
-    word = lambda m: k('working', 'y', 'B') if m.get('busy') or m['state'] in ('GENERATING', 'PROCESSING') else k('idle', 'g') if m['state'] == 'IDLE' else k(m['state'].lower(), 'y')
+    word = lambda m: k('generating', 'y', 'B') if m.get('busy') or m['state'] in ('GENERATING', 'PROCESSING') else k('idle', 'g') if m['state'] == 'IDLE' else k(m['state'].lower(), 'y')
     for f in lm['families']:
         if len(f['copies']) == 1:
             m = f['copies'][0]
-            L.append(f"  {k(m['id'], 'B')} is {word(m)} · {m['busy']} of {m['parallel']} busy · holds {m.get('size') or '?'}")
+            L.append(f"  {k(m['id'], 'B')}: {word(m)} · {m['busy']}/{m['parallel']} slots active · {m.get('size') or '?'}")
             continue
-        L.append(f"  {k(f['id'], 'B')} · {len(f['copies'])} copies · {f['busy']} of {f['at_once']} busy · holds {f['size']:.1f} GB")
-        L.append('    ' + '   '.join(f"copy {i} {word(m)} · {m['busy']} of {m['parallel']} busy" for i, m in enumerate(f['copies'], 1)))
+        L.append(f"  {k(f['id'], 'B')} · {len(f['copies'])} replicas · {f['busy']}/{f['at_once']} slots active · {f['size']:.1f} GB")
+        L.append('    ' + '   '.join(f"replica {i} {word(m)} · {m['busy']}/{m['parallel']} active" for i, m in enumerate(f['copies'], 1)))
     for p in s.get('peers') or []:                 # each peer: its instances are replicas of a family, after the local ones
         if p.get('state') != 'up': L.append('  ' + k((p.get('words') or p['name'])[:w - 4], 'r' if p.get('state') in ('down', 'refused') else 'y')); continue
         for fid, f in (p.get('families') or {}).items():
@@ -393,9 +390,9 @@ def show(s, w=80, h=24):
     for r in s['users']:
         b = r.get('batch') or {}
         if r['answering'] or r['waiting']:
-            state = k(f"{r['answering']} answering", 'y', 'B') + (k(f" · {r['waiting']} waiting", 'y') if r['waiting'] else '')
-        elif r['direct']: state = k(f"{r['direct']} connected", 'y')
-        else: state = k('between requests', 'd')
+            state = k(f"{r['answering']} active", 'y', 'B') + (k(f" · {r['waiting']} queued", 'y') if r['waiting'] else '')
+        elif r['direct']: state = k(f"{r['direct']} direct connections", 'y')
+        else: state = k('idle (lease held)', 'd')
         lines = []                                  # the batch and the job, each a bar with its time left and finish
         for word, p in (('batch', b if b.get('total') else None), ('job', r.get('job'))):
             if not p or not p.get('total'): continue
@@ -403,14 +400,14 @@ def show(s, w=80, h=24):
             lines.append(f"    {k(word.ljust(5), 'B')} {prog(p.get('pct'), p.get('left'), r['since'])} {p['done']}/{p['total']}{fin} {k((p.get('name') or '')[:24], 'd')}")
         who = k('← Claude', 'm', 'B') + (f" · {r['title']}" if r.get('title') else '') if (r.get('session') or r.get('host_session')) else \
             k(f"← {r['app']}", 'd') if r.get('app') else ''
-        flag = k(' ⚠ straight to LM Studio', 'r') if r['direct'] and r.get('via') != 'hub' else ''
+        flag = k(' ⚠ direct to LM Studio', 'r') if r['direct'] and r.get('via') != 'hub' else ''
         step = k(f" · {r['step'][:30]}", 'd') if r.get('step') and not lines else ''
         L.append(f"  {k(r['project'][:14].ljust(14), 'B')} {kind_words(r):<9} {state}{step}{flag} {k(ago(r['since']), 'd')} {who}")
         L += lines
         for j in b.get('now', [])[:3]:
             L.append(f"    {k('agent', 'y')} {(j['job'] + (' · ' + j['step'] if j.get('step') else ''))[:44]:<44} {prog(j['pct'], j['left'], j['since'])}")
-    if not L: L.append('  ' + k('nothing is using a local model', 'd'))
-    sections.append(['using the models now', L, 1])
+    if not L: L.append('  ' + k('no active clients', 'd'))
+    sections.append(['clients', L, 1])
     # Claude Code, every project
     cs = s['claude']
     work = [c for c in cs if c['working']]
@@ -436,7 +433,7 @@ def show(s, w=80, h=24):
     if lh:
         parts = [f"{k(p, 'B')} {v['requests']} req · {v['tokens'] / 1000:.0f}k tok" + (f" · waited {v['waited'] / 60:.1f}m" if v['waited'] > 30 else '')
                  for p, v in sorted(lh.items(), key=lambda x: -x[1]['requests'])]
-        sections.append(['last hour, through the hub', ['  ' + ' │ '.join(parts)], 1])
+        sections.append(['last hour, via the gateway', ['  ' + ' │ '.join(parts)], 1])
     # the Mac
     L = []
     for t in s['top'][:3]:

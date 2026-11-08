@@ -197,7 +197,7 @@ def test_keeper(box):
     recycle._counts.update(at=0.0, by={})
     w = recycle.plan(rows, {})
     t('a lone copy past its band, never loaded by the hub here: not recycled (an unload it might not undo), and said why',
-      w is None and recycle.job() is None and 'not' in (recycle.held_back().get(F) or '') and 'band' in (recycle.held_back().get(F) or ''), (w, recycle.held_back()))
+      w is None and recycle.job() is None and 'not' in (recycle.held_back().get(F) or '') and 'recycle threshold' in (recycle.held_back().get(F) or ''), (w, recycle.held_back()))
     open(os.path.join(peers.LMSTUDIO_HOME, 'settings.json'), 'w').write(json.dumps(dict(modelLoadingGuardrails=dict(mode='off'))))
     recycle._counts.update(at=0.0, by={})
     w = recycle.plan(rows, {})
@@ -510,7 +510,7 @@ def test_two_doors(box):
             time.sleep(0.1)
         return False
 
-    # this Mac: the door in this process, like test_door.py, with the peer in its settings
+    # this Mac: the door in this process, like test_gateway.py, with the peer in its settings
     for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(front_dir, name.lower()))
     llmshare.REQUESTS, llmshare.WAITS = os.path.join(front_dir, 'requests.jsonl'), os.path.join(front_dir, 'waits.jsonl')
     crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(front_dir, 'keeper.json'), os.path.join(front_dir, 'crashes.jsonl'), os.path.join(front_dir, 'logs')

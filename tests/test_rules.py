@@ -98,10 +98,10 @@ def test_recycle():
     t('a batch starts: fresh start asked', recycle.fresh_start(B) == B and recycle.fresh_start('other/model') is None)
     recycle.plan(rows, busy)
     j = recycle.job()
-    t('then the copy past half its band is recycled first', j and j['copy'] == B and 'batch is starting' in j['why'], j and j['why'])
+    t('then the copy past half its band is recycled first', j and j['copy'] == B and 'batch starting' in j['why'], j and j['why'])
     with crashes._state() as st: st['recycle']['job']['since'] = time.time() - 700
     w = recycle.give_up_if_stuck()
-    t('a drain stuck for 10 minutes is given up and tried later', recycle.job() is None and crashes._read(fresh=True)['recycle']['retry_after'] > time.time() and 'waits' in (w or ''), w)
+    t('a drain stuck for 10 minutes is given up and tried later', recycle.job() is None and crashes._read(fresh=True)['recycle']['retry_after'] > time.time() and 'deferred' in (w or ''), w)
     t('meanwhile nothing is planned', recycle.plan(rows, busy) is None)
     reset(since); served(C2, 90)                                # 585,000: past the soft limit
     t('past the soft limit but busy: left alone', recycle.plan(rows, busy) is None)
@@ -398,7 +398,7 @@ def test_maintenance(box):
 
     print('maintenance after the batches: it starts when no batch has sent a request for 2 minutes')
     maint.announce(after_batches=True, minutes=20, why='reboot')
-    t('waiting for the batches: phase says so, nothing refused yet', maint.read()['phase'] == 'waiting' and 'after the batches' in maint.words(maint.read()))
+    t('waiting for the batches: phase says so, nothing refused yet', maint.read()['phase'] == 'waiting' and 'batch traffic drains' in maint.words(maint.read()))
     busy = [dict(kind='batch', since=now - 5)]
     t('a batch request in flight: it waits', maint.tick(busy, [], now=now) is False and maint.read()['phase'] == 'waiting')
     t('a batch answered a minute ago: it still waits', maint.tick([], [dict(kind='batch', at=now - 60)], now=now) is False)
@@ -433,7 +433,7 @@ def test_maintenance(box):
     listing[0] = []                                            # LM Studio came back with nothing loaded
     words = models.end_maintenance()
     t('off: the families loaded before are loaded again (first copy; the keeper adds the rest), the server started first',
-      loads == [B] and starts and any('loaded again after maintenance' in w for w in words), (loads, words))
+      loads == [B] and starts and any('reloaded after maintenance' in w for w in words), (loads, words))
     crashes_after = sum(1 for l in open(crashes.RECORD) if '"crash"' in l) if os.path.exists(crashes.RECORD) else 0
     t('nothing that went away during maintenance is recorded as a crash', crashes_after == crashes_before, (crashes_before, crashes_after))
     L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
