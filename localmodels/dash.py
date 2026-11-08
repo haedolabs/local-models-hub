@@ -275,6 +275,46 @@ def memory():
     return used / 2**30, total / 2**30
 
 
+_cpu = {'lib': None, 'prev': None}
+
+
+def _cpu_ticks():
+    """Per-core CPU ticks (user, system, idle, nice) from host_processor_info, or None where it is not available."""
+    import ctypes, ctypes.util
+    if _cpu['lib'] is None:
+        lib = ctypes.CDLL(ctypes.util.find_library('c'))
+        lib.mach_host_self.restype = ctypes.c_uint
+        _cpu['lib'] = (lib, ctypes.c_uint.in_dll(lib, 'mach_task_self_'))
+    lib, task = _cpu['lib']
+    n, info, cnt = ctypes.c_uint(), ctypes.POINTER(ctypes.c_int)(), ctypes.c_uint()
+    if lib.host_processor_info(lib.mach_host_self(), 2, ctypes.byref(n), ctypes.byref(info), ctypes.byref(cnt)) != 0: return None
+    try: return [tuple(info[i * 4 + k] & 0xffffffff for k in range(4)) for i in range(n.value)]
+    finally: lib.vm_deallocate(task, ctypes.cast(info, ctypes.c_void_p), ctypes.c_size_t(cnt.value * 4))   # the kernel's copy, returned
+
+
+def soc():
+    """This Mac's chip at work: {name, cpu: [% busy per core], cpu_pct, gpu_pct, gpu_cores, gpu_mem_gb}. Core load is the
+    share of non-idle ticks since the last reading (a first reading samples 0.25 s); the GPU's from IOAccelerator."""
+    now, cur = time.time(), _cpu_ticks()
+    prev = _cpu['prev']
+    if cur and (not prev or now - prev[0] > 30): time.sleep(0.25); prev, cur = (now, cur), _cpu_ticks()
+    cores = None
+    if cur and prev and len(prev[1]) == len(cur):
+        cores = []
+        for a, b in zip(prev[1], cur):
+            d = [(y - x) & 0xffffffff for x, y in zip(a, b)]
+            cores.append(round(100 * (d[0] + d[1] + d[3]) / max(1, sum(d))))
+    if cur: _cpu['prev'] = (time.time(), cur)
+    io = sh(['ioreg', '-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator'])
+    num = lambda k: int((re.search(rf'"{re.escape(k)}"\s*=\s*(\d+)', io) or [0, -1])[1])
+    gpu, mem = num('Device Utilization %'), num('In use system memory')
+    gcores = every('gpu-cores', 86400, lambda: num('gpu-core-count'))
+    return dict(name=every('cpu-name', 86400, lambda: sh(['sysctl', '-n', 'machdep.cpu.brand_string']).strip()),
+                cpu=cores, cpu_pct=round(sum(cores) / len(cores)) if cores else None,
+                gpu_pct=gpu if gpu >= 0 else None, gpu_cores=gcores if gcores > 0 else None,
+                gpu_mem_gb=round(mem / 2**30, 1) if mem >= 0 else None)
+
+
 def mac():
     used, total = memory()
     load = sh(['sysctl', '-n', 'vm.loadavg']).strip('{} \n').split()[:3]

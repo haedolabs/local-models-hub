@@ -467,9 +467,11 @@ def report(front=None):
     from . import dash
     try: used, total = dash.every('memory', 10, dash.memory); mem = dict(used=round(used, 1), total=round(total, 1))   # the front's memory pool (read every 10 s, not every poll)
     except Exception as e: mem = None; errors.record('peer report: memory', e)
+    try: chip = {k: v for k, v in dash.every('soc', 2, dash.soc).items() if k != 'cpu'}   # the front shows this host's chip at work
+    except Exception as e: chip = None; errors.record('peer report: soc', e)
     return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
-                keeper=keeper, memory=mem)
+                keeper=keeper, memory=mem, soc=chip)
 
 
 # ---------------------------------------------------------------- the front's side: the link
@@ -655,7 +657,8 @@ class Link:
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
                          address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, families=fams,
                          maintenance=rep.get('maintenance'), keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
-                         memory=rep.get('memory') if p.state in ('up', 'maintenance') else None)
+                         memory=rep.get('memory') if p.state in ('up', 'maintenance') else None,
+                         soc=rep.get('soc') if p.state in ('up', 'maintenance') else None)
                 d['words'] = words(d)
                 out.append(d)
         return out

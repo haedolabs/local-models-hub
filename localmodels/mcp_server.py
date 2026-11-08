@@ -19,7 +19,7 @@ INSTRUCTIONS = (
     "Local models on this Mac (LM Studio) are shared by every project and Claude Code session through the local-models hub "
     "(full rules: the guide tool). Send OpenAI-compatible requests to http://localhost:1235/v1 or Anthropic-compatible ones to http://localhost:1235 (the gateway), "
     "never directly to LM Studio's port 1234: the gateway runs admission control across all clients, attributes each request to its project and session, and "
-    "logs metadata only (never content). Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
+    "logs metadata only (never content). The project's name on the hub's screens is set once with the name tool. Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
     "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA. The status tool lists the loaded models and their total concurrent slots (at_once): "
     "a batch should keep that many requests in flight (the gateway queues the rest). For bulk read-only jobs, use ask and batch here "
     "(local agents with read-only tools scoped to your project's folder) instead of Claude multi-agent workflows. "
@@ -53,6 +53,11 @@ TOOLS = [
     {'name': 'job_status', 'description': 'Progress of an ask or batch job: done, running, failed, and when finished a line per job. '
      'results=true adds every answer (capped); label=... one job\'s full answer.',
      'inputSchema': _o({'job': {'type': 'string'}, 'label': {'type': 'string'}, 'results': {'type': 'boolean'}}, ['job'])},
+    {'name': 'name', 'description': "How this project appears on every screen of the hub (dashboard, localmodels, status tool), for its "
+     "past requests too: name='research'. formerly=[...] lists other names its requests carried (e.g. the X-Project its scripts send) "
+     "so they show under the new name; the project's folder is included automatically. private=true hides its Claude session titles "
+     "and free-text steps. This names the project; a batch's name is the X-Run header on its requests, a job's the phase in X-Step.",
+     'inputSchema': _o({'name': {'type': 'string'}, 'formerly': {'type': 'array', 'items': {'type': 'string'}}, 'private': {'type': 'boolean'}}, ['name'])},
     {'name': 'swap_check', 'description': 'Whether these models may be unloaded or reloaded now (a swap, a context change): '
      'empty blockers means yes; otherwise the clients using them. Never swap when it names anyone.',
      'inputSchema': _o({'models': {'type': 'array', 'items': {'type': 'string'}}})},
@@ -182,6 +187,19 @@ def job_status(job, label=None, results=False, cap=200_000):
     return out
 
 
+def name_project(shown, formerly=(), private=None):
+    """The `name` tool: this session's project (its folder) and the names it lists show as `shown` on every screen."""
+    from . import names, whois
+    shown = llmshare.clean(shown, 80)
+    if not shown: return dict(ok=False, error='name: a non-empty name is required')
+    folder = whois.project_of(os.path.realpath(os.environ.get('PWD') or os.getcwd()))
+    seen = [x for x in dict.fromkeys([folder] + [llmshare.clean(f, 120) for f in formerly or []]) if x and x != shown]
+    for raw in seen: names.set_project(raw, shown)
+    if private is not None: names.set_private(shown, bool(private))
+    return dict(ok=True, project=shown, shown_for=seen, private=names.private(shown),
+                note='every screen shows it now, past requests included; batches are named by X-Run, jobs by the phase in X-Step')
+
+
 def call(name, a):
     a = a or {}
     if name == 'status': return status()
@@ -191,6 +209,7 @@ def call(name, a):
         why = llmshare.swap_blockers(models)
         return dict(ok=True, models=models, blockers=why, safe=not why)
     if name == 'job_status': return job_status(a.get('job', ''), a.get('label'), bool(a.get('results')))
+    if name == 'name': return name_project(a.get('name'), a.get('formerly') or [], a.get('private'))
     if name in ('ask', 'batch'):
         if name == 'ask':
             jobs = [dict(label='ask', prompt=a.get('prompt', ''), schema=a.get('schema'), max_turns=a.get('max_turns') or 16,

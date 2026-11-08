@@ -26,6 +26,8 @@
 - A client that declares its timeout (`X-Timeout: <seconds>`; `llmshare.post` sends its own) gets `503` with `Retry-After` at nine tenths of it, so the gateway's queue wait never outlives the client's.
 
 ## Request attribution (optional)
+- **Three names, three levels.** The *project* is who is using the models (shown on every screen); a *batch* (`X-Run`) is one named run of work inside a project; a *job* is the phase in `X-Step` (`extract files 8 of 360`). "Call this project research" sets the project's name (the `name` tool, below), not `X-Run`.
+- **A project names itself once:** the `local-models` MCP tool `name` (`name="research"`, `formerly=["lab"]` for an `X-Project` its scripts used to send, `private=true` to hide its session titles). It covers the project's folder and every name listed, for past requests too, on every screen at once; no restart. From a terminal: `localmodels name project <as seen> <shown>`.
 - Nothing is required. The project is the first folder under `~/Documents` (or `~/Projects`, `~/Developer`, …) that the client process runs in, so a worktree counts as its project. The Claude Code session comes from the ids Claude Code sets in every shell and tool it starts.
 - To set the project explicitly: header `X-Project: <name>`, or a path prefix (`http://localhost:1235/p/<name>/v1`, for apps that only accept a base URL).
 - Request kind: header `X-Kind:` `batch`, `chat` (a user is waiting), `ask`, `eval`, `test` or `other`. The dashboard shows it, and `chat` and `ask` take priority when slots are scarce.
