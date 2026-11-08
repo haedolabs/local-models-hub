@@ -404,6 +404,29 @@ def run(box):
         rows[:] = saved
         st_ = llmshare.waiting_here()
         t('nobody waits once the queue is empty', st_ == dict(people=0, others=0), st_)
+
+        print('the icon: a PNG at the standard paths, drawn from the theme tokens')
+        import struct, zlib
+        from localmodels import icon
+        def fetch(path):
+            r = urllib.request.urlopen(url + path, timeout=30); return r.status, r.headers.get('Content-Type'), r.read()
+        def pixel(data, x, y):
+            w = struct.unpack('>I', data[16:20])[0]; at, raw = 8, b''
+            while at < len(data):
+                n, kind = struct.unpack('>I', data[at:at + 4])[0], data[at + 4:at + 8]
+                if kind == b'IDAT': raw += data[at + 8:at + 8 + n]
+                at += 12 + n
+            rows = zlib.decompress(raw); o = y * (1 + 4 * w) + 1 + 4 * x
+            return tuple(rows[o:o + 4])
+        gold = icon.tokens()['--gold']
+        got = {path: fetch(path) for path in ('/favicon.ico', '/favicon.png', '/apple-touch-icon.png')}
+        t('/favicon.ico, /favicon.png and /apple-touch-icon.png answer PNG images, 64 and 180 pixels square',
+          all(c == 200 and ct == 'image/png' and d[:8] == b'\x89PNG\r\n\x1a\n' for c, ct, d in got.values())
+          and [struct.unpack('>II', got[p][2][16:24]) for p in ('/favicon.ico', '/apple-touch-icon.png')] == [(64, 64), (180, 180)], {p: v[:2] for p, v in got.items()})
+        d = got['/favicon.png'][2]
+        t('its die is the gold token, its corner is transparent', pixel(d, 32, 32) == gold + (255,) and pixel(d, 0, 0)[3] == 0, (pixel(d, 32, 32), pixel(d, 0, 0)))
+        page = urllib.request.urlopen(url + '/', timeout=10).read()
+        t('the page links it (tab, bookmarks, favorites)', b'rel="icon" type="image/png" sizes="64x64" href="/favicon.png"' in page and b'rel="apple-touch-icon"' in page)
     finally:
         door.shutdown(); up.shutdown()
 

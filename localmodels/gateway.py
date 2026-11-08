@@ -37,7 +37,7 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, crashes, errors, llmshare, maint, peers, recycle, runs, web, whois
+from . import VERSION, crashes, errors, icon, llmshare, maint, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
@@ -63,6 +63,7 @@ CUT = {
     'responses': b'event: error\ndata: {"type": "error", "code": "server_error", "message": "LM Studio stream truncated (no terminal event)"}\n\n',
     'native': b'event: error\ndata: {"type": "error", "error": {"type": "server_error", "message": "LM Studio stream truncated (no terminal event)"}}\n\n',
 }
+ICONS = {'/favicon.ico': 64, '/favicon.png': 64, '/apple-touch-icon.png': 180, '/apple-touch-icon-precomposed.png': 180}   # path -> pixels
 ANTHROPIC_ERROR = {400: 'invalid_request_error', 403: 'permission_error', 404: 'not_found_error', 409: 'invalid_request_error', 503: 'overloaded_error'}
 _n, _lock, _live = itertools.count(1), threading.Lock(), {}
 _start = {'at': 0.0, 'since': time.time(), 'lock': threading.Lock()}
@@ -314,6 +315,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         path, project = self.path, self.headers.get('X-Project')
         if path.startswith('/hub/'): return self.hub(method, path)
         if method == 'GET' and path.split('?')[0] in ('/', '/dash', '/dash/'): return self._raw(200, web.page(), 'text/html; charset=utf-8')
+        if method == 'GET' and path.split('?')[0] in ICONS: return self._raw(200, icon.png(ICONS[path.split('?')[0]]), 'image/png')
         m = re.match(r'^/p/([A-Za-z0-9._ -]{1,80})(/.*)$', path)
         if m: project, path = project or m.group(1), m.group(2)
         body = self._body()
