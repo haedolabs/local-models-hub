@@ -10,7 +10,7 @@ says plainly when LM Studio's guardrail refuses a load, does not try again until
 a lone copy it has not shown it can load again. Nothing real is loaded or unloaded. `localmodels check` runs it; so can
 you: python3 tests/test_peers.py
 """
-import collections, errno, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+import collections, errno, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request  # noqa: E401
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HOME)
@@ -197,7 +197,13 @@ def test_keeper(box):
     recycle._counts.update(at=0.0, by={})
     w = recycle.plan(rows, {})
     t('a lone copy past its band, never loaded by the hub here: not recycled (an unload it might not undo), and said why',
-      w is None and recycle.job() is None and 'not' in (recycle.held_back().get(F) or ''), (w, recycle.held_back()))
+      w is None and recycle.job() is None and 'not' in (recycle.held_back().get(F) or '') and 'band' in (recycle.held_back().get(F) or ''), (w, recycle.held_back()))
+    open(os.path.join(peers.LMSTUDIO_HOME, 'settings.json'), 'w').write(json.dumps(dict(modelLoadingGuardrails=dict(mode='off'))))
+    recycle._counts.update(at=0.0, by={})
+    w = recycle.plan(rows, {})
+    t("LM Studio's guardrail Off (it cannot refuse the load that follows): the lone copy is recycled", w and recycle.job() and recycle.job()['copy'] == F, w)
+    os.remove(os.path.join(peers.LMSTUDIO_HOME, 'settings.json'))
+    with crashes._state() as st: st['recycle'] = dict(job=None, last={}, fresh={}, retry_after=0)
     crashes.load_ok(F)
     recycle._counts.update(at=0.0, by={})
     w = recycle.plan(rows, {})
@@ -211,6 +217,58 @@ def test_keeper(box):
     t('a model bigger than the GPU may hold: the command to raise it, and that it resets at restart',
       w and 'sudo sysctl iogpu.wired_limit_mb=40960' in w and 'restart' in w, w)
     t('a model that fits: nothing to say', models.gpu_words(dict(limit_gb=96.0, set=False, total_gb=128.0), 37.75) is None)
+    w = models.gpu_words(dict(limit_gb=40.0, set=True, total_gb=48.0, boot=False), 37.75)
+    t('raised by hand but not at boot: said, since it resets at the next restart', w and 'resets' in w and 'localmodels peer gpu-limit' in w, w)
+    t('raised at boot by the hub\'s LaunchDaemon: nothing to say', models.gpu_words(dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True), 37.75) is None)
+
+    print("a dedicated Mac: a family loaded when the door starts (load_at_start), once, after the GPU's limit, with three tries")
+    real = models._lms, L.settings, L.loaded, L.read_ok, L.busy_slots, L.api_models, models.free_gb, models.ensure_server, L.SWAP_LOCK, models.conditions, models.gpu, models.downloaded, models.LOADER, models.server_up
+    calls, state = [], {'load': (False, 'Error: something else went wrong'), 'rows': []}
+    models._lms = lambda *a, **k: (calls.append(a), state['load'] if a[0] == 'load' else (True, ''))[1]
+    fams = {F: dict(key=F, copies=1, context=65536, parallel=4, recycle=False, load_at_start=True)}
+    L.settings = lambda: dict(families=fams, batch_at_once=4, headroom_gb=4)
+    L.read_ok, L.busy_slots, L.api_models = (lambda: True), (lambda: {}), (lambda timeout=3: {})
+    L.loaded = lambda fresh=False, force=False: list(state['rows'])
+    models.free_gb, models.ensure_server, models.conditions = (lambda: 45.0), (lambda *a, **k: True), (lambda: (1.0, 40960))
+    models.downloaded = lambda: [dict(modelKey=F, sizeBytes=int(37.75 * 2**30), type='llm')]
+    models.LOADER = os.path.join(box, 'no-such-agent.plist')
+    L.SWAP_LOCK = os.path.join(box, 'swap.lock')
+    with crashes._state() as st: st.clear()
+    models._start.clear()
+    gpu = {'v': dict(limit_gb=36.0, set=False, total_gb=48.0, boot=False)}
+    models.gpu = lambda: gpu['v']
+    w = models.keep()
+    t('the GPU may not hold it yet: no load, and the words say it waits for the limit', not [c for c in calls if c[0] == 'load'] and any('GPU' in x for x in w), w)
+    gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
+    w = models.keep()
+    t('the limit is up: the first copy is loaded, as the family says (identifier, context, slots)',
+      [c for c in calls if c[0] == 'load'] == [('load', F, '--identifier', F, '-c', '65536', '--parallel', '4', '-y')], calls)
+    calls.clear(); models.keep()
+    t('a load that failed is tried again only after 30 s', not [c for c in calls if c[0] == 'load'], calls)
+    for _ in range(3):
+        models._start[F]['next'] = 0; models.keep()
+    w = models.keep()
+    t('three tries in all, then it stops for this start and says how to load it by hand',
+      len([c for c in calls if c[0] == 'load']) == 2 and models._start[F].get('done') and 'localmodels use' in models._start[F].get('words', ''), (calls, models._start[F]))
+    models._start.clear(); calls.clear(); state['load'] = (True, 'Model loaded')
+    models.keep(); state['rows'] = [dict(id=F, key=F, state='IDLE', size='37.75 GB', context=65536, parallel=4)]
+    calls.clear(); models.keep()
+    t('loaded at start once; with it loaded, nothing more', models._start[F].get('done') and not [c for c in calls if c[0] == 'load'], (calls, models._start[F]))
+    state['rows'] = []; calls.clear(); models.keep()
+    t('unloaded later in the same run (a person chose): not loaded again until the door starts again', not [c for c in calls if c[0] == 'load'], calls)
+    models._start.clear(); open(os.path.join(box, 'agent.plist'), 'w').write('<plist/>'); models.LOADER = os.path.join(box, 'agent.plist')
+    calls.clear(); w = models.keep()
+    t('the login agent from before the hub is still installed: the keeper leaves loading to it (one loader at a time) and says so',
+      not [c for c in calls if c[0] == 'load'] and any('load-at-login' in x for x in w), w)
+    models.LOADER = os.path.join(box, 'no-such-agent.plist'); models._start.clear()
+    L.read_ok, models.server_up = (lambda: False), (lambda timeout=3: False)
+    calls.clear(); models.keep()
+    t("LM Studio not running at all on a dedicated Mac: its daemon is started (never stopped), once", ('daemon', 'up') in calls, calls)
+    calls.clear(); models.keep()
+    t('...and not started twice in a row', ('daemon', 'up') not in calls, calls)
+    models._lms, L.settings, L.loaded, L.read_ok, L.busy_slots, L.api_models, models.free_gb, models.ensure_server, L.SWAP_LOCK, models.conditions, models.gpu, models.downloaded, models.LOADER, models.server_up = real
+    models._start.clear()
+    with crashes._state() as st: st.clear()
 
 
 def test_commands(box):
@@ -254,6 +312,37 @@ def test_commands(box):
         t('a token file other users can read is not used, and the words say how to fix it',
           not peers.token_ok(tok) and 'chmod 600' in (peers.token_problem() or ''), peers.token_problem())
         os.chmod(peers.TOKEN_FILE, 0o600)
+
+        import plistlib
+        real_mem, real_daemon, real_launchctl = models.mem_gb, models.GPU_DAEMON, cli._launchctl
+        models.mem_gb, models.GPU_DAEMON = (lambda: 48.0), os.path.join(d, 'system', 'com.local-models.gpu-limit.plist')
+        code, out = run('gpu-limit')
+        mine = os.path.join(os.path.dirname(peers.TOKEN_FILE), 'com.local-models.gpu-limit.plist')
+        pl = plistlib.load(open(mine, 'rb')) if os.path.exists(mine) else {}
+        t('peer gpu-limit writes the boot job for a 48 GB Mac: com.local-models.gpu-limit, sysctl iogpu.wired_limit_mb=40960 at load',
+          code == 0 and pl == dict(Label='com.local-models.gpu-limit', ProgramArguments=['/usr/sbin/sysctl', 'iogpu.wired_limit_mb=40960'], RunAtLoad=True), pl)
+        t('...and prints the sudo lines for the person, running none of them', 'sudo launchctl bootstrap system /Library/LaunchDaemons/com.local-models.gpu-limit.plist' in out and 'sudo cp' in out, out[-400:])
+        os.makedirs(os.path.dirname(models.GPU_DAEMON)); shutil.copy(mine, models.GPU_DAEMON)
+        code, out = run('gpu-limit')
+        t('the same job already installed (by hand or from these lines): adopted, nothing to do', code == 0 and 'installed' in out and 'sudo' not in out, out)
+        plistlib.dump(dict(Label='com.local-models.gpu-limit', ProgramArguments=['/usr/sbin/sysctl', 'iogpu.wired_limit_mb=32768'], RunAtLoad=True), open(models.GPU_DAEMON, 'wb'))
+        code, out = run('gpu-limit')
+        t('an installed job with another value: said, with the lines that replace it', code == 1 and '32768' in out and '40960' in out and 'sudo' in out, out[-300:])
+        models.mem_gb, models.GPU_DAEMON = real_mem, real_daemon
+
+        agent = os.path.join(d, 'com.local-models.load-at-login.plist'); open(agent, 'w').write('<plist/>')
+        was_loader, launched = models.LOADER, []
+        models.LOADER, cli._launchctl = agent, (lambda *a: (launched.append(a), subprocess.CompletedProcess(a, 0, '', ''))[1])
+        conf = json.load(open(llmshare.MODELS))
+        w = cli.retire_loader()
+        t('with no family loaded at start, the login loader stays (it is the only loader)', os.path.exists(agent) and not launched and 'stays' in w, w)
+        conf['families'][F]['load_at_start'] = True; json.dump(conf, open(llmshare.MODELS, 'w'))
+        w = cli.retire_loader(dry=True)
+        t('install --dry says it would retire it, and does not', os.path.exists(agent) and not launched and 'would' in w, w)
+        w = cli.retire_loader()
+        t("with a family loaded at start, install retires the login loader: the keeper loads it from now on (one loader)",
+          not os.path.exists(agent) and launched and launched[0][0] == 'bootout' and 'com.local-models.load-at-login' in launched[0][1], (w, launched))
+        models.LOADER, cli._launchctl = was_loader, real_launchctl
     finally: llmshare.MODELS, peers.TOKEN_FILE = was
 
 
@@ -384,13 +473,17 @@ def test_two_doors(box):
         t('one request with this Mac\'s slots free is answered here', code == 200 and [s[1] for s in A.seen] == ['a1'] and not B.seen, (code, A.seen, B.seen))
         plan(A, 'slow', 'slow'); plan(B, 'slow', 'slow'); A.slow = B.slow = 2.0
         out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}))
-        t('four at once with two slots here: two here, two on the peer, all answered',
-          all(out[k][0] == 200 for k in out) and sorted(s[1] for s in A.seen) == ['b1', 'b2'] and sorted(s[1] for s in B.seen) == ['b3', 'b4'],
+        t("a batch, four at once: this Mac's first copy, then the peer's (its own GPU), then this Mac's second copy; all answered",
+          all(out[k][0] == 200 for k in out) and [s[1] for s in A.seen] == ['b1', 'b4'] and sorted(s[1] for s in B.seen) == ['b2', 'b3'],
           ({k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
-        t('the answer from the peer names the model asked for', out['b3'][1].get('model') == F, out['b3'][1])
-        mine = [x for x in logged(llmshare.REQUESTS, 6) if x.get('peer') == 'peer']
+        t('the answer from the peer names the model asked for', out['b2'][1].get('model') == F, out['b2'][1])
+        plan(A, 'slow', 'slow'); plan(B, 'slow'); A.slow = B.slow = 2.0
+        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')))
+        t("a person waiting gets this Mac's second copy before the peer (the fastest free slot); the batch after it goes to the peer",
+          [s[1] for s in A.seen] == ['h1', 'h2'] and [s[1] for s in B.seen] == ['h3'] and all(v_[0] == 200 for v_ in out.values()), (A.seen, B.seen))
+        mine = [x for x in logged(llmshare.REQUESTS, 9) if x.get('peer') == 'peer']
         t('this Mac logs the peer\'s answers as "test/family on peer", never as one of its own copies',
-          len(mine) == 2 and all(x.get('copy') == 'test/family on peer' for x in mine), [(x.get('copy'), x.get('peer')) for x in logged(llmshare.REQUESTS, 6)])
+          len(mine) == 3 and all(x.get('copy') == 'test/family on peer' for x in mine), [(x.get('copy'), x.get('peer')) for x in logged(llmshare.REQUESTS, 9)])
         L.poll(force=True)
         t("at_once counts the peer's free slots: 2 here and 2 there", llmshare.at_once(F) == 4, llmshare.at_once(F))
 
@@ -489,6 +582,7 @@ def main():
         from localmodels import maint
         maint.FILE = os.path.join(box, 'maintenance.json')
         peers.STATE, peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
+        peers.LMSTUDIO_HOME = os.path.join(box, 'lmstudio-home'); os.makedirs(peers.LMSTUDIO_HOME)     # never this Mac's own LM Studio settings
         test_units(box)
         test_keeper(box)
         test_commands(box)

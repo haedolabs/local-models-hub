@@ -353,16 +353,24 @@ class Door(http.server.BaseHTTPRequestHandler):
         return self._send(403, dict(error="not over the link: only a model's work, the model listing and this Mac's report"))
 
     # ---- a request that makes a model work
-    def _candidates(self, model, skip=()):
-        """The copies this request may go to right now: the model's loaded copies, less those down after a crash or
-        being drained for a recycle, then the family's copies on peers (peers.LINK: those up, with the same model, and
-        not skipped because this request failed there). A request that names one copy goes to that copy, or to its
-        siblings when that copy is down or draining. [] when nothing can answer: the door then holds, or answers 503,
-        never forwards the bare id. A request that came over the link is answered here only (no chains of Macs)."""
+    def _candidates(self, model, skip=(), kind=None):
+        """The copies this request may go to right now, in the order it takes them: the model's loaded copies, less those
+        down after a crash or being drained for a recycle, and the family's copies on peers (peers.LINK: those up, with
+        the same model, and not skipped because this request failed there). A person waiting (chat, ask) takes this Mac's
+        copies first, the fastest per request; anything else takes each Mac's first copy before a second copy on any one
+        Mac, since a peer's GPU and memory are its own (measured: a second copy here added 23%, a peer 38%; GUIDE.md,
+        Peers). A request that names one copy goes to that copy, or to its siblings when that copy is down or draining.
+        [] when nothing can answer: the door then holds, or answers 503, never forwards the bare id. A request that came
+        over the link is answered here only (no chains of Macs)."""
         out = [c for c in llmshare.copies(model) if c not in crashes.down_copies(model) and c not in recycle.draining()]
         if not out and llmshare.family(model) != model:
             out = [c for c in llmshare.copies(llmshare.family(model)) if c not in crashes.down_copies(model) and c not in recycle.draining()]
-        if not self._link and (llmshare.family(model) == model or not out): out += peers.LINK.replicas(model, skip)
+        if not self._link and (llmshare.family(model) == model or not out):
+            there = peers.LINK.replicas(model, skip)
+            if there and len(out) > 1 and kind not in llmshare.PEOPLE:
+                first = [c for c in there if peers.LINK.first_free(c)]
+                out = out[:1] + first + out[1:] + [c for c in there if c not in first]
+            else: out += there
         return out
 
     def _hold(self, model, rec, mark, t0, until=None):
@@ -430,7 +438,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                         why = (f'{base} is still loading again' if crashes.reloading(model) else
                                f'{base} is being recycled' if recycle.draining() else f'no copy of {base} is loaded (localmodels use {base})')
                         code, _ = self._send(503, dict(error=f'{why}: try again in {RETRY_AFTER} s'), retry_after=RETRY_AFTER); note = why; break
-                    with llmshare.slot_any(lambda: self._candidates(model, skip), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600, kind=kind) as (chosen, w):
+                    with llmshare.slot_any(lambda: self._candidates(model, skip, kind), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600, kind=kind) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'the program hung up while it waited'; break
                         m = maint.on()

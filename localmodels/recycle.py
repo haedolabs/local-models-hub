@@ -27,7 +27,7 @@ State: keeper.json, under "recycle" (the job in progress, each family's last rec
 crash state and under the same lock (crashes._state). The count starts at the copy's load as the hub saw it
 (crashes.loaded_now); a reload made outside the hub within one 20-s look is invisible, so the dash shows each count's start.
 """
-import time
+import json, os, time
 
 from . import crashes, llmshare
 
@@ -40,6 +40,15 @@ _held = {}                                                # family -> why its lo
 def held_back():
     """The families whose recycle waits because a lone copy might not load again, with why: {family: words}."""
     return dict(_held)
+
+
+def guardrail_off():
+    """Whether LM Studio's model-loading guardrail is Off on this Mac (its settings.json): then it does not refuse the
+    hub's loads, so a lone copy unloaded for a recycle can be loaded again."""
+    from . import peers
+    try: g = json.load(open(os.path.join(peers.LMSTUDIO_HOME, 'settings.json'))).get('modelLoadingGuardrails') or {}
+    except (OSError, ValueError, AttributeError): return False
+    return isinstance(g, dict) and str(g.get('mode') or '').lower() == 'off'
 
 
 def thresholds(f):
@@ -140,10 +149,10 @@ def plan(rows, busy=None):
             elif fresh and s >= th['before_batch']: why, rank = f"a batch is starting and it has {c['tokens']:,} tokens processed since it was loaded, past {int(th['before_batch'] * 100)}% of its band of {th['tokens']:,}", 2 + s
             elif idle and c['tokens'] >= th['soft']: why, rank = f"it is idle and has {c['tokens']:,} tokens processed since it was loaded, past the soft limit of {th['soft']:,}", 1 + s
             else: continue
-            if len(ids) < 2 and not crashes.reload_proven(base):      # make before break: no unload the hub might not undo
-                _held[base] = ('its recycle waits: it is the only copy on this Mac and the hub has not loaded it here yet, so it is not '
-                               'sure LM Studio would let it load again; once the hub has loaded it here (after a crash, or with '
-                               '`localmodels use` after an unload), it is recycled as usual')
+            if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
+                _held[base] = (f'its recycle ({why}) waits: it is the only copy on this Mac and the hub has not loaded it here, so it is '
+                               "not sure LM Studio would let it load again; LM Studio's model-loading guardrail set to Off, or one "
+                               'load by the hub here (after a crash, or with `localmodels use` after an unload), settles it')
                 continue
             if best is None or rank > best[0]: best = (rank, i, base, c, round(s, 2), why)
     if not best: return None
