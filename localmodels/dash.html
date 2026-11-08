@@ -462,11 +462,11 @@ function renderNow() {
   $('chip-peers').style.display = ps.length || serve ? '' : 'none';
   document.querySelector('.wrap').classList.toggle('peers', ps.length > 0);
   if (ps.length || serve) {
-    const said = [ps.length ? (up.length === ps.length ? `${up.length === 1 ? 'peer' : up.length + ' peers'} up: ${up.map(p => p.name).join(', ')}`
-      : ps.filter(p => p.state !== 'up').map(p => `${p.name}: ${p.state === 'down' ? 'no answer' : p.state === 'refused' ? 'refuses the token' : p.state}`).join(' · ')) : '', serve].filter(Boolean).join(' · ');
+    const said = [ps.length ? (up.length === ps.length ? `peers ${up.length}/${ps.length} reachable: ${up.map(p => p.name).join(', ')}`
+      : ps.filter(p => p.state !== 'up').map(p => `peer ${p.name}: ${p.state === 'down' ? 'unreachable' : p.state === 'refused' ? 'auth failed' : p.state}`).join(' · ')) : '', serve].filter(Boolean).join(' · ');
     chip('chip-peers', up.length === ps.length && (!serve || /^listening/.test(serve)), said, said);
     if (up.length < ps.length && ps.every(p => p.state === 'up' || p.state === 'maintenance')) $('chip-peers').querySelector('i').style.background = 'var(--warning)';
-    $('ans-hint').textContent = "the line across the top is how many the loaded copies answer at once, the peers' free slots included; the right edge is now";
+    $('ans-hint').textContent = 'top line: total slots (local instances + peer replicas available to this gateway); right edge: now';
   }
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
@@ -510,13 +510,13 @@ function renderAlerts() {
   if (S.recycle && S.recycle.words) out.push(el('div', {class: 'alert info', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '↻'), el('span', {}, S.recycle.words)));
   for (const p of S.peers || []) {
     const said = [];
-    if (p.state === 'refused') said.push(`${p.name} refuses this Mac's token: ${p.why}`);
-    for (const [id, f] of Object.entries(p.families || {})) if (!f.match && f.why !== "not a family in this Mac's settings") said.push(`${p.name}'s ${id} is not used: ${f.why}`);
-    if (p.state === 'down' && /Local Network/.test(p.why || '')) said.push(`${p.name}: ${p.why}`);
-    for (const w of [p.route_words, p.address_words].concat((p.keeper && p.keeper.warnings) || [])) if (w) said.push(`${p.name}: ${w}`);
+    if (p.state === 'refused') said.push(`peer ${p.name}: ${p.why}`);
+    for (const [id, f] of Object.entries(p.families || {})) if (!f.match && f.why !== "not a family in this host's settings") said.push(`peer ${p.name}: ${id} excluded: ${f.why}`);
+    if (p.state === 'down' && /Local Network/.test(p.why || '')) said.push(`peer ${p.name}: ${p.why}`);
+    for (const w of [p.route_words, p.address_words].concat((p.keeper && p.keeper.warnings) || [])) if (w) said.push(`peer ${p.name}: ${w}`);
     for (const w of said) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, w)));
   }
-  for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peers: '), w)));
+  for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peer settings: '), w)));
   if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'The settings file could not be read: '), S.settings_error, ' The last good settings stand.')));
   $('alerts').replaceChildren(...out);
 }
@@ -546,7 +546,7 @@ function renderModels() {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
     const head = el('div', {}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'},
       `${f.copies.length > 1 ? f.copies.length + ' copies · ' : ''}${f.at_once} at once · ${f.busy} busy · ${f.size} GB · ${full(f.copies[0].context)} context`
-      + (away.length ? ` · ${more} more on ${away.map(p => p.name).join(', ')}` : '')));
+      + (away.length ? ` · +${more} slots on peer ${away.map(p => p.name).join(', ')}` : '')));
     const rows = f.copies.map((c, k) => {
       const boxes = [];
       for (const h of c.holders) for (let j = 0; j < h.n; j++) { boxes.push(h.project); seen.add(h.project); }
@@ -561,7 +561,7 @@ function renderModels() {
       }));
       const state = c.down ? el('span', {class: 'badge down'}, 'down: loading again') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for a recycle' : 'recycling')
         : el('span', {}, (c.busy ? 'working' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy} of ${c.parallel} busy`,
-            el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of its band` : ''));
+            el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of recycle band` : ''));
       const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `copy ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
       if (sv_) {
         const sh = sv_.share == null ? null : Math.min(1, sv_.share);
@@ -580,13 +580,9 @@ function renderModels() {
 // this Mac's peers: each family a peer serves for it is one more copy, after this Mac's own (its slots colored by project)
 function linkWords(p) {
   const bits = [], r = p.route || {};
-  if (p.rtt_ms != null) bits.push(`${p.rtt_ms < 10 ? p.rtt_ms.toFixed(1) : Math.round(p.rtt_ms)} ms`);
-  if (r.interface && r.interface !== 'lo0') bits.push('over ' + (r.port || r.interface));
+  if (p.rtt_ms != null) bits.push(`${p.rtt_ms < 10 ? p.rtt_ms.toFixed(1) : Math.round(p.rtt_ms)} ms RTT`);
+  if (r.interface && r.interface !== 'lo0') bits.push('via ' + (r.port || r.interface));
   return bits.length ? ' · ' + bits.join(' ') : '';
-}
-function peerState(p) {
-  return p.state === 'maintenance' ? (p.why || 'down for maintenance') : p.state === 'refused' ? "refuses this Mac's token"
-    : p.state === 'down' ? 'no answer: ' + (p.why || '') : p.state === 'new' ? 'not looked at yet' : (p.words || p.state);
 }
 function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more row under the family, its slots colored by project
   const boxes = [];
@@ -594,13 +590,13 @@ function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more
   while (boxes.length < f.busy) boxes.push('straight to LM Studio');
   const slots = el('span', {class: 'slots'}, ...Array.from({length: f.slots || 0}, (_, j) => {
     const pr = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: pr ? `background:${color(pr)}` : ''});
-    const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${id} on ${p.name} · slot ${j + 1}`,
-      [{name: pr || 'free', color: pr ? color(pr) : 'var(--track)', value: pr ? 'answering' : 'free'}]); };
+    const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${id} @ peer ${p.name} · slot ${j + 1}`,
+      [{name: pr || 'free', color: pr ? color(pr) : 'var(--track)', value: pr ? 'busy' : 'free'}]); };
     b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt); b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
     return b;
   }));
   return el('div', {class: 'copy', title: p.words || ''}, el('span', {class: 'nm'}, p.name), slots,
-    el('span', {class: 'st'}, `${f.busy} of ${f.slots} busy · ${f.here} from here · ${f.free_here} free for this Mac${linkWords(p)}`));
+    el('span', {class: 'st'}, `${f.busy}/${f.slots} slots busy · ${f.here} from this gateway · ${f.free_here} available${linkWords(p)}`));
 }
 function peersOf(id) { return ((S && S.peers) || []).filter(p => p.state === 'up' && p.families && p.families[id] && p.families[id].match); }
 function peerBlocks(seen, local) {      // a family only a peer has (the others' peer copies sit under this Mac's families)
@@ -609,7 +605,7 @@ function peerBlocks(seen, local) {      // a family only a peer has (the others'
     if (p.state !== 'up') continue;                    // the chip says it, and the alerts when a person must act
     for (const [id, f] of Object.entries(p.families || {})) {
       if (!f.match || local.has(id)) continue;
-      out.push(el('div', {class: 'fam'}, el('span', {class: 'fam-name'}, id), el('div', {class: 'fam-meta'}, `only on ${p.name} · ${f.slots} at once · ${f.busy} busy`), peerRow(p, id, f, seen)));
+      out.push(el('div', {class: 'fam'}, el('span', {class: 'fam-name'}, id), el('div', {class: 'fam-meta'}, `peer ${p.name} only · ${f.slots} slots · ${f.busy} busy`), peerRow(p, id, f, seen)));
     }
   }
   return out;
@@ -691,7 +687,7 @@ function renderRecent() {
     el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
     el('td', {}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
     el('td', {title: r.step || ''}, kindWords(r.kind), r.step ? el('div', {class: 'muted'}, r.step) : ''),
-    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'on ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? 'copy ' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : 'copy 1'),
+    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'peer ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? 'copy ' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : 'copy 1'),
     el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
     el('td', {class: 'num'}, (+r.waited || 0) >= 0.1 ? (+r.waited).toFixed(1) : '–'),
     el('td', {class: 'num'}, full(r.out_tokens)),

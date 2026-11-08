@@ -74,9 +74,9 @@ def token():
 def token_problem():
     """Why this Mac's token cannot be used, in words, or None."""
     try: st = os.stat(TOKEN_FILE)
-    except OSError: return f'there is no token file ({TOKEN_FILE}): localmodels peer token makes one'
-    if st.st_mode & 0o077: return f'the token file can be read by other users of this Mac: chmod 600 "{TOKEN_FILE}"'
-    if not token(): return f'the token file holds no token (at least 32 characters, no spaces): {TOKEN_FILE}'
+    except OSError: return f'peer-token missing ({TOKEN_FILE}): run `localmodels peer token`'
+    if st.st_mode & 0o077: return f'peer-token is readable by other users (mode {oct(st.st_mode & 0o777)}): chmod 600 "{TOKEN_FILE}"'
+    if not token(): return f'peer-token invalid: needs at least 32 characters, no whitespace ({TOKEN_FILE})'
     return None
 
 
@@ -140,12 +140,12 @@ def problems():
     """What is wrong with the peers in the settings, in words: [] when nothing is."""
     raw, out = llmshare.settings().get('peers'), []
     if raw is None: return out
-    if not isinstance(raw, dict): return ['"peers" in the settings is not a list of names and addresses ({"<name>": {"url": "http://<address>:1235"}})']
+    if not isinstance(raw, dict): return ['settings: "peers" must be an object: {"<name>": {"url": "http://<address>:1235"}}']
     for name, p in raw.items():
         u = parse_url(p.get('url') or p.get('address') if isinstance(p, dict) else p)
-        if not NAME.match(str(name)): out.append(f'the peer name {name!r} is not a plain word (letters, digits, . _ -)')
-        elif not u: out.append(f'{name}: {p!r} is not an http address')
-        elif address_words(u[1]): out.append(f'{name}: {address_words(u[1])}')
+        if not NAME.match(str(name)): out.append(f'peer name {name!r} invalid: allowed characters are letters, digits, ".", "_", "-"')
+        elif not u: out.append(f'peer {name}: {p!r} is not an http URL')
+        elif address_words(u[1]): out.append(f'peer {name}: {address_words(u[1])}')
     return out
 
 
@@ -233,34 +233,34 @@ def route_words(iface, names):
     if not iface or bridge(iface, names) or iface.startswith('lo'): return None
     port = names.get(iface)
     over = f'{port}' if port and iface in port else f'{port} ({iface})' if port else iface
-    return (f'the route to it goes over {over}, not the Thunderbolt Bridge: give the Thunderbolt Bridge a fixed address on '
-            'both Macs, in a subnet no other network uses (GUIDE.md, Peers)')
+    return (f'route to peer egresses via {over}, not the Thunderbolt Bridge: assign static IPv4 addresses to the Thunderbolt '
+            'Bridge on both hosts, in a dedicated subnet (GUIDE.md, Peers)')
 
 
 def address_words(addr):
     """Words when an address will not stay put, else None."""
     a = str(addr or '')
     if a.startswith('169.254.'):
-        return (f'{a} is a link-local address: it changes after a restart and may take the slow interface; give the '
-                'Thunderbolt Bridge a fixed address on both Macs (GUIDE.md, Peers)')
-    if a.lower().startswith('fe80:') and '%' not in a: return f'{a} is an IPv6 link-local address and needs its interface: {a}%bridge0'
+        return (f'{a} is IPv4 link-local: reassigned on reboot and may route via the slower virtual Ethernet interface; '
+                'assign a static address to the Thunderbolt Bridge on both hosts (GUIDE.md, Peers)')
+    if a.lower().startswith('fe80:') and '%' not in a: return f'{a} is IPv6 link-local and needs a zone index: {a}%bridge0'
     return None
 
 
 def reach_words(e):
-    """Why this Mac could not reach a peer, in plain words."""
+    """Why this host could not reach a peer: the errno, and what it usually means."""
     r = getattr(e, 'reason', None)
     e = r if isinstance(r, BaseException) else e
     n = getattr(e, 'errno', None)
     if isinstance(e, ConnectionRefusedError) or n == errno.ECONNREFUSED:
-        return "its door is closed (connection refused): is its hub running, and serving the link? (localmodels peer serve, on that Mac)"
+        return "ECONNREFUSED: peer gateway not listening on the link (check its hub is running and `localmodels peer serve` is set on it)"
     if n == errno.EHOSTUNREACH:
-        return ("no route to it: if the cable is in and `localmodels peer test` reaches it from Terminal, macOS's Local Network "
-                "permission is blocking the hub: System Settings → Privacy & Security → Local Network, turn on python3")
-    if n == errno.EHOSTDOWN: return 'it is not on the link (host is down): asleep, or the cable is out'
-    if n == errno.ENETUNREACH: return 'this Mac has no route to its network: is the Thunderbolt Bridge up, with its fixed address?'
-    if isinstance(e, (socket.timeout, TimeoutError)) or n == errno.ETIMEDOUT: return 'no answer in time: asleep, busy, or the cable is out'
-    if isinstance(e, (ConnectionResetError, BrokenPipeError)): return 'it dropped the connection'
+        return ("EHOSTUNREACH: if the link is up and `localmodels peer test` connects from a terminal, macOS Local Network "
+                "privacy is blocking the gateway (a LaunchAgent): System Settings → Privacy & Security → Local Network → enable python3")
+    if n == errno.EHOSTDOWN: return 'EHOSTDOWN: peer not on the link (asleep, or cable disconnected)'
+    if n == errno.ENETUNREACH: return "ENETUNREACH: no route to the peer's subnet (Thunderbolt Bridge down, or static address missing)"
+    if isinstance(e, (socket.timeout, TimeoutError)) or n == errno.ETIMEDOUT: return 'ETIMEDOUT: no response (peer asleep or overloaded, or cable disconnected)'
+    if isinstance(e, (ConnectionResetError, BrokenPipeError)): return 'connection reset by peer'
     return f'{type(e).__name__}: {e}'
 
 
@@ -296,21 +296,21 @@ def match(mine, theirs, pinned=None):
     """Whether a peer's copy of a family is the same model as this Mac's. mine: this Mac's fingerprint (live, or the last
     seen), None when this Mac has never seen the family loaded; pinned: the variant the settings name, if any.
     -> (True, None) or (False, words)."""
-    if not isinstance(theirs, dict): return False, 'it did not say which model it has'
-    if pinned and theirs.get('variant') != pinned: return False, f"it has {theirs.get('variant')}, the settings name {pinned}"
+    if not isinstance(theirs, dict): return False, 'peer reported no fingerprint'
+    if pinned and theirs.get('variant') != pinned: return False, f"variant mismatch: peer {theirs.get('variant')}, pinned {pinned}"
     if mine is None:
         if pinned: return True, None
-        return False, ("this Mac has not seen the family loaded, so the peer's copy cannot be checked against it: load it here "
-                       'once, or name the variant in the settings ("variant": "<key>@<quantization>")')
-    if theirs.get('variant') != mine.get('variant'): return False, f"it has {theirs.get('variant')}, this Mac {mine.get('variant')}: another model"
-    if theirs.get('format') != mine.get('format'): return False, f"its format is {theirs.get('format')}, here {mine.get('format')}: another model"
-    if theirs.get('bytes') != mine.get('bytes'): return False, f"its weights are {theirs.get('bytes')} bytes, here {mine.get('bytes')}: another model"
+        return False, ('no local fingerprint to check against (family never loaded on this host): load it locally once, '
+                       'or pin the variant in settings ("variant": "<key>@<quantization>")')
+    if theirs.get('variant') != mine.get('variant'): return False, f"variant mismatch: peer {theirs.get('variant')}, local {mine.get('variant')}"
+    if theirs.get('format') != mine.get('format'): return False, f"format mismatch: peer {theirs.get('format')}, local {mine.get('format')}"
+    if theirs.get('bytes') != mine.get('bytes'): return False, f"weights size mismatch: peer {theirs.get('bytes')} B, local {mine.get('bytes')} B"
     if theirs.get('definition') != mine.get('definition'):
         if not theirs.get('definition'):
-            return False, ("it has the weights but not the model's definition (model.yaml): copy ~/.lmstudio/hub/models/"
-                           f"{(mine.get('variant') or '').split('@')[0]}/ to it, then load the model there again")
-        if not mine.get('definition'): return False, "this Mac has the weights but not the model's definition (model.yaml); the peer has one"
-        return False, "its definition (model.yaml) differs from this Mac's: another template or sampling"
+            return False, ('model definition (model.yaml) missing on peer: run `localmodels peer copy-model '
+                           f"{(mine.get('variant') or '').split('@')[0]} <user@peer>` with LM Studio closed there, then reload it")
+        if not mine.get('definition'): return False, 'model definition (model.yaml) missing on this host; present on peer'
+        return False, 'model definition (model.yaml) differs: prompt template or sampling config mismatch'
     return True, None
 
 
@@ -359,7 +359,7 @@ def copy_plan(key, variant=None):
     if not key or '..' in key.split('/') or key.startswith('/'): raise ValueError(f'{key!r} is not a model key')
     defn = os.path.join(LMSTUDIO_HOME, 'hub', 'models', *key.split('/'))
     try: man = json.load(open(os.path.join(defn, 'manifest.json')))
-    except (OSError, ValueError): raise ValueError(f"{key} has no definition here ({defn}/manifest.json): copy-model copies models from LM Studio's catalog")
+    except (OSError, ValueError): raise ValueError(f"{key}: no model definition at {defn}/manifest.json (copy-model supports LM Studio catalog models only)")
     srcs = [(s.get('user'), s.get('repo')) for dep in (man.get('dependencies') or []) if isinstance(dep, dict) for s in (dep.get('sources') or [])
             if isinstance(s, dict) and s.get('type') == 'huggingface' and s.get('user') and s.get('repo')]
     downloads = lmstudio_settings().get('downloadsFolder') or os.path.join(LMSTUDIO_HOME, 'models')
@@ -367,8 +367,8 @@ def copy_plan(key, variant=None):
     quant = str(variant or '').partition('@')[2].lower()
     pick = [x for x in have if quant and quant in x[1].lower()] or have
     if len(pick) != 1:
-        raise ValueError(f'{key}: ' + ('none of its weights are downloaded here' if not pick else
-                                       'several of its variants are downloaded here (' + ', '.join(f'{u}/{r}' for u, r in pick) + '): name the variant in the settings'))
+        raise ValueError(f'{key}: ' + ('no weights downloaded on this host' if not pick else
+                                       'multiple variants downloaded (' + ', '.join(f'{u}/{r}' for u, r in pick) + '): pin the variant in settings'))
     u, r = pick[0]
     wkey, weights = f'{u}/{r}', os.path.join(downloads, u, r)
     try: doc = json.load(open(os.path.join(LMSTUDIO_HOME, '.internal', 'model-data.json')))
@@ -378,7 +378,7 @@ def copy_plan(key, variant=None):
     for k in (key, wkey):                                 # LM Studio's own records, as it wrote them here
         i = next((i for i, e in enumerate(entries) if str(e[0]).lower() == k.lower()), None)
         if i is None or not isinstance(entries[i][1], dict):
-            raise ValueError(f"{k} has no record in LM Studio's model-data.json here: load {key} in LM Studio once, then copy it")
+            raise ValueError(f"{k}: no record in LM Studio's model-data.json on this host: load {key} in LM Studio once, then retry")
         recs.append([entries[i][0], entries[i][1], notes.get(i, {})])
     cfg = os.path.join(LMSTUDIO_HOME, '.internal', 'user-concrete-model-default-config', *key.split('/')) + '.json'
     size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(weights) for f in fs)
@@ -474,7 +474,7 @@ class Peer:
     """One peer as this Mac's door sees it."""
     def __init__(self, name):
         self.name, self.url, self.host = name, None, None
-        self.state, self.why = 'new', 'not looked at yet'
+        self.state, self.why = 'new', 'not polled yet'
         self.fails, self.next_at, self.seen_at, self.rtt = 0, 0.0, 0.0, None
         self.refused_token, self.refused_at, self.tries_refused = None, 0.0, 0
         self.report, self.route, self.route_at = None, (None, None), 0.0
@@ -522,22 +522,22 @@ class Link:
     def _look(self, p, tok):
         t0 = time.time()
         if not tok:
-            with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', token_problem() or 'this Mac has no token', tok, t0
+            with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', token_problem() or 'no peer-token on this host', tok, t0
             p.tries_refused += 1; return
         req = urllib.request.Request(p.url + '/hub/peer', headers={'X-Hub-Token': tok, 'X-Hub-From': me()})
         try:
             with _open(req, timeout=CONNECT) as r: rep = json.load(r)
-            if not isinstance(rep, dict) or rep.get('hub') != 'local-models': raise ValueError('not a local-models hub')
+            if not isinstance(rep, dict) or rep.get('hub') != 'local-models': raise ValueError('response is not a local-models hub report')
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
-                with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', f'it refuses this Mac\'s token ({e.code}): the two Macs must hold the same peer-token', tok, t0
+                with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', f'auth failed (HTTP {e.code}): peer-token mismatch; both hosts need the same peer-token', tok, t0
                 p.tries_refused += 1; return
-            return self._down(p, f'its door answered {e.code}')
-        except (OSError, ValueError) as e: return self._down(p, reach_words(e) if isinstance(e, OSError) else f'it did not answer as a hub ({e})')
+            return self._down(p, f'peer gateway returned HTTP {e.code}')
+        except (OSError, ValueError) as e: return self._down(p, reach_words(e) if isinstance(e, OSError) else f'invalid poll response ({e})')
         with self.lock:
             p.rtt, p.report, p.seen_at, p.fails, p.next_at, p.tries_refused = time.time() - t0, rep, time.time(), 0, time.time() + POLL, 0
             m = rep.get('maintenance') or {}
-            p.state, p.why = ('maintenance', m.get('words') or 'down for maintenance') if m.get('phase') == 'on' else ('up', None)
+            p.state, p.why = ('maintenance', m.get('words') or 'maintenance window active') if m.get('phase') == 'on' else ('up', None)
             fams, conf, front = rep.get('families') or {}, llmshare.settings().get('families') or {}, me()
             p.cap = {b: capacity_for(f, front) for b, f in fams.items() if isinstance(f, dict)}
             p.match, p.first = {}, {}
@@ -545,7 +545,7 @@ class Link:
                 cs = sorted((c for c in ((f or {}).get('copies') or []) if isinstance(c, dict) and not c.get('down') and not c.get('draining')
                              and c.get('state') != 'LOADING'), key=lambda c: (c.get('id') != b, len(str(c.get('id'))), str(c.get('id'))))
                 p.first[b] = int(cs[0].get('parallel') or 1) if cs else 0
-                if b not in conf: p.match[b] = (False, "not a family in this Mac's settings"); continue
+                if b not in conf: p.match[b] = (False, "not a family in this host's settings"); continue
                 p.match[b] = match(self.mine.get(b), (f or {}).get('fingerprint'), (conf.get(b) or {}).get('variant'))
         if p.state == 'up' and time.time() - p.route_at > ROUTE_EVERY:
             p.route, p.route_at = route_of(p.host), time.time()
@@ -612,9 +612,9 @@ class Link:
             p = self.peers.get(name)
             if not p: return
             mh = hd.get('x-hub-maintenance') or ''
-            if code in (401, 403): p.state, p.why, p.refused_token, p.refused_at, p.cap = 'refused', f'it refused this Mac\'s token ({code})', token(), time.time(), {}
+            if code in (401, 403): p.state, p.why, p.refused_token, p.refused_at, p.cap = 'refused', f'auth failed (HTTP {code}): peer-token mismatch', token(), time.time(), {}
             elif mh.startswith('on'):
-                p.state, p.why, p.cap = 'maintenance', 'down for maintenance' + (f" ({mh.split('why=', 1)[1]})" if 'why=' in mh else ''), {}
+                p.state, p.why, p.cap = 'maintenance', 'maintenance window active' + (f" ({mh.split('why=', 1)[1]})" if 'why=' in mh else ''), {}
                 p.next_at = time.time() + POLL
             elif code == 0: self._down(p, words)
             else:                                        # it could not take it now: nothing more until the next look
@@ -622,7 +622,7 @@ class Link:
                 p.next_at = 0.0
                 p.strikes = [t for t in p.strikes if t > time.time() - STRIKE_WINDOW] + [time.time()]
                 if len(p.strikes) >= STRIKES:            # its look is fine but its requests fail: back off as if it were down
-                    p.strikes = []; self._down(p, f'it failed {STRIKES} requests within {STRIKE_WINDOW} s ({words or code})')
+                    p.strikes = []; self._down(p, f'{STRIKES} request failures within {STRIKE_WINDOW} s ({words or code})')
         self.write(); WAKE.set()
 
     def answered(self, c):
@@ -673,7 +673,7 @@ def poller():
     while True:
         try:
             if LINK.peers or configured(): LINK.poll()
-        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} the look at the peers stumbled: {type(e).__name__}: {e}", flush=True)
+        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: peer poll error: {type(e).__name__}: {e}", flush=True)
         WAKE.wait(1.0); WAKE.clear()
 
 
@@ -686,7 +686,7 @@ def view(max_age=30):
     names = set(configured())
     out = [p for p in d.get('peers') or [] if p.get('name') in names]
     for p in out:
-        if time.time() - float(d.get('at') or 0) > max_age: p.update(state='unknown', words=f"{p['name']}: the door has not looked for a while (is it open?)")
+        if time.time() - float(d.get('at') or 0) > max_age: p.update(state='unknown', words=f"peer {p['name']}: state unknown (gateway has not polled for over {max_age} s; is it running?)")
         else: p['words'] = words(p)                      # said now ("looks again in 12 s" counts from now)
     return out
 
@@ -700,21 +700,23 @@ def capacity(model):
 
 
 def words(p):
-    """One peer in a line: its state, the link, and each family it serves for this Mac."""
+    """One peer in a line: state, link, and each family it serves as a replica for this gateway."""
     name, st = p.get('name'), p.get('state')
-    if st == 'new': return f'{name}: not looked at yet'
-    if st == 'refused': return f"{name} refuses this Mac's token: {p.get('why')}"
+    if st == 'new': return f'peer {name}: not polled yet'
+    if st == 'refused': return f"peer {name}: {p.get('why')}"
     if st == 'down':
         left = max(0, int((p.get('next_at') or 0) - time.time()))
-        return f"{name}: no answer ({p.get('why')}); looks again in {left} s"
-    if st == 'unknown': return p.get('words') or f'{name}: unknown'
-    if st == 'maintenance': return f"{name}: {p.get('why') or 'down for maintenance'}; nothing is sent there until it is over"
-    link = (f"{p['rtt_ms']:.1f} ms" if p.get('rtt_ms') is not None else '') + \
-           (f" over {p['route']['port'] or p['route']['interface']}" if (p.get('route') or {}).get('interface') and p['route']['interface'] != 'lo0' else '')
+        return f"peer {name}: unreachable ({p.get('why')}); next poll in {left} s (backoff)"
+    if st == 'unknown': return p.get('words') or f'peer {name}: state unknown'
+    if st == 'maintenance': return f"peer {name}: {p.get('why') or 'maintenance window active'}; excluded from routing"
+    route = p.get('route') or {}
+    link = (f", {p['rtt_ms']:.1f} ms RTT" if p.get('rtt_ms') is not None else '') + \
+           (f" via {route.get('port') or route.get('interface')}" + (f" ({route['interface']})" if route.get('port') and route['interface'] not in route['port'] else '')
+            if route.get('interface') and route['interface'] != 'lo0' else '')
     bits = []
     for b, f in (p.get('families') or {}).items():
-        if not f.get('match'): bits.append(f"{b} not used: {f.get('why')}"); continue
-        bits.append(f"{b} {f.get('slots')} at once, {f.get('busy')} busy, {f.get('here')} from here, {f.get('free_here')} free for this Mac")
+        if not f.get('match'): bits.append(f"{b} excluded: {f.get('why')}"); continue
+        n = len(f.get('copies') or [])
+        bits.append(f"{b}: {n} instance{'s' if n != 1 else ''}, {f.get('free_here')}/{f.get('slots')} slots free for this gateway ({f.get('busy')} busy, {f.get('here')} from this gateway)")
     warn = [w for w in (p.get('route_words'), p.get('address_words')) if w] + list((p.get('keeper') or {}).get('warnings') or [])
-    return f"{name}: up{' (' + link.strip() + ')' if link.strip() else ''} · " + ('; '.join(bits) or 'no model loaded there') + \
-        (' · ' + '; '.join(warn) if warn else '')
+    return f"peer {name}: reachable{link} · " + ('; '.join(bits) or 'no model loaded') + (' · ' + '; '.join(warn) if warn else '')

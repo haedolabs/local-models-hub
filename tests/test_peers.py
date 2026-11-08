@@ -106,14 +106,14 @@ def test_units(box):
     route = '   route to: 192.168.213.2\ndestination: 192.168.213.0\n       mask: 255.255.255.0\n  interface: bridge0\n      flags: <UP,DONE,CLONING>\n'
     t('route read: the interface the route to a peer takes', peers.route_interface(route) == 'bridge0' and peers.route_interface('route: writing to routing socket: not in table') is None)
     w = peers.address_words('169.254.12.34')
-    t('a link-local address is warned about (it changes after a restart and may take the slow interface)', w and 'fixed address' in w, w)
+    t('a link-local address is warned about (it changes after a restart and may take the slow interface)', w and 'static address' in w, w)
     t('a fixed private address is fine', peers.address_words('192.168.213.2') is None)
     w = peers.route_words('en7', {'en7': 'Ethernet Adapter (en7)', 'bridge0': 'Thunderbolt Bridge'})
     t('a route that does not take the Thunderbolt Bridge is said, naming the port', w and 'Thunderbolt Bridge' in w and 'en7' in w, w)
     t('a route over the Thunderbolt Bridge is fine', peers.route_words('bridge0', {'bridge0': 'Thunderbolt Bridge'}) is None)
     w = peers.reach_words(OSError(errno.EHOSTUNREACH, 'No route to host'))
     t("EHOSTUNREACH is read as macOS's Local Network permission, with where to turn it on", 'Local Network' in w and 'Privacy' in w, w)
-    t('a refused connection is read as the peer\'s door being closed', 'closed' in peers.reach_words(ConnectionRefusedError(errno.ECONNREFUSED, 'Connection refused')))
+    t('a refused connection is read as the peer gateway not listening', 'ECONNREFUSED' in peers.reach_words(ConnectionRefusedError(errno.ECONNREFUSED, 'Connection refused')))
 
     mine = dict(variant='test/family@8bit', bytes=1000, format='safetensors', definition='abc')
     t('the same variant, size, format and definition: the same model', peers.match(mine, dict(mine))[0])
@@ -296,7 +296,7 @@ def test_commands(box):
         t('...and makes the token: 64 hex characters, mode 0600', len(tok) == 64 and os.stat(peers.TOKEN_FILE).st_mode & 0o777 == 0o600, oct(os.stat(peers.TOKEN_FILE).st_mode))
         t('...and never prints it: the next steps copy it over SSH from its file', tok not in out and 'ssh <user>@192.168.213.2' in out and peers.TOKEN_FILE in out, out[-300:])
         code, out2 = run('add', 'macbook', '192.168.213.2')
-        t('a second add keeps the token', open(peers.TOKEN_FILE).read().strip() == tok and 'is in' in out2)
+        t('a second add keeps the token', open(peers.TOKEN_FILE).read().strip() == tok and 'existing' in out2)
         t('a peer name with a space is refused', run('add', 'mac book', '192.168.213.3')[0] == 2)
         t('an address that is not one is refused', run('add', 'other', 'ftp://x')[0] == 2)
         code, out = run('add', 'stray', '169.254.12.34')
@@ -476,7 +476,7 @@ def test_link_rules(box):
         L.failed(c, 503, 'no free slot'); L.failed(c, 503, 'no free slot')
         t('an answer in between starts the count again', p.state == 'up', p.state)
         L.failed(c, 502, "LM Studio's server is not answering")
-        t('the third within a minute: backed off as if it were down, and said why', p.state == 'down' and 'failed 3 requests' in p.why and not L.replicas(F), p.why)
+        t('the third within a minute: backed off as if it were down, and said why', p.state == 'down' and '3 request failures' in p.why and not L.replicas(F), p.why)
     finally: llmshare.settings = real
 
 
@@ -666,10 +666,10 @@ def test_two_doors(box):
         out = together(('g1', {}), ('g2', {}), ('g3', {}))
         last = logged(llmshare.REQUESTS, 3)
         t('the peer gone between two looks: the request it could not take is sent again here and answered',
-          all(v_[0] == 200 for v_ in out.values()) and sorted(s[1] for s in A.seen) == ['g1', 'g2', 'g3'] and any('again here' in (x.get('note') or '') for x in last),
+          all(v_[0] == 200 for v_ in out.values()) and sorted(s[1] for s in A.seen) == ['g1', 'g2', 'g3'] and any('requeued locally' in (x.get('note') or '') for x in last),
           ({k: v_[0] for k, v_ in out.items()}, [x.get('note') for x in last]))
         v = {p['name']: p for p in peers.view()}.get('peer') or {}
-        t('the peer is marked down, in words, and skipped', v.get('state') == 'down' and 'closed' in (v.get('words') or '') and not L.replicas(F), v.get('words'))
+        t('the peer is marked down, in words, and skipped', v.get('state') == 'down' and 'ECONNREFUSED' in (v.get('words') or '') and not L.replicas(F), v.get('words'))
         L.peers['peer'].next_at = 0; L.poll()
         n1, gap1 = L.peers['peer'].fails, L.peers['peer'].next_at - time.time()
         L.poll()

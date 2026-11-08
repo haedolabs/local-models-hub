@@ -376,12 +376,12 @@ def show(s, w=80, h=24):
             continue
         L.append(f"  {k(f['id'], 'B')} · {len(f['copies'])} copies · {f['busy']} of {f['at_once']} busy · holds {f['size']:.1f} GB")
         L.append('    ' + '   '.join(f"copy {i} {word(m)} · {m['busy']} of {m['parallel']} busy" for i, m in enumerate(f['copies'], 1)))
-    for p in s.get('peers') or []:                 # each peer: its copies are more copies of a family, after this Mac's own
+    for p in s.get('peers') or []:                 # each peer: its instances are replicas of a family, after the local ones
         if p.get('state') != 'up': L.append('  ' + k((p.get('words') or p['name'])[:w - 4], 'r' if p.get('state') in ('down', 'refused') else 'y')); continue
         for fid, f in (p.get('families') or {}).items():
-            if not f.get('match'): L.append('  ' + k(f"{p['name']}: {fid} not used ({f.get('why')})"[:w - 4], 'y')); continue
-            L.append(f"  {k(fid, 'B')} on {k(p['name'], 'B')} · {f.get('busy')} of {f.get('slots')} busy · {f.get('here')} from here"
-                     + (f" · {p['rtt_ms']:.0f} ms" if p.get('rtt_ms') is not None else ''))
+            if not f.get('match'): L.append('  ' + k(f"peer {p['name']}: {fid} excluded ({f.get('why')})"[:w - 4], 'y')); continue
+            L.append(f"  {k(fid, 'B')} @ peer {k(p['name'], 'B')} · {f.get('busy')}/{f.get('slots')} slots busy · {f.get('here')} from this gateway"
+                     + (f" · {p['rtt_ms']:.0f} ms RTT" if p.get('rtt_ms') is not None else ''))
     if not lm['models']: L.append('  ' + k('no model loaded', 'd'))
     cr = s.get('crashes') or {}
     for d in cr.get('down') or []: L.append('  ' + k('! ' + d['words'], 'r' if d['state'] == 'left down' else 'y', 'B'))

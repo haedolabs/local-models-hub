@@ -338,7 +338,7 @@ def load_blocked(base, cond):
     took it), else None: then a load would be refused again, so the keeper does not try."""
     e = (_read().get('loads') or {}).get(base) or {}
     if not e.get('refused') or (e.get('ok') or 0) > e['refused'] or list(cond) != e.get('cond'): return None
-    return e.get('words') or 'LM Studio refused to load it'
+    return e.get('words') or 'load refused by LM Studio'
 
 
 def reload_proven(base):
