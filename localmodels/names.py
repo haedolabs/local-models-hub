@@ -20,7 +20,15 @@ import json, os
 
 from . import llmshare, runs
 
-FILE = os.path.join(llmshare.SHARED, 'names.json')
+FILE = None                                              # names.json in the shared state (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global FILE
+    FILE = os.path.join(root, 'names.json')
+
+
 _cache = {'mtime': None, 'data': {}}
 
 

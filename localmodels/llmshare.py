@@ -16,7 +16,15 @@ contents or anything else a project sent):
   leases/<project>-<pid>-<thread>.json   "this run is using these models": project, model ids, a kind, the Claude
                                session if there is one; refreshed every 30 s, gone when the run ends. The hub writes one
                                for every program that sends it requests, kept for two minutes after its last request.
-  inflight/<hub pid>-<n>.json  each request the hub is passing to LM Studio right now
+  inflight/<hub pid>-<n>.json  each request a gateway is passing to LM Studio right now, or has queued for a slot (its
+                               place in the admission order: kind, since, candidates), live while its gateway is
+  run/gateways/<pid>.lock      the gateway registry: each gateway holds its lock for its whole life (live means held, not
+                               a pid that may have been reused); <pid>.json is its row (generation, release, role, counts)
+  run/roles/<name>.lock        one holder per singleton loop: the instance manager, the peer poller, the memory sampler,
+                               the link listener; run/nudge-<name> is touched to wake that loop in whichever gateway holds it
+  run/server-start.lock        one `lms server start` at a time across every process, at most one a minute
+  listing.json                 the newest good `lms ps`, which every gateway on this Mac routes by
+  peer-slots/<peer>/<family>/  the slots this Mac's gateways hold on a peer's instances, counted across all of them
   requests.jsonl               one line per request the hub passed on: project, session, model, times, token counts
   waits.jsonl                  every wait for a slot over 2 s, every wait that ran out, and every refused swap
   models.json                  the hub's settings (families of copies, recycling, batch size, headroom); the repo's
@@ -36,9 +44,42 @@ The rules every project follows:
 """
 import contextlib, fcntl, glob, itertools, json, os, re, shutil, subprocess, threading, time, urllib.error, urllib.request
 
-SHARED = os.path.expanduser(os.environ.get('LOCALMODELS_STATE') or '~/Library/Application Support/LocalModels')   # the shared state (LOCALMODELS_HOME names the repo, for projects that import it)
-SLOTS, LEASES, INFLIGHT = (os.path.join(SHARED, d) for d in ('slots', 'leases', 'inflight'))
-WAITS, REQUESTS = os.path.join(SHARED, 'waits.jsonl'), os.path.join(SHARED, 'requests.jsonl')
+STATE_PROTOCOL = 1     # the shared state's format: slot paths; the names and fields of marks, leases, registry rows, roles,
+                       # peer slots and listing.json; keeper.json keys; link.json. Gateways of two protocols never serve at once.
+_on_state = []         # what use_state() repoints: this module's paths, then every module's that registered with on_state()
+
+
+def _paths(root):
+    """Every path of the shared state, under one root."""
+    global SHARED, SLOTS, LEASES, INFLIGHT, WAITS, REQUESTS, MODELS, SWAP_LOCK, LISTING, RUN, GATEWAYS, ROLES, PEER_SLOTS
+    SHARED = root
+    SLOTS, LEASES, INFLIGHT = (os.path.join(root, d) for d in ('slots', 'leases', 'inflight'))
+    WAITS, REQUESTS = os.path.join(root, 'waits.jsonl'), os.path.join(root, 'requests.jsonl')
+    MODELS, SWAP_LOCK, LISTING = (os.path.join(root, f) for f in ('models.json', 'swap.lock', 'listing.json'))
+    RUN = os.path.join(root, 'run')                          # mode 0700: the registry, roles, nudges, the server-start lock
+    GATEWAYS, ROLES = os.path.join(RUN, 'gateways'), os.path.join(RUN, 'roles')
+    PEER_SLOTS = os.path.join(root, 'peer-slots')
+
+
+_paths(os.path.expanduser(os.environ.get('LOCALMODELS_STATE') or '~/Library/Application Support/LocalModels'))   # (LOCALMODELS_HOME names the repo, for projects that import it)
+
+
+def on_state(fn):
+    """fn(root) keeps a module's own paths under the shared state: called now, and again whenever use_state() moves it."""
+    _on_state.append(fn); fn(SHARED)
+    return fn
+
+
+def use_state(root):
+    """Point the whole shared state at another folder (the sandbox tests): this module's paths, its caches of the
+    registry, and every module that registered with on_state(). -> the previous root."""
+    old = SHARED
+    _paths(root)
+    for fn in _on_state: fn(root)
+    _live.clear(); _gw.update(at=0.0, rows=[]); _fq.update(at=0.0, rows=[]); _listing.update(checked=0.0, mtime=None)
+    return old
+
+
 LMS = os.path.expanduser(os.environ.get('LMS') or '~/.lmstudio/bin/lms')
 if not os.path.exists(LMS): LMS = shutil.which('lms') or LMS
 LMSTUDIO = os.environ.get('LMSTUDIO_URL', 'http://localhost:1234')
@@ -54,6 +95,11 @@ _ps_lock = threading.Lock()
 _api = {'at': 0.0, 'ids': None}
 _hub = {'at': 0.0, 'up': False}
 _q, _q_lock, _seq = {}, threading.Lock(), itertools.count()   # this process's waiters for a slot: ticket -> the copies it may take
+MARK_STALE = 300                                         # seconds: a registered gateway touches its marks every BEAT; untouched this long, one is dead
+_live = {}                                               # pid -> (checked at, True/False/None): gateway_live, cached 1 s
+_gw = {'at': 0.0, 'rows': []}                            # live_gateways(), cached 1 s
+_fq = {'at': 0.0, 'rows': []}                            # other gateways' queued marks, read at most every 0.25 s
+_listing = {'checked': 0.0, 'mtime': None}               # listing.json, looked at (a stat) at most every second
 
 
 def _int(x):
@@ -135,7 +181,9 @@ def loaded(fresh=False, force=False):
     every 20 s (fresh=True: now, but never twice within 5 s unless force=True), by one thread at a time; a thread that is
     not asking for a fresh look never waits. When the command fails or hangs, which it does under heavy load, the last good
     listing stands and read_ok() says it is unsure, rather than an empty listing that would make the door route as if
-    nothing were loaded."""
+    nothing were loaded. Every good listing is also written to listing.json, and a newer one written by another process
+    is taken in its place (_adopt), so every gateway on this Mac routes by the newest listing any of them read."""
+    if not fresh: _adopt()
     now = time.time()
     due = fresh or now - _ps['at'] > LISTING_EVERY
     if not due or (now - _ps['tried'] < LISTING_LEAST and not force): return _ps['rows']
@@ -146,15 +194,56 @@ def loaded(fresh=False, force=False):
         _ps['tried'] = now
         rows, ok = _lms_ps()
         if ok:
+            _listing['checked'] = 0.0; _adopt()             # the carry-forward below compares against the newest rows
             listed = {r['id'] for r in rows}
             gone = [r for r in _ps['rows'] if r['id'] not in listed]
             if gone:                                         # under load `lms ps` can leave an instance out: LM Studio's own
                 there = api_models()                         # server decides, so a partial listing never takes slots away
                 rows = rows + [dict(r) for r in gone if there is not None and r['id'] in there]
             _ps.update(at=now, rows=rows, ok=True, good_at=now)
+            _publish_listing(rows, now)
         else: _ps.update(at=now, ok=False)
         return _ps['rows']
     finally: _ps_lock.release()
+
+
+def _publish_listing(rows, at):
+    """listing.json: this good listing, for every other process on this Mac (no content: model ids, states and sizes)."""
+    try:
+        os.makedirs(SHARED, exist_ok=True)
+        _write(LISTING, dict(v=STATE_PROTOCOL, rows=rows, at=at, good_at=at, by=os.getpid()))
+        _listing['mtime'] = os.path.getmtime(LISTING)
+    except OSError as e: _error('listing.json: write', e)
+
+
+def _rows_of(d):
+    return [dict(r) for r in d.get('rows') if isinstance(r, dict) and r.get('id')] if isinstance(d, dict) and isinstance(d.get('rows'), list) else None
+
+
+def _adopt():
+    """Take listing.json's rows when another process read a good listing after this one did (a stat at most every second)."""
+    now = time.time()
+    if now - _listing['checked'] < 1: return
+    _listing['checked'] = now
+    try: m = os.path.getmtime(LISTING)
+    except OSError: return
+    if m == _listing['mtime']: return
+    _listing['mtime'] = m
+    try: d = json.load(open(LISTING))
+    except (OSError, ValueError): return
+    rows, good = _rows_of(d), float((d or {}).get('good_at') or 0) if isinstance(d, dict) else 0.0
+    if rows is not None and good > _ps['good_at']: _ps.update(rows=rows, at=good, good_at=good, ok=True)
+
+
+def seed_listing(max_age=120):
+    """A gateway's warm-up: listing.json, when it is younger than max_age seconds, stands as this process's listing until
+    its own first `lms ps` (which can take seconds under load). -> whether it was taken."""
+    try: d = json.load(open(LISTING))
+    except (OSError, ValueError): return False
+    rows, good = _rows_of(d), float(d.get('good_at') or 0) if isinstance(d, dict) else 0.0
+    if rows is None or time.time() - good > max_age or good <= _ps['good_at']: return False
+    _ps.update(rows=rows, at=good, good_at=good, ok=True)
+    return True
 
 
 def read_ok():
@@ -187,9 +276,7 @@ def parallel_of(model):
 
 
 # ---------------------------------------------------------------- copies: one model loaded more than once
-MODELS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models.json')   # the repo's defaults
-MODELS = os.path.join(SHARED, 'models.json')                                                 # the live settings on this Mac
-SWAP_LOCK = os.path.join(SHARED, 'swap.lock')
+MODELS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models.json')   # the repo's defaults (MODELS: the live settings on this Mac)
 _conf = {'path': None, 'mtime': None, 'data': {}, 'error': None}
 
 
@@ -283,6 +370,274 @@ def swapping(wait=120):
         h.close()
 
 
+# ---------------------------------------------------------------- gateways on this Mac: the registry, roles, nudges
+def _flock_test(path):
+    """Whether some process holds an exclusive lock on path: True, False when it is free, None when there is no such file.
+    (A shared lock, tried and dropped at once, so two testers never disturb each other.)"""
+    try: fd = os.open(path, os.O_RDONLY)
+    except OSError: return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError: return True                              # held (an error that cannot tell counts as held: the safe side)
+    finally: os.close(fd)
+
+
+def _lock_own(path, wait=2.0):
+    """An exclusive lock on path, kept until its descriptor is closed: retried for `wait` seconds while a tester holds it
+    for an instant, and checked to still be the file at that path (a cleaner may have removed it in between). -> the fd."""
+    t0 = time.time()
+    while True:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            if time.time() - t0 > wait: raise
+            time.sleep(0.05); continue
+        try: same = os.stat(path).st_ino == os.fstat(fd).st_ino
+        except OSError: same = False
+        if same: return fd
+        os.close(fd)
+
+
+class Registration:
+    """This gateway in the registry: run/gateways/<pid>.lock, held for the process's whole life (the OS frees it when the
+    process dies: that is what live means, never a bare pid that may have been reused), and <pid>.json, its row:
+    {pid, gen, run, release, code, version, state_protocol, channel, role, accepting, open, queued, answering, oldest,
+    roles, errors, started, at}. No request content."""
+    def __init__(self, fd, row):
+        self.fd, self.row, self.lock = fd, row, threading.Lock()
+
+    @property
+    def path(self): return os.path.join(GATEWAYS, f"{self.row['pid']}.json")
+
+    def update(self, **fields):
+        """Change fields and rewrite the row at once."""
+        with self.lock:
+            if self.fd is None: return
+            self.row.update(fields); self.row['at'] = round(time.time(), 1)
+            try: _write(self.path, self.row)
+            except OSError as e: _error('registry: write the row', e)
+
+    def close(self):
+        """Leave the registry (a clean exit): the row and the lock file go while the lock is held, then the lock."""
+        with self.lock:
+            if self.fd is None: return
+            for p in (self.path, os.path.join(GATEWAYS, f"{self.row['pid']}.lock")):
+                try: os.remove(p)
+                except OSError: pass
+            os.close(self.fd); self.fd = None
+        _live.pop(self.row['pid'], None); _gw['at'] = 0.0
+
+
+def register(row=None, every=5.0, fill=None):
+    """Put this process in the gateway registry, before it accepts anything (a mark older than its registration is from
+    an earlier process with the same pid). -> its Registration. The row is rewritten every `every` seconds too, with the
+    fields fill() gives (the counts that change all the time)."""
+    os.makedirs(GATEWAYS, mode=0o700, exist_ok=True)
+    try: os.chmod(RUN, 0o700)
+    except OSError as e: _error('registry: run/ mode', e)
+    pid = os.getpid()
+    fd = _lock_own(os.path.join(GATEWAYS, f'{pid}.lock'))
+    reg = Registration(fd, dict(row or {}, pid=pid, started=round(time.time(), 2), state_protocol=STATE_PROTOCOL))
+    reg.update()
+    _live.pop(pid, None); _gw['at'] = 0.0
+
+    def beat():
+        while True:
+            time.sleep(every)
+            if reg.fd is None: return
+            try: reg.update(**(fill() if fill else {}))
+            except Exception as e: _error('registry: fill the row', e)
+    threading.Thread(target=beat, daemon=True, name='registry').start()
+    return reg
+
+
+def _reap(pid):
+    """A dead gateway's registry files go, removed under its own lock (a new process with the same pid is never touched)."""
+    lock = os.path.join(GATEWAYS, f'{pid}.lock')
+    try: fd = os.open(lock, os.O_RDWR)
+    except OSError: return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.stat(lock).st_ino != os.fstat(fd).st_ino: return
+        for p in (os.path.join(GATEWAYS, f'{pid}.json'), lock):
+            try: os.remove(p)
+            except OSError: pass
+    except OSError: pass                                     # held again (a new process with this pid), or already removed
+    finally: os.close(fd)
+
+
+def gateway_live(pid):
+    """Whether a gateway process is live: True while it holds its registry lock, False when its lock file is there and
+    free (it died; its files are removed), None when it never registered (a gateway older than the registry, or not a
+    gateway). Cached 1 s."""
+    pid = _int(pid)
+    if pid <= 0: return None
+    now = time.time()
+    c = _live.get(pid)
+    if c and now - c[0] < 1: return c[1]
+    v = _flock_test(os.path.join(GATEWAYS, f'{pid}.lock'))
+    if v is False: _reap(pid)
+    _live[pid] = (now, v)
+    return v
+
+
+def live_gateways():
+    """The registry rows of every live gateway on this Mac, oldest first (cached 1 s)."""
+    now = time.time()
+    if now - _gw['at'] < 1: return _gw['rows']
+    rows = []
+    for f in glob.glob(os.path.join(GATEWAYS, '*.lock')):
+        pid = _int(os.path.basename(f)[:-len('.lock')])
+        if gateway_live(pid) is not True: continue
+        try: d = json.load(open(os.path.join(GATEWAYS, f'{pid}.json')))
+        except (OSError, ValueError): d = {}
+        rows.append(dict(d if isinstance(d, dict) else {}, pid=pid))
+    rows.sort(key=lambda r: (float(r.get('started') or 0), r['pid']))
+    _gw.update(at=now, rows=rows)
+    return rows
+
+
+class Role:
+    """A loop only one gateway on this Mac runs at a time (the instance manager, the peer poller, the memory sampler, the
+    link listener): its holder is whoever holds run/roles/<name>.lock, freed by the OS when the holder dies. The lock's
+    descriptor is never inherited, so lms and caffeinate children never keep a role. <name>.json says {pid, gen, since}."""
+    def __init__(self, name, gen=None):
+        self.name, self.gen, self.fd, self.since = name, gen, None, None
+
+    @property
+    def path(self): return os.path.join(ROLES, f'{self.name}.lock')
+
+    @property
+    def held(self): return self.fd is not None
+
+    def try_take(self):
+        """Take the role when nobody holds it. -> whether this process holds it now."""
+        if self.fd is not None: return True
+        os.makedirs(ROLES, mode=0o700, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: os.close(fd); return False
+        self.fd, self.since = fd, time.time()
+        try: _write(os.path.join(ROLES, f'{self.name}.json'), dict(pid=os.getpid(), gen=self.gen, since=round(self.since, 1)))
+        except OSError as e: _error(f'role {self.name}: write the holder', e)
+        return True
+
+    def holder(self):
+        """The pid holding the role; None when nobody does; 0 when it is held and the holder has not said who it is yet."""
+        if self.fd is not None: return os.getpid()
+        if not _flock_test(self.path): return None
+        try: return _int(json.load(open(os.path.join(ROLES, f'{self.name}.json'))).get('pid'))
+        except (OSError, ValueError, AttributeError): return 0
+
+    def release(self):
+        """Give the role up (between two passes of its loop, never inside one)."""
+        fd, self.fd, self.since = self.fd, None, None
+        if fd is not None: os.close(fd)
+
+
+def roles():
+    """{name: the pid holding it} for every role some process holds now."""
+    out = {}
+    for f in glob.glob(os.path.join(ROLES, '*.lock')):
+        pid = Role(os.path.basename(f)[:-len('.lock')]).holder()
+        if pid is not None: out[os.path.basename(f)[:-len('.lock')]] = pid
+    return out
+
+
+def nudge(name):
+    """Wake a role's loop in whichever process holds it: run/nudge-<name> is touched, and the loop watches its mtime."""
+    p = os.path.join(RUN, f'nudge-{name}')
+    try:
+        os.makedirs(RUN, mode=0o700, exist_ok=True)
+        with open(p, 'a'): pass
+        os.utime(p, None)
+    except OSError as e: _error(f'nudge {name}', e)
+
+
+def nudged(name):
+    """When run/nudge-<name> was last touched (0.0: never)."""
+    try: return os.path.getmtime(os.path.join(RUN, f'nudge-{name}'))
+    except OSError: return 0.0
+
+
+class Counted:
+    """At most `cap` holders at once across every process on this Mac: slot-N.lock files in one folder under peer-slots/
+    (N < 64), counted and taken under take.lock; the OS frees a holder's slot when it dies. One per peer and family, so
+    all of this Mac's gateways together stay within the slots a peer offers it."""
+    MAX = 64
+
+    def __init__(self, *names): self.names = names
+
+    @property
+    def folder(self): return os.path.join(PEER_SLOTS, *(_safe(n) for n in self.names))
+
+    def held(self):
+        """How many slots some process holds now (this one included)."""
+        n = 0
+        for i in range(self.MAX):
+            v = _flock_test(os.path.join(self.folder, f'slot-{i}.lock'))
+            if v is None: break                              # made in order and never removed: none past the first missing
+            n += bool(v)
+        return n
+
+    def take(self, cap):
+        """A slot, when fewer than cap are held now. -> its descriptor (give it back with give()), or None."""
+        cap = min(_int(cap), self.MAX)
+        if cap <= 0: return None
+        os.makedirs(self.folder, exist_ok=True)
+        with open(os.path.join(self.folder, 'take.lock'), 'a+') as m:
+            fcntl.flock(m, fcntl.LOCK_EX)
+            if self.held() >= cap: return None
+            for i in range(self.MAX):
+                fd = os.open(os.path.join(self.folder, f'slot-{i}.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return fd
+                except OSError: os.close(fd)
+        return None
+
+    @staticmethod
+    def give(fd):
+        try: os.close(fd)
+        except OSError as e: _error('peer slot: give back', e)
+
+
+# ---------------------------------------------------------------- LM Studio's server: started only when it is down
+def server_up(timeout=3):
+    """Whether LM Studio's server is up: only a refused connection means down. A slow answer, a reset or a cut answer
+    means it is up and busy, and starting it then would restart it under every request in flight."""
+    try: urllib.request.urlopen(LMSTUDIO + '/v1/models', timeout=timeout); return True
+    except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
+    except ConnectionRefusedError: return False
+    except OSError: return True
+
+
+def start_server(why='a request could not connect', debounce=60):
+    """LM Studio's server, started only when it is down: one start across every process on this Mac (a blocking lock on
+    run/server-start.lock, the check repeated inside it), and at most one per `debounce` seconds (run/server-start.json:
+    60 for the request path, 0 for the instance manager). -> whether it answers now."""
+    if server_up(2): return True
+    os.makedirs(RUN, mode=0o700, exist_ok=True)
+    info = os.path.join(RUN, 'server-start.json')
+    with open(os.path.join(RUN, 'server-start.lock'), 'a+') as h:
+        fcntl.flock(h, fcntl.LOCK_EX)                       # a second process waits here for the first one's start
+        if server_up(2): return True
+        try: last = float(json.load(open(info)).get('at') or 0)
+        except (OSError, ValueError, AttributeError, TypeError): last = 0.0
+        if debounce and time.time() - last < debounce: return False
+        try: _write(info, dict(at=round(time.time(), 1), pid=os.getpid(), why=clean(why, 120)))
+        except OSError as e: _error('server start: write the record', e)
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} LM Studio's server is down ({why}): lms server start", flush=True)
+        try: subprocess.run([LMS, 'server', 'start'], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e: _error('server start: lms server start', e); return False
+        for _ in range(20):
+            if server_up(2): return True
+            time.sleep(0.5)
+        return False
+
+
 # ---------------------------------------------------------------- rule 1: a slot per request
 REMOTE = None              # the door's link to its peers (peers.LINK): it counts their slots, which only the door sends to
 
@@ -322,21 +677,32 @@ def waiting_here():
 
 
 @contextlib.contextmanager
-def slot_any(models, wait=3600, kind='other'):
+def slot_any(models, wait=3600, kind='other', since=None, publish=None):
     """Hold one prediction slot on the first of these models that has one free: a model's copies, in order, so the first
     copy's slots fill before the second's (two on each measured slower than four on one). models: a list, or a function
     that gives the list each time it is tried, so a copy that comes back or is being drained counts at once. Waiters in
     this process take turns: a chat or ask request (a person is waiting) before anything else, then first come first
     served, per copy: a waiter leaves a copy's slot to an earlier waiter that may take it. Slots held by other processes
-    (llmshare.slot in a project's own code) are simply busy. Yields (the model, seconds waited); TimeoutError after `wait` s."""
+    (llmshare.slot in a project's own code) are simply busy. Yields (the model, seconds waited); TimeoutError after `wait` s.
+    Across gateways (a handoff runs two): the turn is (people first, since, pid) in wall-clock time, so since (when the
+    request first queued) keeps a requeued request's place; publish(cands, until) is called whenever the candidate list
+    changes, for the gateway to write into the request's mark; and while two gateways or more are live, a waiter also
+    leaves a copy to the earlier waiters the others published."""
     pick = models if callable(models) else (lambda: list(models))
-    ticket, t0, held, got = (0 if kind in PEOPLE else 1, next(_seq)), time.time(), None, None
+    t0 = time.time()
+    ticket = (0 if kind in PEOPLE else 1, float(since) if since else t0, os.getpid(), next(_seq))
+    until, held, got, shown = t0 + wait, None, None, None
     try:
         while held is None:
             cands = list(pick() or [])
+            if publish is not None and cands != shown:
+                shown = cands
+                try: publish(cands, until)
+                except Exception as e: _error('slot_any: publish the queued mark', e)
             with _q_lock:
                 _q[ticket] = cands
                 ahead = {m for t, ms in _q.items() if t < ticket for m in ms}
+            if publish is not None: ahead |= _ahead_elsewhere(ticket)
             mine = [m for m in cands if m not in ahead]
             if mine: held, got = _take(mine)
             if held is None:
@@ -350,6 +716,47 @@ def slot_any(models, wait=3600, kind='other'):
     if waited > 2: _note('slot wait', family(got), waited)
     try: yield got, waited
     finally: _release(held)
+
+
+def _mark_key(d, path=''):
+    """A queued mark's place in the admission order: (people first, since, its gateway's pid, its number)."""
+    prio, n = d.get('prio'), d.get('n')
+    if prio is None: prio = 0 if d.get('kind') in PEOPLE else 1
+    if n is None:
+        m = re.search(r'-(\d+)\.json$', path); n = m.group(1) if m else 0
+    try: t = float(d.get('t0') or d.get('since') or 0)
+    except (TypeError, ValueError): t = 0.0
+    return (_int(prio), t, _int(d.get('hub_pid')), _int(n))
+
+
+def _ahead_elsewhere(ticket):
+    """The copies earlier waiters in other live gateways may take (their queued marks; one whose until has passed by
+    5 s is ignored), read at most every 0.25 s, and only while two gateways or more are live."""
+    if len(live_gateways()) < 2: return set()
+    now = time.time()
+    if now - _fq['at'] >= 0.25:
+        rows, me = [], os.getpid()
+        for f in glob.glob(os.path.join(INFLIGHT, '*.json')):
+            try: d = json.load(open(f))
+            except (OSError, ValueError): continue
+            if not isinstance(d, dict) or d.get('state') != 'queued': continue
+            hp = _int(d.get('hub_pid'))
+            if hp == me or gateway_live(hp) is not True: continue
+            try: until = float(d.get('until') or 0)
+            except (TypeError, ValueError): until = 0.0
+            if now > until + 5: continue
+            rows.append((_mark_key(d, f), list(d.get('cands') or [])))
+        _fq.update(at=now, rows=rows)
+    return {m for k, ms in _fq['rows'] if k < ticket for m in ms}
+
+
+def waiting():
+    """How many requests are queued for a slot in every live gateway on this Mac (their marks), by kind:
+    {'people': n, 'others': n}. waiting_here() counts this process alone."""
+    out = dict(people=0, others=0)
+    for d in inflight():
+        if d.get('state') == 'queued': out['people' if _mark_key(d)[0] == 0 else 'others'] += 1
+    return out
 
 
 @contextlib.contextmanager
@@ -420,18 +827,44 @@ def lease(project, models, kind='other', **info):
 
 
 def _alive(pid):
-    try: os.kill(int(pid), 0); return True
+    """Whether a process with this pid exists (never pid 0 or less: os.kill would signal a whole process group)."""
+    pid = _int(pid)
+    if pid <= 0: return False
+    try: os.kill(pid, 0); return True
     except PermissionError: return True
-    except (OSError, TypeError, ValueError): return False
+    except OSError: return False
+
+
+HUB_LEASE = re.compile(r'-hub(-\d+)?\.json$')       # the hub's own leases: <project>-<holder>[-<front>]-hub-<gateway pid>.json (1.4.0: -hub.json)
+
+
+def hub_lease_path(project, holder, front=None):
+    """The lease file this gateway keeps for one client (holder: its pid, or the supervisor's for a peer or a client whois
+    cannot name), project and front (the peer Mac that sent it): its own file, so two gateways never share one. None for
+    a holder that is no pid (0 is never written)."""
+    holder = _int(holder)
+    if holder <= 0: return None
+    return os.path.join(LEASES, f'{_safe(project)}-{holder}' + (f'-{_safe(front)}' if front else '') + f'-hub-{os.getpid()}.json')
+
+
+def run_leases(pid):
+    """The lease files a client process holds itself (llmshare.lease), never the hub's leases for it."""
+    return [f for f in glob.glob(os.path.join(LEASES, f'*-{_int(pid)}-*.json')) if not HUB_LEASE.search(f)]
 
 
 def leases():
-    """Every live lease, all projects; a dead one (its process gone, or no heartbeat for STALE s) is removed."""
-    out = []
+    """Every live lease, all projects. A lease lives while its process does, or, for one a gateway wrote (via 'hub'),
+    while that gateway is live (a client may come and go between requests, and a supervisor restart changes the holder);
+    one with no heartbeat for STALE seconds is dead either way. Dead leases are removed."""
+    out, now = [], time.time()
     for f in glob.glob(os.path.join(LEASES, '*.json')):
         try: d = json.load(open(f))
         except (OSError, ValueError): continue
-        if not int(d.get('pid') or 0) or not _alive(d.get('pid')) or time.time() - float(d.get('beat') or 0) > STALE:
+        if not isinstance(d, dict): continue
+        try: beat = float(d.get('beat') or 0)
+        except (TypeError, ValueError): beat = 0.0
+        live = _alive(d.get('pid')) or (_int(d.get('pid')) > 0 and d.get('via') == 'hub' and gateway_live(d.get('hub_pid')) is True)
+        if not live or now - beat > STALE:
             try: os.remove(f)
             except OSError: pass
             continue
@@ -515,17 +948,34 @@ def hub_post(path, body=None, timeout=5):
 
 # ---------------------------------------------------------------- the hub's records, read
 def inflight():
-    """Each request the hub is passing on right now (a marker whose hub process is gone, or older than two hours, is removed)."""
-    out = []
+    """Each request the hub's gateways are passing on right now: inflight/<gateway pid>-<n>.json. A gateway that
+    registered touches its marks every BEAT, so its mark lives while the gateway does, if touched within MARK_STALE
+    seconds and no older than the gateway's own start (else the pid was reused); a gateway older than the registry keeps
+    today's rule: its pid alive, two hours at most. Dead marks are removed."""
+    out, now, started = [], time.time(), {}
     for f in glob.glob(os.path.join(INFLIGHT, '*.json')):
         try: d = json.load(open(f))
         except (OSError, ValueError): continue
-        if not _alive(d.get('hub_pid')) or time.time() - float(d.get('since') or 0) > 7200:
-            try: os.remove(f)
-            except OSError: pass
-            continue
-        out.append(d)
+        if isinstance(d, dict) and _mark_live(d, f, now, started): out.append(d); continue
+        try: os.remove(f)
+        except OSError: pass
     return out
+
+
+def _mark_live(d, path, now, started):
+    hp = _int(d.get('hub_pid'))
+    try: since = float(d.get('t0') or d.get('since') or 0)
+    except (TypeError, ValueError): since = 0.0
+    reg = gateway_live(hp)
+    if reg is None: return _alive(hp) and now - since <= 7200
+    if not reg: return False
+    try:
+        if now - os.path.getmtime(path) > MARK_STALE: return False
+    except OSError: return False
+    if hp not in started:
+        try: started[hp] = float(json.load(open(os.path.join(GATEWAYS, f'{hp}.json'))).get('started') or 0)
+        except (OSError, ValueError, AttributeError, TypeError): started[hp] = 0.0
+    return since >= started[hp] - 2
 
 
 def _tail(path, since, start=4_000_000):

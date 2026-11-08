@@ -20,7 +20,15 @@ from . import HOME, llmshare, maint, names, runs, sessions, whois
 
 COLOR = sys.stdout.isatty() and '--no-color' not in sys.argv
 C = dict(r='31', g='32', y='33', b='34', m='35', c='36', w='37', B='1', d='2', R='7')
-INSTALLED = os.path.join(llmshare.SHARED, 'hub')          # the copy launchd runs the door from (localmodels install)
+INSTALLED = None                                         # SHARED/hub: the copy launchd runs the gateway from (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global INSTALLED
+    INSTALLED = os.path.join(root, 'hub')
+
+
 PROVIDERS = []                                            # (title, fn): a project's own rows, added to its own view
 _cache, _files = {}, {}
 ENV = dict(os.environ, LC_ALL='C')                        # ps and vm_stat print numbers the same way whatever the Mac's language

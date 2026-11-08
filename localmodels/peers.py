@@ -35,8 +35,15 @@ import collections, errno, hashlib, hmac, ipaddress, json, os, re, secrets, shle
 
 from . import VERSION, errors, llmshare, maint
 
-TOKEN_FILE = os.path.join(llmshare.SHARED, 'peer-token')      # the same on every Mac of the set; mode 0600
-STATE = os.path.join(llmshare.SHARED, 'link.json')            # the front's look at its peers, written by the door
+TOKEN_FILE = STATE = None     # peer-token (the same on every Mac of the set; mode 0600) and link.json (the front's look at its peers)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global TOKEN_FILE, STATE
+    TOKEN_FILE, STATE = os.path.join(root, 'peer-token'), os.path.join(root, 'link.json')
+
+
 LMSTUDIO_HOME = (os.path.dirname(os.path.dirname(llmshare.LMS)) if llmshare.LMS.endswith(os.sep + os.path.join('bin', 'lms'))
                  else os.path.expanduser('~/.lmstudio'))
 NAME = re.compile(r'^[A-Za-z0-9._-]{1,40}$')

@@ -34,8 +34,15 @@ import contextlib, fcntl, glob, json, os, re, threading, time
 from . import llmshare
 
 LOGS = os.path.expanduser(os.environ.get('LMSTUDIO_LOGS') or '~/.lmstudio/server-logs')
-RECORD = os.path.join(llmshare.SHARED, 'crashes.jsonl')
-STATE = os.path.join(llmshare.SHARED, 'keeper.json')
+RECORD = STATE = None                                    # crashes.jsonl and keeper.json in the shared state (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global RECORD, STATE
+    RECORD, STATE = os.path.join(root, 'crashes.jsonl'), os.path.join(root, 'keeper.json')
+
+
 CAP, WINDOW = 3, 3600            # reloads of one model within an hour; a crash after the third leaves it down
 GIVE_UP = 3600                   # a crashed model not loaded again within an hour (no room, a load that fails) is left down
 RETRY_LEFT = 3600                # a model left down is tried once more this often

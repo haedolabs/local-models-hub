@@ -16,7 +16,15 @@ import json, os, re, time
 
 from . import llmshare
 
-FILE = os.path.join(llmshare.SHARED, 'maintenance.json')
+FILE = None                                              # maintenance.json in the shared state (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global FILE
+    FILE = os.path.join(root, 'maintenance.json')
+
+
 QUIET_FOR = 120          # "after the batches": no batch request for this long, then it starts
 _cache = {'mtime': None, 'rec': None}
 

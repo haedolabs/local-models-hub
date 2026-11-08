@@ -18,8 +18,15 @@ from . import HOME, NAME, VERSION, crashes, dash, errors, llmshare, maint, names
 from . import names as names_mod          # colors() takes a parameter called names
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
-COLORS = os.path.join(llmshare.SHARED, 'colors.json')   # project -> color slot, first come, kept while the project is seen
-MEMORY = os.path.join(llmshare.SHARED, 'memory.jsonl')  # the memory samples, kept a day, so a restart keeps the chart
+COLORS = MEMORY = None        # colors.json (project -> color slot, first come, kept while the project is seen) and memory.jsonl (a day of samples)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global COLORS, MEMORY
+    COLORS, MEMORY = os.path.join(root, 'colors.json'), os.path.join(root, 'memory.jsonl')
+
+
 SLOTS = 7                                               # categorical slots for projects; the rest share "other"
 _lock, _cache = threading.Lock(), {}
 _locks = collections.defaultdict(threading.Lock)

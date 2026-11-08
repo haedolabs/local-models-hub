@@ -59,7 +59,16 @@ from . import HOME, NAME, VERSION, llmshare
 LABEL = os.environ.get('LOCALMODELS_LABEL') or 'com.local-models.hub'
 OLD_LABELS = ()                                          # earlier LaunchAgent labels an install retires
 PLIST = os.path.expanduser(f'~/Library/LaunchAgents/{LABEL}.plist')
-INSTALLED = os.path.join(llmshare.SHARED, 'hub')
+INSTALLED = None                                         # SHARED/hub (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global INSTALLED, PRIVATE_WORDS
+    INSTALLED = os.path.join(root, 'hub')
+    PRIVATE_WORDS = os.environ.get('LOCALMODELS_PRIVATE_WORDS') or os.path.join(root, 'private-words.txt')
+
+
 LOGS = os.path.expanduser('~/Library/Logs/LocalModels')
 PY = shutil.which('python3') or sys.executable or '/usr/bin/python3'   # the PATH's python3 (a stable link, e.g. /opt/homebrew/bin/python3), not a versioned Cellar path
 BINS = ('/opt/homebrew/bin', '/usr/local/bin', os.path.expanduser('~/.local/bin'))
@@ -1055,7 +1064,6 @@ def _git(*args, check=True):
     return r.stdout.strip()
 
 
-PRIVATE_WORDS = os.environ.get('LOCALMODELS_PRIVATE_WORDS') or os.path.join(llmshare.SHARED, 'private-words.txt')
 EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'     # git's empty tree: "since the start" when nothing is tagged
 
 

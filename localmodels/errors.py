@@ -13,10 +13,16 @@ import json, os, threading, time, traceback
 
 from . import llmshare
 
-FILE = os.path.join(llmshare.SHARED, 'errors.jsonl')
+FILE = None                   # errors.jsonl in the shared state (set by _state_paths, and again by llmshare.use_state)
 ROLL_AT = 1_000_000
 QUIET = 60                    # seconds: the same error from the same place is recorded once in this window
 _lock, _last = threading.Lock(), {}
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global FILE
+    FILE = os.path.join(root, 'errors.jsonl')
 
 
 def record(where, exc=None, words=None, trace=None, source='gateway'):

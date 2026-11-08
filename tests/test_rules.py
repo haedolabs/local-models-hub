@@ -4,7 +4,7 @@ ever loaded or unloaded): the recycle policy, the door's queue with people first
 server-start guard, a partial model listing, a client that gives up, the agent engine's retries. `localmodels check` runs it;
 so can you: python3 tests/test_rules.py
 """
-import json, os, shutil, sys, tempfile, time
+import json, os, shutil, socket, stat, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from localmodels import crashes, llmshare, recycle
@@ -18,13 +18,9 @@ def t(name, good, note=''):
 
 
 def sandbox(box):
-    for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
+    llmshare.use_state(box)                                   # every shared path, every module's: never this Mac's live state
     llmshare.api_models = lambda timeout=3: None              # no real LM Studio in the sandbox (a test that needs a listing sets one)
-    from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
-    llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')   # (the repo's defaults apply)
-    _peers.STATE, _peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
-    llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
-    crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
+    crashes.LOGS = os.path.join(box, 'logs')                  # (the repo's default settings apply: there is no models.json in the box)
     os.makedirs(os.path.join(crashes.LOGS, '2026-11'))
     crashes._seen_state.update(at=0.0, st={})
     for p in (llmshare.REQUESTS, crashes.STATE, crashes.RECORD):
@@ -556,6 +552,188 @@ def test_names(box):
     t('the names file stays a plain JSON object', isinstance(json.load(open(names.FILE)), dict))
 
 
+# ---------------------------------------------------------------- the shared layer, across processes
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HELPER = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from localmodels import llmshare as L
+what, arg = sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else '')
+if what == 'gateway':
+    r = L.register(dict(gen=1))
+    if arg: r.update(started=round(time.time() - float(arg), 2))
+    out = 'registered'
+elif what == 'role': out = 'took' if L.Role(arg).try_take() else 'busy'
+elif what == 'slot': out = 'took' if L.Counted('peer', 'family').take(int(arg)) is not None else 'full'
+elif what == 'start': out = 'up' if L.start_server('test', 60) else 'down'
+print(out, flush=True)
+if what != 'start': sys.stdin.read()                      # hold what it took until the test lets go
+"""
+
+
+def helper(state, *args, env=None):
+    """A separate process on the shared state: -> (the process, what it said)."""
+    p = subprocess.Popen([sys.executable, '-c', HELPER, REPO, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                         env=dict(os.environ, LOCALMODELS_STATE=state, **(env or {})))
+    return p, p.stdout.readline().strip()
+
+
+def stop(p, kill=False):
+    if kill: p.kill()
+    else:
+        try: p.stdin.close()
+        except OSError: pass
+    try: p.wait(10)
+    except subprocess.TimeoutExpired: p.kill(); p.wait()
+
+
+def fresh():
+    """Forget what llmshare cached about the registry (it keeps each answer for a second)."""
+    llmshare._live.clear(); llmshare._gw['at'] = 0.0; llmshare._fq['at'] = 0.0
+
+
+def test_shared(box):
+    print('the shared layer: the registry, roles, the admission order across gateways, marks, leases, peer slots, one server start, the listing')
+    from localmodels import errors, llmshare as L
+    state = os.path.join(box, 'shared'); os.makedirs(state)
+    old, procs = L.use_state(state), []
+    real = L.parallel_of, L.LMS, L.api_models, dict(L._ps)
+    try:
+        t("use_state: every shared path moves, every module's too", L.SHARED == state and L.GATEWAYS == os.path.join(state, 'run', 'gateways')
+          and L.LISTING == os.path.join(state, 'listing.json') and errors.FILE == os.path.join(state, 'errors.jsonl') and crashes.STATE.startswith(state))
+
+        a, said = helper(state, 'gateway', str(4 * 3600)); procs.append(a)          # registered "four hours ago"
+        b, _ = helper(state, 'gateway', '3600'); procs.append(b)                      # (a mark never predates its gateway)
+        fresh(); rows = L.live_gateways()
+        t('the registry: two live gateways, each by the lock it holds, with its row', said == 'registered'
+          and sorted(r['pid'] for r in rows) == sorted([a.pid, b.pid]) and all(r.get('state_protocol') == L.STATE_PROTOCOL for r in rows), rows)
+        t('gateway_live: True for a registered gateway, None for a pid that never registered', L.gateway_live(a.pid) is True and L.gateway_live(os.getpid()) is None)
+
+        os.makedirs(L.INFLIGHT, exist_ok=True)
+        def mark(name, **d):
+            path = os.path.join(L.INFLIGHT, name); L._write(path, d); return path
+        now = time.time()
+        long_ = mark(f'{a.pid}-1.json', hub_pid=a.pid, since=now - 3 * 3600, state='answering', kind='batch')
+        stale = mark(f'{a.pid}-2.json', hub_pid=a.pid, since=now - 60, state='answering', kind='batch'); os.utime(stale, (now - 400, now - 400))
+        reused = mark(f'{a.pid}-3.json', hub_pid=a.pid, since=now - 5 * 3600, state='answering', kind='batch')
+        legacy = mark(f'{os.getpid()}-1.json', hub_pid=os.getpid(), since=now - 3600, state='answering', kind='batch')
+        legacy_old = mark(f'{os.getpid()}-2.json', hub_pid=os.getpid(), since=now - 3 * 3600, state='answering', kind='batch')
+        fresh(); L.inflight()
+        there = lambda f: os.path.exists(f)
+        t("marks: a live registered gateway's mark lives past 2 h while touched", there(long_))
+        t('marks: one untouched for MARK_STALE is removed, and one older than its gateway (a reused pid)', not there(stale) and not there(reused))
+        t('marks: a gateway older than the registry keeps its rule: its pid alive, 2 h at most', there(legacy) and not there(legacy_old))
+        os.remove(legacy)
+
+        L.parallel_of = lambda m: 1
+        M = 'test/one'
+        mark(f'{a.pid}-10.json', hub_pid=a.pid, state='queued', prio=1, t0=now - 10, cands=[M], until=now + 60, n=10)
+        mark(f'{b.pid}-11.json', hub_pid=b.pid, state='queued', prio=0, t0=now - 5, cands=[M], until=now + 60, n=11)
+        def turn(kind, since=None, wait=0.6):
+            seen = []
+            try:
+                with L.slot_any([M], wait=wait, kind=kind, since=since, publish=lambda c, u: seen.append((c, u))) as (got, w): return got, seen
+            except TimeoutError: return None, seen
+        fresh()
+        got, seen = turn('batch')
+        t('admission across gateways: a batch waits behind earlier waiters in other gateways', got is None and seen and seen[0][0] == [M]
+          and abs(seen[0][1] - (time.time() + 0.6)) < 1.5, seen)
+        t('people first: a chat waits only behind an earlier chat', turn('chat')[0] is None and turn('chat', since=now - 20)[0] == M)
+        t('people first: a batch queued earliest still waits behind a chat', turn('batch', since=now - 20)[0] is None)
+        L._write(os.path.join(L.INFLIGHT, f'{b.pid}-11.json'), dict(hub_pid=b.pid, state='queued', prio=1, t0=now - 10, cands=[M], until=now + 60, n=11))
+        fresh(); first = min(a.pid, b.pid, os.getpid())
+        t('equal since: the lower pid goes first', (turn('batch', since=now - 10)[0] == M) == (first == os.getpid()))
+        for f in (f'{a.pid}-10.json', f'{b.pid}-11.json'):
+            d = json.load(open(os.path.join(L.INFLIGHT, f))); d['until'] = now - 10; L._write(os.path.join(L.INFLIGHT, f), d)
+        fresh()
+        t('a queued mark whose until passed (by 5 s) is ignored', turn('batch')[0] == M)
+        t('waiting(): every live gateway\'s queued marks, by kind', L.waiting() == dict(people=0, others=2), L.waiting())
+
+        os.makedirs(L.LEASES, exist_ok=True)
+        path = L.hub_lease_path('proj', 4242, 'peer')
+        t('the hub lease is per gateway: <project>-<holder>-<front>-hub-<gateway pid>.json; holder 0 is never written',
+          os.path.basename(path) == f'proj-4242-peer-hub-{os.getpid()}.json' and L.hub_lease_path('proj', 0) is None, path)
+        me = os.getpid()
+        for n in (f'proj-{me}-1.json', f'proj-{me}-hub.json', f'proj-{me}-hub-77.json'): open(os.path.join(L.LEASES, n), 'w').write('{}')
+        t("a client's own leases leave the hub's out, in both name forms", [os.path.basename(f) for f in L.run_leases(me)] == [f'proj-{me}-1.json'])
+        for n in (f'proj-{me}-1.json', f'proj-{me}-hub.json', f'proj-{me}-hub-77.json'): os.remove(os.path.join(L.LEASES, n))
+        gone = subprocess.Popen([sys.executable, '-c', 'pass']); gone.wait()
+        L._write(os.path.join(L.LEASES, f'proj-{gone.pid}-hub-{b.pid}.json'), dict(v=2, project='proj', pid=gone.pid, models=[M], kind='batch', since=now, via='hub', hub_pid=b.pid, beat=time.time()))
+        L._write(os.path.join(L.LEASES, f'proj-{gone.pid}-9.json'), dict(v=2, project='proj', pid=gone.pid, models=[M], kind='batch', since=now, beat=time.time()))
+        fresh(); ls = L.leases()
+        t("a hub lease lives while its gateway does, though its client left; a run lease dies with its process",
+          [d.get('via') for d in ls] == ['hub'] and not os.path.exists(os.path.join(L.LEASES, f'proj-{gone.pid}-9.json')), ls)
+        stop(b, kill=True); fresh()
+        t('its gateway gone, the hub lease goes too, and the registry forgets that gateway', L.leases() == [] and L.gateway_live(b.pid) is False
+          and L.gateway_live(b.pid) is False and [r['pid'] for r in (fresh() or L.live_gateways())] == [a.pid])
+        stop(a, kill=True); fresh(); L.inflight()
+        t("a gateway gone: its marks go at once", not there(long_) and L.gateway_live(a.pid) is not True)
+
+        role = L.Role('instance-manager')
+        r1, said = helper(state, 'role', 'instance-manager'); procs.append(r1)
+        t('a role has one holder: another process holds it and this one cannot take it', said == 'took' and role.holder() == r1.pid and not role.try_take())
+        stop(r1, kill=True)
+        t('its holder gone, the role is free and taken here', role.holder() is None and role.try_take() and role.holder() == os.getpid()
+          and L.roles().get('instance-manager') == os.getpid())
+        r2, said = helper(state, 'role', 'instance-manager'); procs.append(r2)
+        t('while held here, another process is refused', said == 'busy')
+        role.release(); stop(r2)
+        t('released: nobody holds it', role.holder() is None and 'instance-manager' not in L.roles())
+
+        took = [helper(state, 'slot', '2') for _ in range(3)]; procs += [p for p, _ in took]
+        t('peer slots: three processes, cap 2: two hold one, the third is refused', sorted(w for _, w in took) == ['full', 'took', 'took'], [w for _, w in took])
+        holders = [p for p, w in took if w == 'took']
+        stop(holders[0], kill=True)
+        c = L.Counted('peer', 'family'); fd = c.take(2)
+        t('a killed holder frees its slot', fd is not None and c.held() == 2)
+        p3, w3 = helper(state, 'slot', '1'); procs.append(p3)
+        t('a smaller cap is respected: 2 held, cap 1: refused', w3 == 'full')
+        c.give(fd)
+        t('still one held, cap 1: refused', c.take(1) is None and c.held() == 1)
+        stop(holders[1], kill=True)
+        fd = c.take(1)
+        t('none held: taken', fd is not None and c.held() == 1); c.give(fd)
+
+        s = socket.socket(); s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]; s.close()
+        fake, log, pidf = os.path.join(box, 'lms-start'), os.path.join(box, 'lms-start.log'), os.path.join(box, 'server.pid')
+        open(fake, 'w').write(f'#!/bin/sh\necho "$@" >> {log}\nsleep 1\n{sys.executable} -c "import http.server as h; '
+                              f"h.HTTPServer(('127.0.0.1', {port}), h.BaseHTTPRequestHandler).serve_forever()\" >/dev/null 2>&1 &\necho $! > {pidf}\nsleep 0.5\n")
+        os.chmod(fake, stat.S_IRWXU)
+        env = dict(LMS=fake, LMSTUDIO_URL=f'http://127.0.0.1:{port}')
+        starts = [subprocess.Popen([sys.executable, '-c', HELPER, REPO, 'start'], stdout=subprocess.PIPE, text=True,
+                                   env=dict(os.environ, LOCALMODELS_STATE=state, **env)) for _ in range(2)]
+        said = [p.communicate(timeout=60)[0].strip().split('\n')[-1] for p in starts]   # (the one that starts it logs a line first)
+        lines = open(log).read().split('\n') if os.path.exists(log) else []
+        t("LM Studio's server down in two processes at once: one 'lms server start', and both see it up",
+          said == ['up', 'up'] and [l for l in lines if l] == ['server start'], (said, lines))
+        try: os.kill(int(open(pidf).read()), 9)
+        except (OSError, ValueError): pass
+
+        rows2 = [dict(id=B, key=B, state='IDLE', size='1 GB', context=4096, parallel=4), dict(id=C2, key=B, state='IDLE', size='1 GB', context=4096, parallel=4)]
+        L._write(L.LISTING, dict(v=1, rows=rows2, at=time.time(), good_at=time.time(), by=1))
+        L._ps.update(at=0.0, rows=[], ok=False, good_at=0.0, tried=0.0); L._listing.update(checked=0.0, mtime=None)
+        t('warm-up: the newest listing.json stands until the first lms ps', L.seed_listing() and [r['id'] for r in L._ps['rows']] == [B, C2] and L.read_ok())
+        ps = os.path.join(box, 'lms-ps')
+        open(ps, 'w').write("#!/bin/sh\necho '" + json.dumps([dict(identifier=B, modelKey=B, status='idle', sizeBytes=2**30, contextLength=4096, parallel=4)]) + "'\n")
+        os.chmod(ps, stat.S_IRWXU)
+        L.LMS, L.api_models = ps, (lambda timeout=3: {B: 4096, C2: 4096})
+        got = L.loaded(fresh=True, force=True)
+        t('a seeded listing keeps the carry-forward: an instance the server still lists stays', [r['id'] for r in got] == [B, C2], got)
+        d = json.load(open(L.LISTING))
+        t('each good listing is written for the other gateways', d.get('by') == os.getpid() and [r['id'] for r in d.get('rows', [])] == [B, C2], d.get('by'))
+        later = time.time() + 1
+        L._write(L.LISTING, dict(v=1, rows=rows2[:1], at=later, good_at=later, by=1)); L._listing.update(checked=0.0, mtime=None)
+        t("a newer listing from another gateway is taken by a plain look", [r['id'] for r in L.loaded()] == [B])
+
+        L.nudge('instance-manager'); n1 = L.nudged('instance-manager')
+        t('a nudge is a touched file the role holder watches', n1 > 0 and L.nudged('peer-poller') == 0.0)
+    finally:
+        for p in procs:
+            if p.poll() is None: stop(p, kill=True)
+        L.parallel_of, L.LMS, L.api_models = real[0], real[1], real[2]; L._ps.clear(); L._ps.update(real[3])
+        L.use_state(old); fresh()
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -573,6 +751,7 @@ def main():
         test_privacy_check(box)
         test_about(box)
         test_names(box)
+        test_shared(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
