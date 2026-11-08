@@ -159,5 +159,6 @@ def notice_main():
     try:
         line = notice()
         if line: print(line)
-    except Exception: pass
+    except Exception as e:                                   # never fails a prompt: recorded, not raised
+        from . import errors; errors.record('maintenance notice hook', e, source='hook')
     return 0

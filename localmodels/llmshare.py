@@ -69,6 +69,14 @@ def clean(s, n=80):
     return re.sub(r'[\x00-\x1f\x7f]+', ' ', str(s or '')).strip()[:n]
 
 
+def _error(where, e):
+    """The hub's error record, from any process that uses this module (errors.py imports this module, so it is imported here late)."""
+    try:
+        from . import errors
+        errors.record(where, e, source='llmshare')
+    except Exception: pass                                   # not recorded: the recorder itself failed; nothing left to tell
+
+
 def _append(path, rec, roll_at=0):
     """One JSON line, appended under a lock so two processes never interleave; past roll_at bytes the file becomes <path>.1."""
     try:
@@ -241,14 +249,14 @@ def at_once(model=None):
         try:
             from . import peers                              # the families this Mac's peers serve for it count too
             fams |= {f for p in peers.view() for f in (p.get('families') or {})}
-        except Exception: pass
+        except Exception as e: _error('at_once: peer families', e)
         return max([at_once(f) for f in fams] or [1])
     ids = {r['id'] for r in rows}
     here = sum(parallel_of(c) for c in copies(model) if c in ids)
     try:
         from . import peers
         there = peers.capacity(model)
-    except Exception: there = 0
+    except Exception as e: there = 0; _error('at_once: peer capacity', e)
     return (here + there) or parallel_of(model)
 
 

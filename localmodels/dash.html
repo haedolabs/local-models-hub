@@ -11,6 +11,7 @@
   --plane: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --hover: rgba(11,11,11,0.04); --track: #ebeae4;
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --p1: #2e7d4f; --p2: #1a9e6e; --p3: #6a8f2a; --p4: #0f6e5c; --p5: #4c9f3c; --p6: #3c5a2e; --p7: #8aa83a;   /* projects: board greens */
   --other: #a9a8a1; --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --good-text: #006300;
 }
 @media (prefers-color-scheme: dark) {
@@ -20,6 +21,7 @@
     --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05); --track: #2c2c2a;
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
     --other: #5f5e59; --good-text: #0ca30c;
+    --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
   }
 }
 :root[data-theme="dark"] {
@@ -28,6 +30,7 @@
   --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05); --track: #2c2c2a;
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
   --other: #5f5e59; --good-text: #0ca30c;
+  --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--plane); color: var(--ink); height: 100%; }
@@ -91,12 +94,16 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
   position: relative; overflow: hidden;      /* and gold contacts along the bottom edge, broken by the key notch */
   flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
   border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px;
-  background: linear-gradient(90deg, rgba(0, 0, 0, .3) 72%, transparent 72%) 50% 28% / calc(12px * var(--mk, 1)) 42% space no-repeat var(--track);
-  background-origin: content-box; padding: 0 7%; box-sizing: border-box;
+  background-color: var(--track);
+  background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .16) 0 9%, transparent 9% 12.5%);    /* eight chips */
+  background-size: 86% 40%; background-position: 50% 48%; background-repeat: no-repeat;
   -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
           mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
 }
-.slot:not(.on) { background-image: linear-gradient(90deg, rgba(0, 0, 0, .16) 72%, transparent 72%); }
+.slot.on {                 /* in use: the board in the project's color (a shade of green; the legend names it) */
+  background-color: var(--board);
+  background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .34) 0 9%, transparent 9% 12.5%);
+}
 .slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
   background: repeating-linear-gradient(90deg, #d4a72c 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
 .slot:not(.on)::after { opacity: .45; }
@@ -188,7 +195,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
   </section>
 
   <section class="row a">
-    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one box per slot (filled: active, colored by project); bar: tokens processed since load against the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
+    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one module per slot (in use: the project's green); bar: tokens processed since load against the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
     <article class="card"><div class="card-head"><div><h2>Concurrent requests, by project</h2><div class="hint" id="ans-hint">top line: total slots across loaded instances; right edge: now</div></div><button class="btn" data-table="ans">table</button></div>
       <div class="legend" id="ans-legend"></div><div class="chart" id="ans"></div></article>
   </section>
@@ -217,6 +224,21 @@ const $ = id => document.getElementById(id);
 const NS = 'http://www.w3.org/2000/svg';
 let S = null, H = null, R = [], RANGE = 60, COLORS = {};
 const tables = {}, inflight = {};                        // chart id -> showing its table; endpoint -> a fetch under way
+const failing = {}, reported = {};                       // card -> its last render error; error -> when it was last sent
+function guard(where, fn) {        // an error boundary: one card's failure leaves the others, the layout fit and the connection state alone
+  try { fn(); delete failing[where]; }
+  catch (e) { failing[where] = `${(e && e.name) || 'Error'}: ${(e && e.message) || e}`; report(where, e); }
+}
+function report(where, e) {        // to the gateway's error record (localmodels errors), at most once a minute per error; never blocks
+  const words = `${(e && e.name) || 'Error'}: ${String((e && e.message) || e).slice(0, 300)}`, key = where + ' ' + words;
+  console.error('[dashboard]', where, e);
+  if ((reported[key] || 0) > Date.now() - 60000) return;
+  reported[key] = Date.now();
+  try { fetch('/hub/client-error', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({where, error: words, stack: String((e && e.stack) || '').split('\n').slice(0, 5).join('\n').slice(0, 800)})}).catch(() => {}); } catch (_) {}
+}
+window.addEventListener('error', ev => report('page', ev.error || ev.message));
+window.addEventListener('unhandledrejection', ev => report('page', ev.reason));
 
 // ---------------------------------------------------------------- small helpers
 function el(tag, attrs, ...kids) {
@@ -229,7 +251,7 @@ function sv(tag, attrs) { const e = document.createElementNS(NS, tag); for (cons
 function color(project) {
   if (project === 'direct to LM Studio') return 'var(--other)';
   const slot = COLORS[project];
-  return slot ? `var(--s${slot + 1})` : 'var(--other)';    // slot 1 (blue) is "all projects together"
+  return slot ? `var(--p${slot})` : 'var(--other)';         // projects: a palette of greens, each a plausible module board (blue is "all projects")
 }
 function compact(n) { n = +n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'K' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n)); }
 function full(n) { return Math.round(+n || 0).toLocaleString(); }
@@ -322,6 +344,7 @@ function tableView(box, head, rows) {
   box.replaceChildren(el('div', {class: 'tablebox'}, t));
 }
 function projectsIn(obj) { return Object.keys(obj || {}).sort((a, b) => (COLORS[a] || 99) - (COLORS[b] || 99) || a.localeCompare(b)); }
+function short(model) { return String(model || '?').replace(/^[^/]+\//, ''); }
 function crashList() { return (S && S.crashes && S.crashes.recent) || []; }
 function recycleList() { return (S && S.recycle && S.recycle.recent) || []; }
 // a crash or a recycle on a time chart: a dashed rule at its minute, labeled, under the crosshair's hover layer
@@ -542,14 +565,15 @@ function renderNow() {
   const work = S.claude.filter(c => c.working);
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
-  renderModels(); renderUsers(); renderClaude(); renderAbout(); renderAlerts(); fitModels();
+  guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
+  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels);
 }
 
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
 const CURRENT = 2.8;            // seconds: one pass of light along an active module (the CSS animations' duration)
 function slotEl(p, j) {        // a slot as a memory module; an active one carries a current whose phase follows the clock, staggered by slot
   return el('span', {class: p ? 'slot on' : 'slot', tabindex: 0,
-    style: p ? `background-color:${color(p)};--d:${(-((Date.now() / 1000 + j * 0.35) % CURRENT)).toFixed(2)}s` : ''});
+    style: p ? `--board:${color(p)};--d:${(-((Date.now() / 1000 + j * 0.35) % CURRENT)).toFixed(2)}s` : ''});
 }
 function fitModels() {   // any number of models: rows grow to fill the card (never cutting a line), else fold bands, then rows, then shrink
   const box = $('models-body'), set = k => box.style.setProperty('--mk', k.toFixed(3));   // layout only: text keeps its size
@@ -596,6 +620,11 @@ function renderAlerts() {
   }
   for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peer settings: '), w)));
   if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file unreadable: '), S.settings_error, ' Last valid settings in effect.')));
+  if (S.errors) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
+    el('span', {}, el('b', {}, `${S.errors.count} error${S.errors.count === 1 ? '' : 's'} recorded in the last ${S.errors.minutes} min. `),
+      `Last: ${S.errors.last.where}: ${S.errors.last.error} `, el('span', {class: 'ink2'}, '(details: '), el('code', {}, 'localmodels errors --trace'), el('span', {class: 'ink2'}, ')'))));
+  for (const [where, words] of Object.entries(failing)) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
+    el('span', {}, el('b', {}, `Display error in ${where}: `), words, el('span', {class: 'ink2'}, ' (the rest of the page is current; recorded for localmodels errors)'))));
   $('alerts').replaceChildren(...out);
 }
 
@@ -780,16 +809,28 @@ function renderAbout() {                // the one footer line: version, license
 }
 
 // ---------------------------------------------------------------- fetching, and holding the last picture while it reloads
-async function get(path) { const r = await fetch(path, {cache: 'no-store'}); if (!r.ok) throw new Error(path + ' ' + r.status); return r.json(); }
-function online(ok) { $('banner').style.display = ok ? 'none' : 'block'; document.body.classList.toggle('offline', !ok); if (!ok) chip('chip-door', false, '', 'gateway: unreachable'); }
+async function get(path) {      // throws with .status when the gateway answered with an error, without it when it could not be reached
+  const r = await fetch(path, {cache: 'no-store'});
+  if (!r.ok) { let said = ''; try { said = (await r.json()).error || ''; } catch (_) {} throw Object.assign(new Error(`${path.split('?')[0]}: HTTP ${r.status}${said ? ' ' + said : ''}`), {status: r.status}); }
+  return r.json();
+}
+function online(ok, e) {        // unreachable (no answer) and answering with an error are told apart
+  const answered = !ok && e && e.status;
+  $('banner').style.display = ok ? 'none' : 'block'; document.body.classList.toggle('offline', !ok && !answered);
+  if (ok) return;
+  $('banner').replaceChildren(...(answered
+    ? [el('b', {}, 'Gateway error. '), el('span', {class: 'ink2'}, e.message + '; recorded for localmodels errors. This page retries automatically.')]
+    : [el('b', {}, 'Gateway unreachable. '), el('span', {class: 'ink2'}, 'Start it with ', el('code', {}, 'localmodels start'), '; this page reconnects automatically.')]));
+  chip('chip-door', false, '', answered ? `gateway: HTTP ${e.status}` : 'gateway: unreachable');
+}
 async function tick(name, fn) {                              // one fetch of each kind at a time: a slow door never piles them up
   if (inflight[name]) return;
   inflight[name] = true;
   try { await fn(); } finally { inflight[name] = false; }
 }
-const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); online(true); renderNow(); } catch (e) { online(false); } });
-const tickHistory = () => tick('history', async () => { try { H = await get('/hub/history?minutes=' + RANGE); renderCharts(); } catch (e) {} });
-const tickRecent = () => tick('recent', async () => { try { R = await get('/hub/recent?n=40'); renderRecent(); } catch (e) {} });
+const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); } catch (e) { online(false, e); return; } online(true); guard('page', renderNow); });
+const tickHistory = () => tick('history', async () => { try { H = await get('/hub/history?minutes=' + RANGE); } catch (e) { if (e.status) report('history', e); return; } guard('charts', renderCharts); });
+const tickRecent = () => tick('recent', async () => { try { R = await get('/hub/recent?n=40'); } catch (e) { if (e.status) report('recent', e); return; } guard('Recent requests', renderRecent); });
 
 $('range').addEventListener('click', ev => {
   const b = ev.target.closest('button'); if (!b) return;
@@ -801,7 +842,7 @@ $('range').addEventListener('click', ev => {
 document.addEventListener('click', ev => {
   const b = ev.target.closest('[data-table]'); if (!b) return;
   const id = b.dataset.table; tables[id] = !tables[id]; b.textContent = tables[id] ? 'chart' : 'table';
-  renderCharts();
+  guard('charts', renderCharts);
 });
 const THEMES = ['auto', 'light', 'dark'];
 function paintIcon() {             // the tab's dot: the page's own blue (--s1), in whichever theme is showing
@@ -813,12 +854,12 @@ try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', pain
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];
   applyTheme(next); try { localStorage.setItem('lm-theme', next); } catch (e) {}
-  renderCharts();
+  guard('charts', renderCharts);
 });
 try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
 paintIcon();
 try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
-let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { renderCharts(); if (S) { renderUsers(); renderClaude(); fitModels(); } renderRecent(); }, 150); });
+let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('Loaded models (fit)', fitModels); } guard('Recent requests', renderRecent); }, 150); });
 
 tickNow(); tickHistory(); tickRecent();
 setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000);

@@ -14,7 +14,7 @@ runs while nobody looks, except the memory sample.
 """
 import collections, json, os, re, threading, time
 
-from . import HOME, NAME, VERSION, crashes, dash, llmshare, maint, names, peers, recycle, sessions
+from . import HOME, NAME, VERSION, crashes, dash, errors, llmshare, maint, names, peers, recycle, sessions
 from . import names as names_mod          # colors() takes a parameter called names
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
@@ -93,7 +93,7 @@ def _snapshot():
     for f in llmshare.inflight():
         if f.get('state') == 'answering': holders[f.get('copy') or f.get('model')][names.project(f.get('project'))] += 1
     try: view = _cached('recycle-view', 10, lambda: recycle.view(lm['models']))
-    except Exception: view = dict(copies={}, job=None, last={})
+    except Exception as e: view = dict(copies={}, job=None, last={}); errors.record('snapshot: recycle view', e)
     job = view.get('job')
     fams = []
     for f in lm['families']:
@@ -118,14 +118,15 @@ def _snapshot():
                mac=dash.mac(), top=dash.every('top', 5, dash.top), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
     out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
-    except Exception: out['maintenance'] = None
+    except Exception as e: out['maintenance'] = None; errors.record('snapshot: maintenance', e)
     try:                                          # this Mac's peers (each one's state, the link, the families it serves) and this Mac as a peer
         out['peers'] = peers.view()
         for p in out['peers']:
             for f in (p.get('families') or {}).values(): f['holders'] = {names.project(k): v for k, v in (f.get('holders') or {}).items()}
         out['link'] = dict(me=peers.me(), serving=peers.serving(), listening=peers.LISTEN.get('words'), problems=peers.problems())
-    except Exception as e: out['peers'], out['link'] = [], dict(problems=[f'could not read the peers: {type(e).__name__}: {e}'])
+    except Exception as e: out['peers'], out['link'] = [], dict(problems=[f'could not read the peers: {type(e).__name__}: {e}']); errors.record('snapshot: peers', e)
     out['pool'] = dash.pool(out['mac'], out['peers'])                    # memory across this Mac and its peers
+    out['errors'] = errors.summary(10)                                   # anything the error record holds from the last 10 minutes
     out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'direct to LM Studio']
                            + [k for p in out['peers'] for f in (p.get('families') or {}).values() for k in f['holders']])
     return out
@@ -238,7 +239,7 @@ def sampler():
             if written % 240 == 0 and os.path.getsize(MEMORY) > 400_000:      # an hour of samples: keep only the last day
                 keep = [json.dumps([round(a), round(b, 1)] + ([o] if o else [])) for a, b, o in list(_mem)]
                 tmp = MEMORY + '.tmp'; open(tmp, 'w').write('\n'.join(keep) + '\n'); os.replace(tmp, MEMORY)
-        except Exception: pass
+        except Exception as e: errors.record('memory sampler', e)
         time.sleep(15)
 
 

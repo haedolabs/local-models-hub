@@ -80,7 +80,9 @@ def status():
         out['copies'] = {i: (f"{c['tokens']:,} tokens processed since {time.strftime('%H:%M', time.localtime(c['since']))}"
                              + (f" ({int(100 * c['share'])}% of its recycle threshold)" if c.get('share') is not None else '')) for i, c in v['copies'].items()}
         if v.get('job'): out['recycling'] = recycle.words(v['job'])
-    except Exception as e: out['copies'] = f'could not read: {e}'
+    except Exception as e:
+        out['copies'] = f'could not read: {e}'
+        from . import errors; errors.record('mcp status: recycle view', e, source='mcp')
     from . import maint
     mt = maint.view()
     if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
@@ -251,6 +253,7 @@ def _handle(mid, method, params):
         send({'jsonrpc': '2.0', 'id': mid, 'result': result})
     except Exception as e:                                     # a broken tool never takes the server down
         print(traceback.format_exc(), file=sys.stderr)
+        from . import errors; errors.record(f'mcp {method}', e, source='mcp')
         send({'jsonrpc': '2.0', 'id': mid, 'result': {'content': [{'type': 'text', 'text': f'error: {e}'}], 'isError': True}})
 
 

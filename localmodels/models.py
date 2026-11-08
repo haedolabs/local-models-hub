@@ -223,7 +223,7 @@ def keep():
     fams, room, did = conf.get('families') or {}, float(conf.get('headroom_gb', 8)), []
     try:
         if maint.tick(llmshare.inflight(), llmshare.requests_log(0.1)): did.append('maintenance begins: no batch requests in flight')
-    except Exception as e: did.append(f'maintenance check failed: {type(e).__name__}: {e}')
+    except Exception as e: did.append(f'maintenance check failed: {type(e).__name__}: {e}'); errors.record('instance manager: maintenance check', e)
     if maint.on():                                           # the person is working on LM Studio: note what is loaded, do nothing
         rows = llmshare.loaded(fresh=True)
         if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
@@ -240,7 +240,7 @@ def keep():
             time.sleep(1); began = time.time(); rows = llmshare.loaded(fresh=True, force=True)
             if not llmshare.read_ok(): return did
             busy = llmshare.busy_slots(); back = crashes.watch(rows, listed_at=began, busy=busy)
-    except Exception as e: back = []; did.append(f'crash watcher failed: {type(e).__name__}: {e}')
+    except Exception as e: back = []; did.append(f'crash watcher failed: {type(e).__name__}: {e}'); errors.record('instance manager: crash watcher', e)
     have = {r['id'] for r in rows}
     down = set((crashes._read(fresh=True).get('down') or {}))
     todo = []
@@ -259,7 +259,7 @@ def keep():
     try:
         w = recycle.give_up_if_stuck() or recycle.plan(rows, busy)
         if w: did.append(w)
-    except Exception as e: did.append(f'recycle planner failed: {type(e).__name__}: {e}')
+    except Exception as e: did.append(f'recycle planner failed: {type(e).__name__}: {e}'); errors.record('instance manager: recycle planner', e)
     job, ready = recycle.ready(rows, busy)
     if down: job, ready = None, False                        # a family down after a crash: its reload first, no recycle in the same pass
     if not todo and not back and not boot and not (job and ready): return did

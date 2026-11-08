@@ -300,7 +300,9 @@ def snapshot():
     extra = {}
     for title, fn in PROVIDERS:
         try: extra[title] = fn()
-        except Exception as e: extra[title] = [dict(kind='note', what=f'could not read: {e}', since=time.time())]
+        except Exception as e:
+            extra[title] = [dict(kind='note', what=f'could not read: {e}', since=time.time())]
+            from . import errors; errors.record(f'dash: {title}', e)
     from . import peers
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
                 last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
