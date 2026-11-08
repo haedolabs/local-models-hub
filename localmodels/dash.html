@@ -704,7 +704,8 @@ function renderModels() {
         if (sv_.band && sv_.band.soft) bar.append(el('i', {style: `left:${Math.round(100 * sv_.band.soft / sv_.band.tokens)}%`, title: 'soft threshold: recycled when idle'}));
         parts.push(el('div', {class: 'band'}, `loaded ${clock(sv_.since)} · ${compact(sv_.tokens)} tokens since`, sv_.band ? bar : el('span', {class: 'muted'}, '· recycling off'),
           sv_.drift ? el('span', {class: 'badge warn'}, sv_.drift) : ''),
-          el('span', {class: 'band-end'}, sv_.band ? `${Math.round((sv_.share || 0) * 100)}% of ${compact(sv_.band.tokens)}` : ''));
+          el('span', {class: 'band-end', title: sv_.band ? `recycled at ${compact(sv_.band.tokens)} tokens processed` + (sv_.band.written ? ` or ${compact(sv_.band.written)} written` : '') + ` (now ${compact(sv_.tokens)} processed, ${compact(sv_.written || 0)} written)` : ''},
+            sv_.band ? `${Math.round((sv_.share || 0) * 100)}% of ` + (sv_.by === 'written' ? `${compact(sv_.band.written)} written` : sv_.by === 'requests' ? `${sv_.band.requests} requests` : compact(sv_.band.tokens)) : ''));
       }
       return el('div', {class: 'copy'}, ...parts);
     });
