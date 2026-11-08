@@ -511,7 +511,7 @@ function renderModels() {
         const sh = sv_.share == null ? null : Math.min(1, sv_.share);
         const bar = el('div', {class: 'bar'}, el('div', {style: `width:${Math.round((sh || 0) * 100)}%;background:${sh > 0.95 ? 'var(--critical)' : sh > 0.7 ? 'var(--warning)' : 'var(--s1)'}`}));
         if (sv_.band && sv_.band.soft) bar.append(el('i', {style: `left:${Math.round(100 * sv_.band.soft / sv_.band.tokens)}%`, title: 'the soft limit: recycled when idle'}));
-        parts.push(el('div', {class: 'band'}, `since ${clock(sv_.since)}: ${compact(sv_.tokens)} tokens`, sv_.band ? bar : el('span', {class: 'muted'}, '· not recycled'),
+        parts.push(el('div', {class: 'band'}, `loaded ${clock(sv_.since)} · ${compact(sv_.tokens)} tokens since`, sv_.band ? bar : el('span', {class: 'muted'}, '· not recycled'),
           sv_.band ? `${Math.round((sv_.share || 0) * 100)}% of ${compact(sv_.band.tokens)}` : '', sv_.drift ? el('span', {class: 'badge warn'}, sv_.drift) : ''));
       }
       return el('div', {class: 'copy'}, ...parts);
@@ -524,7 +524,7 @@ function renderModels() {
 function renderUsers() {
   const box = $('users'), us = S.users;
   if (!us.length) { box.replaceChildren(el('div', {class: 'empty'}, 'Nothing is using a local model right now.')); return; }
-  const head = ['project', 'what', 'now', 'model', 'since', 'Claude session', 'progress or step'].map(h => el('th', {}, h));
+  const head = ['project', 'what', 'now', 'model', 'running', 'Claude session', 'progress or step'].map(h => el('th', {}, h));
   const rows = [];
   for (const u of us) {
     const b = u.batch || {};
@@ -533,13 +533,19 @@ function renderUsers() {
     else if (u.direct) now = el('span', {class: 'badge'}, `${u.direct} connected`);
     else now = el('span', {class: 'muted'}, 'between requests');
     const flag = u.direct && u.via !== 'hub' ? el('div', {}, el('span', {class: 'badge warn'}, 'straight to LM Studio, not through the hub')) : '';
-    const prog = b.total ? el('div', {}, `${b.done} of ${b.total} done` + (b.left ? ` · ~${left(b.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${b.pct || 0}%`}))) : el('span', {class: 'muted', title: u.step || ''}, u.step || '–');
+    const label = b.kind === 'phase' ? b.name : [b.name, b.phase].filter(Boolean).join(' · ');
+    const when = b.left ? `~${left(b.left)}` : b.total && b.done < b.total ? 'estimating after the first one' : '';
+    const why = b.basis === 'the last run' ? 'from the last run of this name' : b.basis === 'this run' || b.basis === 'this run so far' ? 'from this run\'s pace' : '';
+    const prog = b.total ? el('div', {title: [label, why, b.started ? 'started ' + clock(b.started) : ''].filter(Boolean).join(' · ')},
+        label ? el('div', {class: 'muted'}, label) : '',
+        `${b.done} of ${b.total} done` + (when ? ` · ${when}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${b.pct || 0}%`})))
+      : el('span', {class: 'muted', title: u.step || ''}, u.step || '–');
     rows.push(el('tr', {},
       el('td', {}, el('span', {class: 'dot', style: `background:${color(u.project)}`}), u.project),
       el('td', {}, kindWords(u.kind), u.app ? el('div', {class: 'muted'}, u.app) : ''),
       el('td', {}, now, flag),
       el('td', {}, (u.models || []).map(short).join(', ') || '–'),
-      el('td', {class: 'num'}, ago(u.since)),
+      el('td', {class: 'num', title: (b.started ? 'this run started ' : 'using a model since ') + clock(u.since)}, ago(u.since)),
       el('td', {title: u.title || ''}, u.title || (u.session ? 'a Claude session' : el('span', {class: 'muted'}, '–'))),
       el('td', {}, prog)));
     for (const j of (b.now || []).slice(0, 8)) {

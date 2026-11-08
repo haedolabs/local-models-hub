@@ -5,7 +5,7 @@
 For every request that makes a model work (chat, completions, embeddings, responses, messages):
   1. who: the project, the Claude Code session and the program, from the header X-Project (or a /p/<project>/ path),
      or else from the program on the other end of the connection (whois). X-Kind says what kind of run it is; X-Step
-     what this request is for (the dash shows it).
+     what this request is for (the dash shows it); X-Run, X-Run-Total and X-Run-Done, the whole run it belongs to (runs.py).
   2. a lease for that program on that model, kept two minutes after its last request, so no swap unloads it mid-run.
   3. a slot (llmshare.slot_any): all projects together never send LM Studio more than the model answers at once. A chat
      or ask request (a person is waiting) gets the next free slot before queued batch requests; otherwise first come,
@@ -30,7 +30,7 @@ Serves this Mac only (127.0.0.1 and ::1) and refuses web pages from other sites 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, crashes, llmshare, recycle, web, whois
+from . import VERSION, crashes, llmshare, recycle, runs, web, whois
 
 PORT = llmshare.HUB_PORT
 UP = llmshare.LMSTUDIO
@@ -332,6 +332,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         kind = llmshare.clean(self.headers.get('X-Kind'), 20).lower()
         if kind not in llmshare.KINDS: kind = own_kind(pid) or 'other'
         step = llmshare.clean(self.headers.get('X-Step'), 120) or None
+        run = runs.from_headers(self.headers)                                  # X-Run, X-Run-Total, X-Run-Done: the whole run
         model = llmshare.clean(j.get('model') or next((llmshare.family(r['id']) for r in llmshare.loaded()), None) or 'unknown', 200)
         try: xt = float(self.headers.get('X-Timeout') or 0)
         except ValueError: xt = 0
@@ -340,7 +341,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         touch(holder, project, kind, model, who, +1)
         mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{next(_n)}.json')
         rec = dict(hub_pid=os.getpid(), pid=pid, project=project, session=who.get('session'), host_session=who.get('host_session'),
-                   kind=kind, model=model, app=who.get('app'), since=t0, state='waiting for a turn', **({'step': step} if step else {}))
+                   kind=kind, model=model, app=who.get('app'), since=t0, state='waiting for a turn', **({'step': step} if step else {}), **run)
         try: os.makedirs(llmshare.INFLIGHT, exist_ok=True); llmshare._write(mark, rec)
         except OSError: pass
         code, usage, waited, chosen, held, note, tries = 0, {}, 0.0, model, 0.0, None, 0
@@ -391,7 +392,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                      kind=kind, model=model, copy=chosen, endpoint=path.split('?')[0].rstrip('/').rsplit('/', 1)[-1], status=code, stream=bool(j.get('stream')),
                      seconds=round(time.time() - t0, 2), waited=round(held + (waited or 0), 2), prompt_tokens=p, completion_tokens=c,
                      **({'held': round(held, 2)} if held else {}), **({'note': note} if note else {}), **({'step': step} if step else {}),
-                     **({'tries': tries} if tries > 1 else {})))
+                     **({'tries': tries} if tries > 1 else {}), **run))
 
     def forward(self, method, path, body, stream, rename=None, model=None):
         """Pass one request to LM Studio and its answer back; rename=(copy, model): the answer names the model asked

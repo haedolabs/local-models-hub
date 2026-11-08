@@ -293,6 +293,18 @@ def run(box):
             except urllib.error.HTTPError as e: code = e.code
         t('an unload sent through the door, in any case, naming the copy another run uses: refused (409)', code == 409, code)
 
+        plan()
+        code, r, h = ask(tag='run', headers={'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '17', 'X-Step': 'extract 18 of 420'})
+        row_ = rows_logged()[0]
+        t('the run headers are logged with the request (name, total, done), never anything else about it',
+          (row_.get('run'), row_.get('run_total'), row_.get('run_done'), row_.get('step')) == ('report', 420, 17, 'extract 18 of 420'), {k: row_.get(k) for k in ('run', 'run_total', 'run_done')})
+        plan('slow'); Fake.slow = 2.0
+        th = threading.Thread(target=ask, kwargs=dict(tag='runlive', headers={'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '18'})); th.start()
+        time.sleep(0.8)
+        live = [f for f in llmshare.inflight() if f.get('run') == 'report']
+        th.join(30); Fake.slow = 3.0
+        t('a request in flight carries its run too, so the dash moves on at once', live and live[0].get('run_done') == 18, live)
+
         print("the door: every API LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, LM Studio's own)")
         def streamed(what, path):
             plan(what); crashes.WAKE.clear(); crashes._seen_state['nudged'] = 0

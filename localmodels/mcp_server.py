@@ -20,7 +20,7 @@ INSTRUCTIONS = (
     "(the full rules: the guide tool). To use a local model, send OpenAI-style requests to http://localhost:1235/v1 or Anthropic-style ones to http://localhost:1235 (the hub), "
     "never straight to LM Studio's port 1234: the hub takes turns for everyone, names your project and session itself, and "
     "logs who used what (never the content). Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
-    "X-Step (what the request is for). The status tool says which models are loaded and how many answers at once they give: "
+    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and the time left. The status tool says which models are loaded and how many answers at once they give: "
     "a batch should send that many (the hub gives each a turn; the rest wait). For bulk reading jobs, use ask and batch here "
     "(local agents that only read your project's folder) instead of Claude multi-agent workflows. "
     "Their answers are leads to check, not verdicts. Never stop LM Studio's server; before unloading or reloading a model, call "
