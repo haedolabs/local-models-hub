@@ -14,6 +14,29 @@ LM Studio serves an OpenAI- and Anthropic-compatible API on `localhost:1234` wit
 
 Standard-library Python 3.9+, no third-party dependencies. macOS on Apple silicon (launchd, `lms`, `lsof`, `libproc` and `sysctl` process introspection). MIT.
 
+## Dashboard
+
+Close-ups from the same run.
+
+<img src="docs/models-dark.png" alt="Loaded models card: qwen/qwen3.6-35b-a3b, two replicas with 4 slots each and 4 slots on the peer m4pro, all in use and colored by project; replica 1 at 75% and replica 2 at 93% of 150K tokens written; the peer at 41 ms round-trip time via Thunderbolt Bridge">
+
+**Loaded models:** one module per slot, in the color of the project using it. Each local replica's bar is its progress to the recycle threshold, by tokens processed or written since load, whichever is further along (here written: 75% and 93% of 150K). The peer's row gives its free slots for this gateway, its requests in flight from it and the link's round-trip time.
+
+<img src="docs/concurrency-dark.png" alt="Concurrent requests by project over an hour: research, evals and docs fill 12 slots, with dips to 8 at recycles, this Mac's marked by dotted lines, while the queued line rises from 2 to 6">
+
+**Concurrent requests, by project,** over the demo hour: 12 in flight, 2 waiting. Dotted lines mark this Mac's recycles (the unmarked dip at 1:23 PM is the peer recycling its own instance): while a replica drains and reloads, 8 run and the rest wait in the gateway's queue (the light line). All 3,127 requests of the hour returned 200, 898 of them served by the peer.
+
+<p>
+  <img src="docs/tiles-1-dark.png" width="823" alt="Dashboard tiles: 12 of 12 slots active; 2 queued; 275 tokens/s in the last minute; 2,992 requests in the last hour from 3 projects"><br>
+  <img src="docs/tiles-2-dark.png" width="679" alt="Dashboard tiles: memory 149 of 176 GB (m5max 106 of 128, m4pro 43 of 48); SoC load GPU 100%, CPU 21%, m4pro GPU 99%, CPU 10%; 1 Claude Code session working, 2 idle">
+</p>
+
+**Tiles:** requests in flight against every slot the gateway can use (local and peer), the admission queue, throughput, requests in the last hour, memory as one pool across both Macs, GPU and CPU load per Mac, and Claude Code sessions.
+
+<img src="docs/clients-dark.png" alt="Clients card: the docs batch, 2 active and 1 queued for 59 minutes, with batch and job progress bars at 1271 of 1305, 2 min left, done about 01:36 PM">
+
+**Clients:** each process with a request in flight or a lease, with its batch progress (`X-Run`, `X-Run-Total`, `X-Run-Done`) and its job's (`X-Step: <job> N of M`), each with the remaining time and a finish time measured from the run's own throughput.
+
 ## Features
 
 ### Gateway (`localhost:1235`)
@@ -59,34 +82,18 @@ Every host runs its own hub; the one the clients use (the front) lists peer gate
 - **`off`:** the engine log written during the window is skipped, so restarts are not recorded as crashes, and the families loaded at the window's start are reloaded.
 
 ### Observability
-- **Dashboard** at `http://localhost:1235`: one page, no build step, fits one screen. It shows:
+- **Dashboard** at `http://localhost:1235` ([pictures](#dashboard)): one page, no build step, fits one screen. It shows:
   - per-instance slot occupancy by project (one module per slot), and tokens processed against the recycle threshold; the card's layout scales to its space for any number of models, folding detail as models are added;
   - active clients with batch and job progress;
   - Claude Code sessions;
   - memory as one pool across this Mac and its peers, with a per-host breakdown;
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory (stacked by host);
   - crashes and recycles marked on the time series (the full record: `localmodels crashes`).
-- **Screenshot mode and a demo workload.** `localmodels present on [for 2h] [show a,b]` shows the named projects (by default the demo's and the hub's own) by name and every other project as "other" on every screen until it ends: no script names, batch names, Claude Code session titles or error details. `localmodels demo [--minutes 60]` runs three generic projects' batches over records it makes up (no file is read), with enough requests at once to fill every slot, this Mac's and its peers', plus two waiting. The pictures here were made with both.
+- **Screenshot mode and a demo workload.** `localmodels present on [for 2h] [show a,b]` shows the named projects (by default the demo's and the hub's own) by name and every other project as "other" on every screen until it ends: no script names, batch names, Claude Code session titles or error details. `localmodels demo [--minutes 60]` runs three generic projects' batches over records it makes up (no file is read), with enough requests at once to fill every slot, this Mac's and its peers', plus two waiting. The pictures above were made with both.
 - **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/errors`, `/hub/peer` (this Mac's report as a peer) and `/hub/link` (this Mac's view of its peers; `POST` polls them now).
 - **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `errors`, `maintenance`, `name`, `present`, `demo`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
 
-<img src="docs/tiles-dark.png" alt="Dashboard tiles: 12 of 12 slots active; 2 queued; 275 tokens/s; 2,992 requests in the last hour from 3 projects; memory 149 of 176 GB (m5max 106 of 128, m4pro 43 of 48); SoC load GPU 100%, CPU 21%, m4pro GPU 99%, CPU 10%; 1 Claude Code session working">
-
-**Tiles:** requests in flight against every slot the gateway can use (local and peer), the admission queue, throughput, requests in the last hour, memory as one pool across both Macs, GPU and CPU load per Mac, and Claude Code sessions.
-
-<img src="docs/models-dark.png" width="719" alt="Loaded models card: qwen/qwen3.6-35b-a3b, two replicas with 4 slots each and 4 slots on the peer m4pro, all in use and colored by project; replica 1 at 75% and replica 2 at 93% of 150K tokens written; the peer at 41 ms round-trip time via Thunderbolt Bridge">
-
-**Loaded models:** one module per slot, in the color of the project using it. Each local replica's bar is its progress to the recycle threshold, by tokens processed or written since load, whichever is further along (here written: 75% and 93% of 150K). The peer's row gives its free slots for this gateway, its requests in flight from it and the link's round-trip time.
-
-<img src="docs/concurrency-dark.png" alt="Concurrent requests by project over an hour: research, evals and docs fill 12 slots, with dips to 8 at recycles, this Mac's marked by dotted lines, while the queued line rises from 2 to 6">
-
-**Concurrent requests, by project,** over the demo hour: 12 in flight, 2 waiting. Dotted lines mark this Mac's recycles (the unmarked dip at 1:23 PM is the peer recycling its own instance): while a replica drains and reloads, 8 run and the rest wait in the gateway's queue (the light line). All 3,127 requests of the hour returned 200, 898 of them served by the peer.
-
-<img src="docs/clients-dark.png" width="714" alt="Clients card: the docs batch, 2 active and 1 queued for 59 minutes, with batch and job progress bars at 1271 of 1305, 2 min left, done about 01:36 PM">
-
-**Clients:** each process with a request in flight or a lease, with its batch progress (`X-Run`, `X-Run-Total`, `X-Run-Done`) and its job's (`X-Step: <job> N of M`), each with the remaining time and a finish time measured from the run's own throughput.
-
-`localmodels` prints the same state in a terminal, during the same run:
+`localmodels` prints the same state in a terminal, during the run pictured above:
 
 ```text
 gateway: listening on http://localhost:1235
