@@ -32,7 +32,7 @@ family is loaded at start, so one loader runs, never two.
 """
 import json, os, re, subprocess, time, urllib.error, urllib.request
 
-from . import crashes, llmshare, maint, peers, recycle
+from . import crashes, errors, llmshare, maint, peers, recycle
 
 GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resource guardrail', re.I)
 GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # sets the GPU's limit at every boot (a person installs it)
