@@ -18,3 +18,4 @@ import os
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION = '1.2.2'
+NAME = 'Local Models Hub'                    # the product's name wherever a person sees it: the tab, the page, the corner

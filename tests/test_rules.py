@@ -469,14 +469,64 @@ def test_privacy_check(box):
 
 def test_about(box):
     print("the dashboard's corner: the version, the license and the source, read from the hub's own files at run time")
-    from localmodels import VERSION, web
+    from localmodels import NAME, VERSION, web
     home = os.path.join(box, 'about'); os.makedirs(os.path.join(home, '.claude-plugin'))
     open(os.path.join(home, 'LICENSE'), 'w').write('MIT License\n\nCopyright (c) 2026 Pat Sample\n\nPermission is hereby granted...\n')
     open(os.path.join(home, '.claude-plugin', 'plugin.json'), 'w').write(json.dumps(dict(name='x', repository='https://example.org/pat/hub')))
     a = web.about(home)
-    t('version, license, copyright and source, as the files say', a == dict(version=VERSION, license='MIT License', copyright='© 2026 Pat Sample',
+    t('version, license, copyright and source, as the files say', a == dict(name=NAME, version=VERSION, license='MIT License', copyright='© 2026 Pat Sample',
       source='https://example.org/pat/hub'), a)
-    t('with neither file (an old install), the version alone', web.about(os.path.join(box, 'nowhere')) == dict(version=VERSION, license=None, copyright=None, source=None))
+    t('with neither file (an old install), the version alone', web.about(os.path.join(box, 'nowhere')) == dict(name=NAME, version=VERSION, license=None, copyright=None, source=None))
+
+
+def test_names(box):
+    print('names: what every screen calls a project, its batches and jobs, set by the person; private shows only those')
+    from localmodels import llmshare as L, names
+    names.FILE = os.path.join(box, 'names.json')
+    t('nothing set: every name shows as it is seen', names.project('folder-123') == 'folder-123' and names.step('proj', 'extract files 8 of 360') == 'extract files 8 of 360')
+    names.set_project('folder-123', 'casework')
+    t("a project's folder name shows as the name set", names.project('folder-123') == 'casework')
+    s = names.session(dict(id='s1', project='folder-123', title='Secret title'))
+    t('a Claude session in that folder shows under the name; its title stays while the project is not private', s['project'] == 'casework' and s['title'] == 'Secret title', s)
+    rows = [dict(project='folder-123', kind='batch', seconds=10, waited=0, prompt_tokens=5, completion_tokens=5, step='notes'),
+            dict(project='casework', kind='batch', seconds=10, waited=0, prompt_tokens=5, completion_tokens=5, step='extract files 3 of 9')]
+    by = L.by_project([names.request(r) for r in rows])
+    t('two names seen (a folder and a header) show as one project, their counts together', list(by) == ['casework'] and by['casework']['requests'] == 2, by)
+    names.set_private('casework', True)
+    s = names.session(dict(id='s1', project='folder-123', title='Secret title'))
+    t('private: no Claude session title', s['project'] == 'casework' and s['title'] is None, s)
+    t('private: a step in free words is hidden; one that counts keeps only its count', names.step('folder-123', 'reading notes.pdf') is None
+      and names.step('casework', 'extract files 8 of 360') == '8 of 360', (names.step('folder-123', 'reading notes.pdf'), names.step('casework', 'extract files 8 of 360')))
+    names.set_label('casework', 'extract files', 'Exhibit text')
+    names.set_label('casework', 'nightly_run.py', 'Nightly check')
+    names.set_label('casework', 'night run', 'Nightly batch')
+    t('a job named: its label shows, with its count', names.step('casework', 'extract files 8 of 360') == 'Exhibit text 8 of 360')
+    u = names.user(dict(project='casework', app='nightly_run.py', title='Secret title', step='extract files 8 of 360',
+                        batch=dict(name='night run', phase='extract files', total=9, done=3), job=dict(name='extract files', total=360, done=8)))
+    t('a program on the dash: project, script, batch and job show their labels; the title is hidden',
+      (u['project'], u['app'], u['title'], u['batch']['name'], u['batch']['phase'], u['job']['name'], u['step'])
+      == ('casework', 'Nightly check', None, 'Nightly batch', 'Exhibit text', 'Exhibit text', 'Exhibit text 8 of 360'), u)
+    u = names.user(dict(project='casework', app='other.py', title='t', step=None, batch=dict(name='unnamed run', total=4, done=1), job=None))
+    t('private: a script or batch with no label shows no name of its own', u['app'] is None and u['batch']['name'] is None, u)
+    names.set_private('casework', False)
+    u = names.user(dict(project='casework', app='other.py', title='t', step=None, batch=dict(name='unnamed run', total=4, done=1), job=None))
+    t('public again: unlabelled names show as they are', u['app'] == 'other.py' and u['batch']['name'] == 'unnamed run' and u['title'] == 't', u)
+    from localmodels import web
+    real_colors, web.COLORS = web.COLORS, os.path.join(box, 'colors.json')
+    now_ = time.time()
+    with open(L.REQUESTS, 'a') as f:
+        for k in range(3): f.write(json.dumps(dict(at=now_ - 60 * k - 5, project='folder-123', kind='batch', status=200, seconds=4, waited=0, completion_tokens=10)) + '\n')
+    h = web._history(60)
+    rec = web.recent(5)
+    t('the charts and the last requests show the name set, never the folder name',
+      'folder-123' not in h['answering'] and 'casework' in h['answering'] and 'folder-123' not in h['requests']['by']
+      and all(r['project'] != 'folder-123' for r in rec), (list(h['answering']), list(h['requests']['by']), [r['project'] for r in rec]))
+    t('the colors sent to the page cover only the names shown; a renamed name gives up its slot',
+      'folder-123' not in web.colors(['casework']) and 'folder-123' not in json.load(open(web.COLORS))['slots'], json.load(open(web.COLORS)))
+    web.COLORS = real_colors
+    names.forget('casework', 'night run'); names.forget('folder-123')
+    t('forget a label, then a project name: back to as seen', names.project('folder-123') == 'folder-123' and names.label('casework', 'night run') == 'night run')
+    t('the names file stays a plain JSON object', isinstance(json.load(open(names.FILE)), dict))
 
 
 def main():
@@ -495,6 +545,7 @@ def main():
         test_maintenance(box)
         test_privacy_check(box)
         test_about(box)
+        test_names(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

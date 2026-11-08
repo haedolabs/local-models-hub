@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Local models</title>
+<title>__HUB_NAME__</title>
+<link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='%233987e5'/%3E%3C/svg%3E">
 <style>
 :root {
   color-scheme: light;
@@ -128,7 +129,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
 <body>
 <div class="wrap">
   <header>
-    <div><h1 style="display:inline">Local models</h1><span class="sub">every project and Claude session using LM Studio on this Mac</span></div>
+    <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">every project and Claude session using LM Studio on this Mac</span></div>
     <div class="chips"><span>Charts: the last</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
       <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
@@ -639,7 +640,7 @@ function renderMac() {
   const ab = S.about;                // the version this door runs, its license and its source, from the hub's own files
   if (ab) {
     const link = (href, text) => el('a', {href, target: '_blank', rel: 'noopener noreferrer'}, text);
-    const bits = [el('span', {}, 'local-models hub ', el('b', {}, 'v' + ab.version))];
+    const bits = [el('span', {}, (ab.name || 'Local Models Hub') + ' ', el('b', {}, 'v' + ab.version))];
     if (ab.license) bits.push(ab.source ? link(ab.source.replace(/\/$/, '') + '/blob/main/LICENSE', ab.license) : ab.license);
     if (ab.copyright) bits.push(ab.copyright);
     if (ab.source) bits.push(link(ab.source, 'source'));
@@ -672,13 +673,19 @@ document.addEventListener('click', ev => {
   renderCharts();
 });
 const THEMES = ['auto', 'light', 'dark'];
-function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; }
+function paintIcon() {             // the tab's dot: the page's own blue (--s1), in whichever theme is showing
+  const c = getComputedStyle(document.documentElement).getPropertyValue('--s1').trim() || '#3987e5';
+  $('favicon').href = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5" fill="${c}"/></svg>`);
+}
+function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; paintIcon(); }
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paintIcon); } catch (e) {}
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];
   applyTheme(next); try { localStorage.setItem('lm-theme', next); } catch (e) {}
   renderCharts();
 });
 try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
+paintIcon();
 try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
 let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { renderCharts(); if (S) { renderUsers(); renderClaude(); } renderRecent(); }, 150); });
 
