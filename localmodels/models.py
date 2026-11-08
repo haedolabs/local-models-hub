@@ -212,8 +212,45 @@ def load(key, ident, context, parallel):
 
 
 def unload(ident):
+    """Unload one instance by its exact identifier: LM Studio's REST API (POST /api/v1/models/unload {instance_id}) names an
+    instance. `lms unload` only where that API is missing (an older LM Studio): there LM Studio's server resolves the name it
+    is given by model key too, so the bare id of a family's first replica (which is also the model key) can take a sibling;
+    measured: a recycle of the first replica unloaded the second. -> (ok, words)."""
     if not _ok_id(ident): return False, f'refused: {ident!r} is not a model id'
+    req = urllib.request.Request(llmshare.LMSTUDIO + '/api/v1/models/unload', data=json.dumps(dict(instance_id=ident)).encode(),
+                                 headers={'Content-Type': 'application/json'})
+    try:
+        d = json.load(urllib.request.urlopen(req, timeout=120))
+        if isinstance(d, dict) and d.get('instance_id') == ident: return True, f'{ident} unloaded'
+    except urllib.error.HTTPError as e:                     # 404 model_not_found: the API is there and the instance is not
+        try: err = (json.loads(e.read() or b'{}') or {}).get('error')
+        except (ValueError, AttributeError): err = None
+        if e.code == 404 and isinstance(err, dict) and err.get('type') == 'model_not_found': return False, f'{ident} is not loaded'
+    except (OSError, ValueError): pass                       # no answer, or an LM Studio without this API: the command
     return _lms('unload', ident, timeout=120)
+
+
+def _listed():
+    """The instance ids LM Studio's server lists now (its own API, read fresh; `lms ps` when that does not answer), or None."""
+    llmshare._api['at'] = 0.0
+    ids = llmshare.api_models()
+    if ids is not None: return set(ids)
+    rows = llmshare.loaded(fresh=True, force=True)
+    return {r['id'] for r in rows} if llmshare.read_ok() else None
+
+
+def unload_exactly(ident, wait=15):
+    """Unload one instance and see what went: -> (ok, words, gone): gone is every id that left LM Studio's listing, which
+    should be [ident] alone. It waits until something went (up to `wait` seconds), never longer."""
+    before = _listed() or set()
+    ok, words = unload(ident)
+    end, now = time.time() + wait, None
+    while True:
+        now = _listed()
+        if now is not None and (ident not in now or before - now): break
+        if time.time() >= end: break
+        time.sleep(0.5)
+    return ok, words, sorted(before - now) if now is not None else []
 
 
 def keep():
@@ -390,9 +427,20 @@ def _recycle(job, fams):
     """Unload a drained copy and load it again with its family's settings (under the swap lock). -> words."""
     copy, base, t0 = job['copy'], job['family'], time.time()
     f = fams.get(base) or {}
+    key, context, parallel = f.get('key') or base, f.get('context') or 32768, f.get('parallel') or 4
     recycle.reloading(copy)
-    unload(copy)
-    ok, out = load(f.get('key') or base, copy, f.get('context') or 32768, f.get('parallel') or 4)
+    uok, uwords, gone = unload_exactly(copy)
+    wrong = [i for i in gone if i != copy]
+    if wrong or copy not in gone:                            # another instance went (its requests are resent), or none did
+        back = []
+        for i in wrong:
+            ok, out = load(key, i, context, parallel)
+            back.append(f'{i} loaded again' if ok else f'{i} could not be loaded again: {refused(out) or out[-160:]}')
+        ensure_server()
+        why = (f"LM Studio unloaded {', '.join(wrong)} when asked to unload {copy}; " + '; '.join(back)) if wrong else f'{copy} was not unloaded ({uwords[-160:]})'
+        recycle.given_up(copy, why)
+        return [f'{copy}: recycle stopped: {why}; tried again in {recycle.RETRY // 60} min']
+    ok, out = load(key, copy, context, parallel)
     ensure_server()
     recycle.done(copy, ok, time.time() - t0, '' if ok else refused(out) or out)
     return [f"{copy} recycled in {time.time() - t0:.0f} s: {job['why']}" if ok else f'{copy}: reload after recycle failed: {refused(out) or out[-200:]}']
@@ -422,7 +470,14 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         have = {r['id'] for r in llmshare.loaded()}
         add = [c for c in want if c not in have or c in drop]
         if dry: return 0, f"would unload {', '.join(drop) or 'nothing'}; would load {', '.join(add) or 'nothing'}"
-        for i in drop: unload(i)
+        for _ in range(2):                                   # what is still listed is unloaded again, once
+            for i in drop: unload(i)
+            now = _listed()
+            if now is None: break
+            drop = [i for i in drop if i in now]
+            if not drop: break
+        now = _listed()
+        if now is not None: add = [c for c in want if c not in now or c in drop]   # a wanted one that went is loaded back
         for c in add:
             ok, out = load(key, c, context, parallel)
             if not ok: return 1, f'could not load {c}: {out[-300:]}'
