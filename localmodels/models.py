@@ -14,7 +14,7 @@ all than one copy of eight (GUIDE.md, "Where to send requests"). So:
 Every load and unload holds llmshare's swap lock, so the keeper and a swap never interleave. LM Studio's server is
 started only when it is down: `lms server start` on a running server restarts it and cuts every request in flight.
 """
-import re, subprocess, time, urllib.error, urllib.request
+import json, re, subprocess, time, urllib.error, urllib.request
 
 from . import crashes, llmshare, recycle
 
@@ -43,6 +43,48 @@ def free_gb():
     get = lambda k: int((re.search(rf'{k}:\s+(\d+)', vm) or [0, 0])[1])
     held = get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')
     return (total - held * page) / 2**30                   # what programs hold (models included), not the file cache
+
+
+def downloaded():
+    """The models LM Studio has downloaded (`lms ls --json`), or None when lms cannot say."""
+    ok, out = _lms('ls', '--json', timeout=60)
+    try: return json.loads(out) if ok else None
+    except ValueError: return None
+
+
+def mem_gb():
+    """The Mac's memory in GB (0 when unreadable)."""
+    try: return int(subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True, timeout=10).stdout.strip() or 0) / 2**30
+    except (OSError, subprocess.SubprocessError, ValueError): return 0
+
+
+def first_settings(listing, mem):
+    """The settings a fresh install writes, fitted to this Mac: `listing` is `lms ls --json` (None when unknown), `mem` its
+    memory in GB. Room for models is three quarters of memory (what macOS lets the GPU hold by default), and a loaded copy
+    is taken as 1.2 times its file (the rest is its context). The repo's measured default stands when its model is
+    downloaded and two copies fit; else the largest model that fits once, as two copies when two fit."""
+    default = json.load(open(llmshare.MODELS_DEFAULT))
+    base = dict(batch_at_once=default.get('batch_at_once', 8), headroom_gb=8 if mem >= 48 else 4)
+    if listing is None:
+        return dict(families={}, **base, why="LM Studio's lms command could not list the downloaded models: the keeper manages nothing until a family is added here")
+    llms = [m for m in listing if m.get('type') == 'llm' and m.get('modelKey') and m.get('sizeBytes')]
+    room, need = mem * 0.75, lambda m: m['sizeBytes'] / 2**30 * 1.2
+    for key, fam in default.get('families', {}).items():
+        m = next((m for m in llms if m['modelKey'] == fam.get('key', key)), None)
+        if m and 2 * need(m) <= room: return dict(default, headroom_gb=base['headroom_gb'])
+    fits = sorted((m for m in llms if need(m) <= room), key=lambda m: -m['sizeBytes'])
+    if not fits:
+        return dict(families={}, **base, why=f'no downloaded model fits in {mem:.0f} GB of memory: download a smaller one and add it here (GUIDE.md, settings)')
+    m = fits[0]
+    copies, parallel = (2 if 2 * need(m) <= room else 1), (4 if mem >= 32 else 2)
+    recycle_band = next(iter(default.get('families', {}).values()), {}).get('recycle', False)
+    measured = any(m['modelKey'] == f.get('key', k) for k, f in default.get('families', {}).items())
+    fam = dict(key=m['modelKey'], copies=copies, context=min(int(m.get('maxContextLength') or 32768), 65536 if mem >= 64 else 32768),
+               parallel=parallel, recycle=recycle_band,
+               why=f'Fitted at install to {mem:.0f} GB and the models downloaded'
+                   + ('; one copy, since two do not fit.' if measured else '; the recycle band was measured on another model: '
+                      'read `localmodels crashes` after a few long runs and adjust it.'))
+    return dict(families={m['modelKey']: fam}, batch_at_once=copies * parallel, headroom_gb=base['headroom_gb'])
 
 
 def _ok_id(s):

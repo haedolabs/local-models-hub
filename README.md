@@ -22,6 +22,19 @@ Standard-library Python, no dependencies. macOS on Apple silicon (it leans on la
 
 ## Install
 
+**Before you start:** a Mac with Apple silicon, [LM Studio](https://lmstudio.ai) with at least one model downloaded, its command-line tool (open LM Studio once, then run `~/.lmstudio/bin/lms bootstrap`), and `python3` 3.9 or later. In LM Studio's developer settings, turn **just-in-time model loading** off (the door never needs it).
+
+**The short way:** in Claude Code, say *"Set up the local-models hub from github.com/matthaedo/local-models-hub."* Claude reads the next section and does the rest.
+
+**If you are Claude Code setting this up for someone:**
+1. Check the ground: `uname -m` says `arm64`; `~/.lmstudio/bin/lms ls` lists at least one model (if `lms` is missing, ask the person to open LM Studio once and run `~/.lmstudio/bin/lms bootstrap`); `python3 --version` is 3.9 or later. Stop and say what is missing rather than working around it.
+2. Slash commands are the person's to type. Ask them to type the two plugin lines below; if they would rather not use the plugin, clone the repo and run `bin/localmodels install` yourself (the terminal way below).
+3. Run `localmodels check` and show its lines as they are. If anything fails, read `~/Library/Logs/LocalModels/gateway.log` and say what it says.
+4. Show the settings the install wrote (`~/Library/Application Support/LocalModels/models.json`, fitted to this Mac's memory and downloaded models) and ask whether that model is the one they want kept loaded.
+5. Ask the person to turn just-in-time model loading off in LM Studio's developer settings.
+6. Tell them, in plain words: send requests to `http://localhost:1235/v1` instead of port 1234 (any API key); the dashboard is at http://localhost:1235; the MCP tools appear in Claude Code sessions from the next session on.
+7. Never stop LM Studio's server, and never unload or reload a model the person did not ask you to.
+
 **With Claude Code** (the repo is a Claude Code plugin and its own marketplace), in any session:
 
 ```
@@ -38,7 +51,7 @@ git clone https://github.com/matthaedo/local-models-hub.git ~/local-models
 ~/local-models/bin/localmodels install
 ```
 
-`install` opens the door at login (a LaunchAgent running a copy of the code from `~/Library/Application Support/LocalModels/hub/`), writes the settings file if there is none, registers the MCP tools for Claude Code if `claude` is on your PATH, adds one signpost line to `~/.claude/CLAUDE.md`, and puts `localmodels` on your PATH. `--dry` says what it would do; `--no-claude` leaves Claude Code alone. Run it again after changing the code; it waits for a moment with no request passing through before restarting the door. `localmodels uninstall` undoes all of it. `localmodels check` is the self-test.
+`install` opens the door at login (a LaunchAgent running a copy of the code from `~/Library/Application Support/LocalModels/hub/`), writes the settings file if there is none (fitted to this Mac: the measured default when its model is downloaded and fits twice, else the largest downloaded model that fits, as two copies when two fit), registers the MCP tools for Claude Code if `claude` is on your PATH, adds one signpost line to `~/.claude/CLAUDE.md`, and puts `localmodels` on your PATH. `--dry` says what it would do; `--no-claude` leaves Claude Code alone. Run it again after changing the code; it waits for a moment with no request passing through before restarting the door. `localmodels uninstall` undoes all of it. `localmodels check` is the self-test.
 
 Then point clients at `http://localhost:1235/v1` (any API key). In Claude Code sessions the MCP tools `status`, `guide`, `ask`, `batch`, `job_status` and `swap_check` appear under `local-models`.
 
@@ -46,7 +59,7 @@ Then point clients at `http://localhost:1235/v1` (any API key). In Claude Code s
 
 ## Settings
 
-`~/Library/Application Support/LocalModels/models.json` (created from the repo's `localmodels/models.json` on the first install):
+`~/Library/Application Support/LocalModels/models.json` (written on the first install, fitted to this Mac's memory and downloaded models; the repo's `localmodels/models.json` is the measured default it starts from):
 
 ```json
 {

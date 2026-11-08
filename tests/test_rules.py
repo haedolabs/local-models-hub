@@ -263,6 +263,33 @@ def test_install_dry(box):
     cli.PLIST, L.MODELS, L.LMS = real
 
 
+def test_first_settings():
+    print("the first settings fit this Mac: its memory and the models it has downloaded")
+    from localmodels import models
+    G = 2**30
+    llm = lambda key, gb, ctx=131072: dict(type='llm', modelKey=key, sizeBytes=int(gb * G), maxContextLength=ctx)
+    have = [llm(B, 37.75, 262144), llm('big-70b', 75), dict(type='embedding', modelKey='embed', sizeBytes=int(0.08 * G), maxContextLength=2048)]
+    s = models.first_settings(have, 128)
+    f = s['families'].get(B, {})
+    t('128 GB with the measured model: the measured default stands (2 copies, 65,536, recycling)',
+      list(s['families']) == [B] and (f.get('copies'), f.get('context'), f.get('parallel')) == (2, 65536, 4) and f.get('recycle'), f)
+    s = models.first_settings(have, 64)
+    f = s['families'].get(B, {})
+    t('64 GB: one copy of it, since two do not fit', f.get('copies') == 1 and s['batch_at_once'] == f.get('parallel'), f)
+    s = models.first_settings([llm('small-8b', 8.5, 32768), llm('mid-14b', 15)], 32)
+    f = s['families'].get('mid-14b', {})
+    t('32 GB without the measured model: the largest model that fits, with a context it allows',
+      list(s['families']) == ['mid-14b'] and f.get('copies') == 1 and f.get('context') == 32768 and f.get('key') == 'mid-14b', s['families'])
+    s = models.first_settings([llm('small-8b', 8.5, 16384)], 64)
+    f = s['families'].get('small-8b', {})
+    t("a model's own context limit is never passed", f.get('context') == 16384 and f.get('copies') == 2, f)
+    s = models.first_settings([llm('big-70b', 75)], 16)
+    t('nothing fits: no family, and the reason is said', s['families'] == {} and 'why' in s, s.get('why'))
+    s = models.first_settings(None, 128)
+    t('no list of models (no lms): no family, and the reason is said', s['families'] == {} and 'lms' in s.get('why', ''), s.get('why'))
+    t('every first settings file reads back as JSON', all(json.loads(json.dumps(models.first_settings(h, m))) for h, m in ((have, 128), (None, 8))))
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -274,6 +301,7 @@ def main():
         test_prune(box)
         test_settings(box)
         test_install_dry(box)
+        test_first_settings()
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
