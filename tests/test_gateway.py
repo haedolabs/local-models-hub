@@ -70,6 +70,8 @@ class Fake(http.server.BaseHTTPRequestHandler):
             out, code = json.dumps(dict(model_instance_id=body.get('model'), output=[dict(type='message', content='OK')], stats=dict(input_tokens=9, total_output_tokens=6))).encode(), 200
         elif what == 'crash':
             out, code = json.dumps(dict(error='Error: The model has crashed without additional information. (Exit code: null)')).encode(), 400
+        elif what == 'channel':                               # the generation thread died; the instance is still listed
+            out, code = json.dumps(dict(error='Error: Channel Error')).encode(), 400
         elif what == 'bad':
             out, code = json.dumps(dict(error=dict(message="Invalid 'messages': must be an array", type='invalid_request_error'))).encode(), 400
         elif what == 'odd':
@@ -143,6 +145,13 @@ def run(box):
         plan('crash', 'crash')
         code, r, h = ask(tag='b')
         t('failing twice: 503 with Retry-After, never LM Studio\'s 400', code == 503 and h.get('Retry-After') == str(gateway.RETRY_AFTER), (code, h.get('Retry-After')))
+        plan('channel', 'ok')
+        code, r, h = ask(tag='e')
+        row_ = rows_logged()[0]
+        t('an engine failure (400 "Channel Error") while the instance is still listed is resent, never passed through',
+          code == 200 and r and r['choices'][0]['message']['content'] == 'OK e' and [s[2] for s in Fake.seen] == ['channel', 'ok']
+          and row_.get('tries') == 2 and row_.get('note') == 'LM Studio returned HTTP 400: engine failure (Channel Error)',
+          (code, Fake.seen, {k: row_.get(k) for k in ('tries', 'note', 'status')}))
         plan('bad')
         code, r, h = ask(tag='c')
         t('a genuine 400 passes through once', code == 400 and len(Fake.seen) == 1, (code, Fake.seen))

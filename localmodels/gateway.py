@@ -47,6 +47,9 @@ GEN = re.compile(r'/(chat/completions|completions|embeddings|responses|messages|
 SWAP = re.compile(r'/(load|unload)$')
 PASS = ('content-type', 'authorization', 'accept', 'x-api-key', 'anthropic-version', 'openai-organization')
 GONE = re.compile(r'crashed|no models? (?:are |is )?loaded|not loaded|model_not_found|has been unloaded|model unloaded', re.I)
+# The engine's own failures, which LM Studio answers with HTTP 400 while the instance may still be listed for a moment:
+# "Channel Error" is what every request in flight gets when the generation thread dies (measured with metal::malloc crashes).
+ENGINE = re.compile(r'channel error|fatal exception|generation thread|metal::\w+|resource limit \(\d+\)|segmentation fault', re.I)
 LOG_MAX, RETRY_AFTER, AWAKE_FOR = 20_000_000, 30, 600
 # How each of LM Studio's APIs ends a stream that came out whole: OpenAI's chat and completions with `data: [DONE]`, the
 # others with a last event of their own (Anthropic's messages, OpenAI's responses, LM Studio's own chat). An error event
@@ -551,6 +554,8 @@ class Door(http.server.BaseHTTPRequestHandler):
                 text = data.decode('utf-8', 'replace')
                 if model and not peer and known(model) and code < 500:
                     if re.search(r'crashed', text, re.I): return code, {}, f'LM Studio returned HTTP {code}: model crashed'
+                    failed = ENGINE.search(text)
+                    if failed: return code, {}, f'LM Studio returned HTTP {code}: engine failure ({failed.group(0)})'
                     if GONE.search(text): return code, {}, f'LM Studio returned HTTP {code}: model not loaded'
                     asked = rename[0] if rename else model                  # the words are new: is the copy that answered still there?
                     there = llmshare.api_models()
