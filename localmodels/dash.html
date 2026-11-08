@@ -52,9 +52,9 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .row.b { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .row.c { grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 4fr); }
 .card { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
-.card h2 { font-size: 13px; font-weight: 600; margin: 0; }
-.card .hint { color: var(--muted); font-size: 11.5px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.card h2 { font-size: 13px; font-weight: 600; margin: 0; flex: none; }
+.card .hint { color: var(--muted); font-size: 11.5px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }   /* only the body gives way */
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex: none; }
 .card .body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .tile { padding: 8px 12px; }
 .tile .label { color: var(--ink-2); font-size: 12px; white-space: nowrap; }
@@ -63,29 +63,49 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .tile .foot { color: var(--muted); font-size: 11.5px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meter { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 6px; }
 .meter > div { height: 100%; border-radius: 3px; background: var(--s1); }
-.legend { display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--ink-2); font-size: 11.5px; margin: 0 0 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--ink-2); font-size: 11.5px; margin: 0 0 4px; flex: none; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .key-rect { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 .key-line { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
 svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
-.fam { margin-bottom: 8px; }
+#models-body { --mk: 1; padding-top: var(--lead, 0px); }   /* fitModels(): --mk scales the boxes, spacing and bars; text keeps its size */
+.fam { margin-bottom: calc(8px * var(--mk, 1) + var(--gap, 0px)); }
 .fam:last-child { margin-bottom: 0; }
 .fam-name { font-weight: 600; }
 .fam-meta { color: var(--ink-2); font-size: 11.5px; }
-.copy { display: grid; grid-template-columns: 62px auto 1fr; align-items: center; gap: 4px 10px; margin-top: 6px; }
+.copy { display: grid; grid-template-columns: 62px auto 1fr; align-items: center; gap: calc(4px * var(--mk, 1)) calc(10px * var(--mk, 1)); margin-top: calc(6px * var(--mk, 1)); }
+.copy + .copy { margin-top: calc(6px * var(--mk, 1) + var(--gap, 0px)); }        /* room left over goes between rows, not under the name */
+#models-body.compact .copy { display: inline-flex; align-items: center; gap: calc(6px * var(--mk, 1)); margin: calc(5px * var(--mk, 1)) calc(14px * var(--mk, 1)) 0 0; }
+#models-body.compact .copy .st, #models-body.compact .copy .band { display: none; }
+#models-body.dense .fam-meta { display: none; }                  /* one line a model: its name, then its slot groups */
+#models-body.dense .fam-head { display: inline; margin-right: calc(14px * var(--mk, 1)); }
+#models-body.cols { column-count: 2; column-gap: 24px; }        /* more models still: one-line models in two columns */
+#models-body.cols .fam { break-inside: avoid; }
 .copy .nm { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (min-height: 701px) and (min-width: 1101px) { .wrap.peers { grid-template-rows: auto auto auto minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr) auto; } }
-.slots { display: inline-flex; gap: 2px; }
-.slot { width: 18px; height: 18px; border-radius: 4px; background: var(--track); }
+.slots { display: inline-flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); }
+.slot {                    /* a slot as a memory module: the board (gray when free, the project's color when active), its chips, */
+  position: relative;      /* and gold contacts along the bottom edge, broken by the key notch */
+  width: calc(30px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
+  border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px; background: var(--track);
+  -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
+          mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
+}
+.slot::before { content: ''; position: absolute; left: 9%; right: 9%; top: 15%; height: 42%;
+  background: repeating-linear-gradient(90deg, rgba(0, 0, 0, .3) 0 17%, transparent 17% 25%); border-radius: 1px; }
+.slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
+  background: repeating-linear-gradient(90deg, #d4a72c 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
+.slot:not([style*="background"])::after { opacity: .45; }
+.slot:not([style*="background"])::before { opacity: .55; }
 .copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bandpct { display: none; }
 #models-body.tight .band { display: none; }
 #models-body.tight .bandpct { display: inline; }
-.band { grid-column: 2 / -1; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
-.band .bar { flex: 1 1 auto; height: 4px; border-radius: 2px; background: var(--track); position: relative; overflow: hidden; }
+.band { grid-column: 2 / -1; display: flex; align-items: center; gap: calc(8px * var(--mk, 1)); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.band .bar { flex: 1 1 auto; height: calc(4px * var(--mk, 1)); border-radius: calc(2px * var(--mk, 1)); background: var(--track); position: relative; overflow: hidden; }
 .band .bar > div { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; background: var(--s1); }
-.band .bar > i { position: absolute; top: -2px; width: 1px; height: 8px; background: var(--axis); }
+.band .bar > i { position: absolute; top: calc(-2px * var(--mk, 1)); width: 1px; height: calc(8px * var(--mk, 1)); background: var(--axis); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 td { padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
@@ -107,6 +127,7 @@ td.sub { padding-left: 28px; color: var(--ink-2); }
 .bar-thin.wide { width: 100%; height: 6px; border-radius: 3px; margin: 3px 0 2px; }
 .bar-thin.wide > div { border-radius: 3px; }
 .chart { position: relative; flex: 1 1 auto; min-height: 60px; }
+.chart > svg { display: block; }                                    /* no inline baseline gap under the chart */
 .tablebox { max-height: 100%; overflow: hidden; }
 #tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
 #tip .t { color: var(--muted); margin-bottom: 4px; }
@@ -223,9 +244,11 @@ function kindWords(k) { return k || 'other'; }
 function merge(c) { if (c) Object.assign(COLORS, c); }
 function rowsThatFit(box, rowPx = 25, headPx = 26) { return Math.max(2, Math.floor((box.clientHeight - headPx - 4) / rowPx)); }
 function tableIn(box, head, rows, more) {
-  const n = rowsThatFit(box), shown = rows.slice(0, n);
-  const t = el('table', {}, el('thead', {}, el('tr', {}, ...head)), el('tbody', {}, ...shown));
-  box.replaceChildren(t, rows.length > n ? el('div', {class: 'more'}, `+ ${rows.length - n} more` + (more ? ' · ' + more : '')) : '');
+  let n = Math.min(rows.length, rowsThatFit(box));
+  const draw = () => box.replaceChildren(el('table', {}, el('thead', {}, el('tr', {}, ...head)), el('tbody', {}, ...rows.slice(0, n))),
+    rows.length > n ? el('div', {class: 'more'}, `+ ${rows.length - n} more` + (more ? ' · ' + more : '')) : '');
+  draw();
+  while (n > 1 && box.scrollHeight > box.clientHeight + 1) { n--; draw(); }   // two-line rows (a step under the kind) take more than the estimate
 }
 
 // ---------------------------------------------------------------- the tooltip
@@ -512,7 +535,23 @@ function renderNow() {
 }
 
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
-function fitModels() { const box = $('models-body'); box.classList.remove('tight'); if (box.scrollHeight > box.clientHeight + 1) box.classList.add('tight'); }
+function fitModels() {   // any number of models: rows grow to fill the card (never cutting a line), else fold bands, then rows, then shrink
+  const box = $('models-body'), set = k => box.style.setProperty('--mk', k.toFixed(3));   // layout only: text keeps its size
+  const over = () => box.scrollHeight > box.clientHeight + 1 || box.scrollWidth > box.clientWidth + 1;
+  const cut = () => [...box.querySelectorAll('.nm, .st, .band, .fam-meta')].filter(e => e.scrollWidth > e.clientWidth + 1).length;
+  const search = (lo, hi, ok) => { for (let i = 0; i < 7; i++) { const k = (lo + hi) / 2; set(k); if (ok()) lo = k; else hi = k; } set(lo); return lo; };
+  box.classList.remove('tight', 'compact', 'dense', 'cols'); box.style.setProperty('--gap', '0px'); box.style.setProperty('--lead', '0px'); set(1);
+  for (const fold of ['tight', 'compact', 'dense', 'cols']) { if (!over()) break; box.classList.add(fold); }   // bands, rows, meta, then two columns
+  if (over()) { search(0.8, 1, () => !over()); return; }
+  const base = cut();
+  search(1, 2.2, () => !over() && cut() <= base);
+  if (box.classList.contains('compact')) return;
+  const last = box.lastElementChild, rest = box.clientHeight - 2 - (last ? last.getBoundingClientRect().bottom - box.getBoundingClientRect().top : 0);
+  if (rest <= 0) return;
+  const gaps = box.querySelectorAll('.copy + .copy').length + Math.max(0, box.querySelectorAll('.fam').length - 1);
+  if (gaps) box.style.setProperty('--gap', (rest / gaps).toFixed(1) + 'px');          // what is left goes between the rows
+  else box.style.setProperty('--lead', (rest / 2).toFixed(1) + 'px');                  // one row: centered
+}
 
 // a model down after a crash, a copy being recycled, an unsure listing: said at the top, in words
 function renderAlerts() {
@@ -562,9 +601,9 @@ function renderModels() {
     legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)}))); return; }
   box.replaceChildren(...down, ...fams.map(f => {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
-    const head = el('div', {}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'},
-      `${f.copies.length > 1 ? f.copies.length + ' replicas · ' : ''}${f.at_once} slots · ${f.busy} active · ${f.size} GB · ${full(f.copies[0].context)} context`
-      + (away.length ? ` · +${more} slots on peer ${away.map(p => p.name).join(', ')}` : '')));
+    const meta = `${f.copies.length > 1 ? f.copies.length + ' replicas · ' : ''}${f.at_once} slots · ${f.busy} active · ${f.size} GB · ${full(f.copies[0].context)} context`
+      + (away.length ? ` · +${more} slots on peer ${away.map(p => p.name).join(', ')}` : '');
+    const head = el('div', {class: 'fam-head', title: meta}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'}, meta));
     const rows = f.copies.map((c, k) => {
       const boxes = [];
       for (const h of c.holders) for (let j = 0; j < h.n; j++) { boxes.push(h.project); seen.add(h.project); }
@@ -614,7 +653,8 @@ function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more
     return b;
   }));
   return el('div', {class: 'copy', title: p.words || ''}, el('span', {class: 'nm'}, p.name), slots,
-    el('span', {class: 'st'}, `${f.busy}/${f.slots} active · ${f.here} from this gateway · ${f.free_here} free${linkWords(p)}`));
+    el('span', {class: 'st'}, `${f.busy ? 'generating' : 'idle'} · ${f.busy}/${f.slots} active`),
+    el('div', {class: 'band'}, `peer replica · ${f.free_here} free for this gateway` + (f.here ? ` · ${f.here} in flight from it` : '') + linkWords(p)));
 }
 function peersOf(id) { return ((S && S.peers) || []).filter(p => p.state === 'up' && p.families && p.families[id] && p.families[id].match); }
 function peerBlocks(seen, local) {      // a family only a peer has (the others' peer copies sit under this Mac's families)

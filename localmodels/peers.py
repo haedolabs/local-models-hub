@@ -465,7 +465,7 @@ def report(front=None):
             if w: keeper['warnings'].append(f'{base}: {w}')
     for base, w in recycle.held_back().items(): keeper['warnings'].append(f'{base}: {w}')
     from . import dash
-    try: used, total = dash.memory(); mem = dict(used=round(used, 1), total=round(total, 1))   # for the front's memory pool
+    try: used, total = dash.every('memory', 10, dash.memory); mem = dict(used=round(used, 1), total=round(total, 1))   # the front's memory pool (read every 10 s, not every poll)
     except Exception: mem = None
     return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
