@@ -56,6 +56,14 @@ with llmshare.lease('<project>', [model], 'batch', log_dir=folder) as run:   # l
 
 - A lease holds the project's name, the model ids, a kind and the Claude Code session if there is one. It never holds a prompt, a file name or any content.
 
+## Maintenance
+- **The person running the Mac sets it:** `localmodels maintenance in 15m for 30m updating LM Studio` (or `at 20:30`, `now`, or `after-batches`, which starts once no batch has sent a request for 2 minutes). `localmodels maintenance` alone says what is set and which batches would run into it; `localmodels maintenance off` ends it.
+- **Announced** (before it starts), everything works, and the hub says it everywhere: every answer from the door carries the header `X-Hub-Maintenance` (`announced; starts=<local time>; until=<local time>; minutes=30; why=...`), the dash shows it at the top and flags a batch or job due to finish after it starts, `localmodels` and the `status` tool say it, `/hub/health` has it, and a Claude Code hook adds one line to every session's next prompt.
+- **On**, a new request gets `503` with `Retry-After` set to the expected end and the same header; a request already being answered finishes; one still waiting for its turn is refused when its turn comes. The door never starts LM Studio's server and the keeper loads, reloads and recycles nothing, so the hub never works against the person updating or restarting LM Studio.
+- **Off**, what LM Studio logged meanwhile is not read as crashes, and each model that was loaded when maintenance began is loaded again (its copies follow).
+- **A program:** read `X-Hub-Maintenance` on any answer. When it says `announced`, finish the item in hand and do not start work that would run past `starts`. On `503` with `Retry-After`, sleep that long and carry on where it left off; do not count it as a failure. The hub's own local agents already wait out a `503` for up to an hour.
+- **A Claude Code session** that gets the notice does not start a local-model batch that would run into it, and tells the person.
+
 ## Swaps (unloading, reloading, a context change)
 - The simplest swap: `localmodels use <model>` (add `--dry` to see what it would do). It refuses while another run is using anything it would unload, unloads the rest (every copy of a family, so the other model has the room), and loads the model; `localmodels use <family>` brings all its copies back.
 - By hand, before `lms unload`, `lms load` with another context, or a model switch: `localmodels swapcheck <model>` (exit 0 = safe), the `swap_check` tool, or `llmshare.swap_blockers([model])`. If it names a run, don't swap: say who is using it and stop. If `lms ps` doesn't answer, don't swap either. A run on one copy blocks a swap of any copy of its family.

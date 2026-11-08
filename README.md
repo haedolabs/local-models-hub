@@ -16,9 +16,11 @@ Standard-library Python, no dependencies. macOS on Apple silicon (it leans on la
 - **Recycling before the crash.** The engine's Metal buffer count grows with the work a copy has done until it crashes; the keeper recycles each copy (drain, unload, load) before that band, one copy at a time, the way web servers recycle leaky workers, and a batch can ask for fresh copies when it starts.
 - **Swaps that respect others.** Before a model is unloaded or reloaded, the hub says who is using it; a swap under another run is refused.
 - **Local agents.** `ask` and `batch`: a tool-using loop on the loaded model with tools that only read a project's folder (read, list, grep), answers as JSON matched to a schema, logs per job. A job whose request fails because the model is down waits and tries again for up to an hour; an answer that lists nothing is asked for once more; the JSON step runs with thinking off. Every Claude Code session gets them as MCP tools; a terminal gets `localmodels ask` and `localmodels batch`.
+- **Batch progress.** A program sends `X-Run`, `X-Run-Total` and `X-Run-Done`, and the dashboard shows the whole batch and the job it is on now, each with a bar, the time left and the finish time in local time, measured on this Mac. A step that reads `extract 8 of 360` shows the job alone, with no headers.
+- **Maintenance.** `localmodels maintenance in 15m for 30m <why>` tells every program (a header on every answer) and every Claude Code session (a hook) ahead of time; while it is on, new requests get `503` with `Retry-After` and the keeper stands down; `off` loads the models back.
 - **Awake.** While any program is using a model the door holds the Mac awake (`caffeinate`).
 - **One dashboard** at `http://localhost:1235`: each copy's slots coloured by project and its work against its recycle band, every program using a model with its step, every Claude Code session, charts over the last 15 minutes to 24 hours, crashes and recycles, the Mac. It fits one screen. Nothing it shows is anyone's content: the hub keeps names, times and token counts, never a prompt or an answer.
-- **One command:** `localmodels` (status), `dash`, `log`, `crashes`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check`, `install`, `publish`.
+- **One command:** `localmodels` (status), `dash`, `log`, `crashes`, `maintenance`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check`, `install`, `publish`.
 
 ## Install
 

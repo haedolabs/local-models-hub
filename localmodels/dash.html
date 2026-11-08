@@ -128,7 +128,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <div><h1 style="display:inline">Local models</h1><span class="sub">every project and Claude session using LM Studio on this Mac</span></div>
     <div class="chips"><span>Charts: the last</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span id="clock" class="muted"></span>
+      <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
       <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
   </header>
   <div>
@@ -450,6 +450,9 @@ function renderNow() {
   const lmOk = S.lmstudio.server === 'on';
   chip('chip-lm', lmOk, S.lmstudio.listing_ok === false ? `LM Studio's server is on; its model listing is unsure (${Math.round(S.lmstudio.listing_age / 60)} min old)` : "LM Studio's server is on", "LM Studio's server is off");
   if (lmOk && S.lmstudio.listing_ok === false) $('chip-lm').querySelector('i').style.background = 'var(--warning)';
+  const mt = S.maintenance, mc = $('chip-maint');
+  mc.style.display = mt ? '' : 'none';
+  if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
   // stat tiles
   const fams = S.lmstudio.families, busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
   $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} at once`));
@@ -544,8 +547,10 @@ function track(word, name, p, why) {  // one labelled bar: Batch or Job, done of
   const fin = p.finish || (p.left != null ? Date.now() / 1000 + p.left : null);
   const when = p.left != null ? (p.left > 0 ? `${left(p.left)} · done about ${finishAt(fin)}` : 'finishing')
     : p.done < p.total ? 'estimating after the first one' : 'done';
+  const mt = S.maintenance, clash = mt && mt.phase === 'announced' && fin && fin > mt.start;
   return el('div', {class: 'track', title: [name, why, p.started ? 'started ' + clock(p.started) : ''].filter(Boolean).join(' · ')},
-    el('div', {}, el('b', {}, word), name ? el('span', {class: 'muted'}, ' ' + name) : ''),
+    el('div', {}, el('b', {}, word), name ? el('span', {class: 'muted'}, ' ' + name) : '',
+      clash ? el('span', {class: 'badge warn', style: 'margin-left:6px'}, `ends after maintenance starts (${clock(mt.start)})`) : ''),
     el('div', {class: 'bar-thin wide'}, el('div', {style: `width:${p.pct || 0}%`})),
     el('div', {class: 'ink2'}, `${p.done} of ${p.total} · ${when}`));
 }

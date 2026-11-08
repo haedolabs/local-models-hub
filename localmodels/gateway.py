@@ -30,7 +30,7 @@ Serves this Mac only (127.0.0.1 and ::1) and refuses web pages from other sites 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, crashes, llmshare, recycle, runs, web, whois
+from . import VERSION, crashes, llmshare, maint, recycle, runs, web, whois
 
 PORT = llmshare.HUB_PORT
 UP = llmshare.LMSTUDIO
@@ -119,6 +119,7 @@ def server_up(timeout=3):
 
 
 def start_lmstudio(why='a request could not connect'):
+    if maint.on(): return False                              # maintenance: the person is working on LM Studio
     """LM Studio's server, started only when it is down (starting a running one restarts it and cuts every request in
     flight). Threads that find it down at the same moment wait for the one start. -> whether it answers now."""
     if server_up(2): return True
@@ -216,6 +217,13 @@ class Door(http.server.BaseHTTPRequestHandler):
     _sent, _dialect = False, 'openai'
 
     def log_message(self, *a): pass
+
+    def end_headers(self):
+        try:                                                 # every answer says when maintenance is announced or on
+            h = maint.header(maint.read())
+            if h: self.send_header('X-Hub-Maintenance', h)
+        except Exception: pass
+        super().end_headers()
 
     def _send(self, code, obj, retry_after=None):
         if self._dialect == 'anthropic' and code >= 400 and isinstance(obj, dict) and isinstance(obj.get('error'), str):
@@ -347,7 +355,12 @@ class Door(http.server.BaseHTTPRequestHandler):
         code, usage, waited, chosen, held, note, tries = 0, {}, 0.0, model, 0.0, None, 0
         try:
             base = llmshare.family(model)
-            if crashes.left_down(model) and not self._candidates(model):
+            m = maint.on()
+            if m:
+                ra = maint.retry_after(m)
+                code, _ = self._send(503, dict(error=f'the local models are {maint.words(m)}. Try again in {ra} s.'), retry_after=ra)
+                note = 'maintenance'
+            elif crashes.left_down(model) and not self._candidates(model):
                 code, _ = self._send(503, dict(error=f'{base} is down after a crash and the hub has stopped loading it again: load it by hand (localmodels use {base})'), retry_after=600)
                 note = 'left down'
             else:
@@ -362,6 +375,11 @@ class Door(http.server.BaseHTTPRequestHandler):
                     with llmshare.slot_any(lambda: self._candidates(model), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600, kind=kind) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'the program hung up while it waited'; break
+                        m = maint.on()
+                        if m:                                       # maintenance began while it waited for its turn
+                            ra = maint.retry_after(m)
+                            code, _ = self._send(503, dict(error=f'the local models are {maint.words(m)}. Try again in {ra} s.'), retry_after=ra)
+                            note = 'maintenance'; break
                         rec.update(state='answering', answering_since=time.time(), copy=chosen)
                         try: llmshare._write(mark, rec)
                         except OSError: pass
@@ -386,7 +404,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             try: os.remove(mark)
             except OSError: pass
             touch(holder, project, kind, model, who, -1)
-            if code >= 400 and code != 499: crashes.nudge()           # maybe the model crashed: the keeper looks at once
+            if code >= 400 and code != 499 and note != 'maintenance': crashes.nudge()   # maybe the model crashed: the keeper looks at once
             p, c = _usage(usage)
             log(dict(at=round(time.time(), 1), project=project, session=who.get('session'), host_session=who.get('host_session'),
                      kind=kind, model=model, copy=chosen, endpoint=path.split('?')[0].rstrip('/').rsplit('/', 1)[-1], status=code, stream=bool(j.get('stream')),
@@ -486,8 +504,10 @@ class Door(http.server.BaseHTTPRequestHandler):
     def hub(self, method, path):
         route = path.split('?')[0].rstrip('/')
         if route == '/hub/health':
+            m = maint.read()
             return self._send(200, dict(ok=True, hub='local-models', version=VERSION, pid=os.getpid(), port=PORT,
-                                        since=round(_start['since']), lmstudio=UP))
+                                        since=round(_start['since']), lmstudio=UP,
+                                        maintenance=dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), why=m.get('why'), words=maint.words(m)) if m else None))
         q = urllib.parse.parse_qs(path.partition('?')[2])
         try:
             if route == '/hub/snapshot': return self._send(200, web.snapshot())

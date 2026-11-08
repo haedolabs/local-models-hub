@@ -16,7 +16,7 @@ THE MAC        the programs using the most processor and memory; the bar: time, 
 """
 import glob, hashlib, json, os, re, shutil, subprocess, sys, time, urllib.request
 
-from . import HOME, llmshare, runs, sessions, whois
+from . import HOME, llmshare, maint, runs, sessions, whois
 
 COLOR = sys.stdout.isatty() and '--no-color' not in sys.argv
 C = dict(r='31', g='32', y='33', b='34', m='35', c='36', w='37', B='1', d='2', R='7')
@@ -282,7 +282,8 @@ def snapshot():
         try: extra[title] = fn()
         except Exception as e: extra[title] = [dict(kind='note', what=f'could not read: {e}', since=time.time())]
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
-                last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view))
+                last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
+                maintenance=maint.view())
 
 
 def crash_view():
@@ -364,6 +365,7 @@ def show(s, w=80, h=24):
     hub = (k('open', 'g', 'B') if dr['up'] else k('closed', 'r', 'B')) + f" on :{dr['port']}" + \
           (k(' · runs older code: localmodels install', 'y') if dr['up'] and dr['stale'] else '')
     L = [f"  server {srv} · the hub's door {hub}"]
+    if s.get('maintenance'): L.append('  ' + k('⚠ ' + s['maintenance']['words'][:w - 6], 'r' if s['maintenance']['phase'] == 'on' else 'y', 'B'))
     word = lambda m: k('working', 'y', 'B') if m.get('busy') or m['state'] in ('GENERATING', 'PROCESSING') else k('idle', 'g') if m['state'] == 'IDLE' else k(m['state'].lower(), 'y')
     for f in lm['families']:
         if len(f['copies']) == 1:
@@ -377,7 +379,7 @@ def show(s, w=80, h=24):
     for d in cr.get('down') or []: L.append('  ' + k('! ' + d['words'], 'r' if d['state'] == 'left down' else 'y', 'B'))
     if cr.get('recycling'): L.append('  ' + k(cr['recycling'][:w - 4], 'y'))
     if cr.get('brief'): L.append('  ' + k('last crash: ' + cr['brief'], 'd'))
-    sections.append(['LM Studio', L, 2 + len(cr.get('down') or [])])
+    sections.append(['LM Studio', L, 2 + len(cr.get('down') or []) + (1 if s.get('maintenance') else 0)])
     # who is using the models
     L = []
     for r in s['users']:

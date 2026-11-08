@@ -258,6 +258,16 @@ def test_install_dry(box):
     out = io.StringIO()
     with contextlib.redirect_stdout(out): cli.install(dry=True, no_claude=True)
     t('--no-claude: no registration and no signpost line in the plan', 'register nothing' in out.getvalue())
+    t('the plan names the Claude Code hook', 'hook' in words, words[-300:])
+    cmd = 'python3 "/x y/bin/localmodels" notice'
+    other = dict(hooks=dict(UserPromptSubmit=[dict(hooks=[dict(type='command', command='echo mine')])]), model='opus')
+    once = cli.with_hook(json.loads(json.dumps(other)), cmd)
+    twice = cli.with_hook(json.loads(json.dumps(once)), cmd)
+    t("the hook is added to Claude Code's settings for SessionStart and UserPromptSubmit, beside the person's own, once",
+      once == twice and once['model'] == 'opus' and any(h['command'] == 'echo mine' for e in once['hooks']['UserPromptSubmit'] for h in e['hooks'])
+      and all(any(h['command'] == cmd for e in once['hooks'][ev] for h in e['hooks']) for ev in ('SessionStart', 'UserPromptSubmit')), once)
+    gone = cli.with_hook(json.loads(json.dumps(once)), cmd, add=False)
+    t('uninstall takes out only the hub\'s hook', gone['hooks'].get('UserPromptSubmit') == other['hooks']['UserPromptSubmit'] and 'SessionStart' not in gone['hooks'], gone)
     L.LMS = os.path.join(box, 'no-such-lms')
     t('a missing lms is noticed', cli.lms_found() is False)
     cli.PLIST, L.MODELS, L.LMS = real
@@ -365,6 +375,70 @@ def test_runs():
     t('a run nobody has touched for an hour is not shown as running', ('proj', 'gone') not in runs.progress(old, now=now))
 
 
+def test_maintenance(box):
+    print('maintenance: announced, on, the keeper standing down, the models put back after, the notice for every session')
+    from localmodels import llmshare as L, maint, models
+    maint.FILE = os.path.join(box, 'maintenance.json')
+    now = time.time()
+    t('nothing announced: nothing said', maint.read() is None and maint.notice() == '' and maint.header(None) is None)
+    maint.announce(start=now + 600, minutes=30, why='updating LM Studio')
+    m = maint.read(now=now)
+    t('announced for 10 minutes from now: the phase, its end, plain words with the local time',
+      m['phase'] == 'announced' and m['end'] == m['start'] + 1800 and time.strftime('%H:%M', time.localtime(now + 600)) in maint.words(m, now=now)
+      and 'updating LM Studio' in maint.words(m, now=now), maint.words(m, now=now))
+    t('the header says the same for programs', maint.header(m, now=now).startswith('announced; starts=') and 'why=updating LM Studio' in maint.header(m, now=now), maint.header(m, now=now))
+    t('the notice for Claude sessions names the time and what to do', 'maintenance' in maint.notice(now=now) and 'Retry-After' in maint.notice(now=now), maint.notice(now=now))
+    m = maint.read(now=now + 700)
+    t('at its start it is on, and Retry-After runs to its end', m['phase'] == 'on' and abs(maint.retry_after(m, now=now + 700) - 1700) <= 1, maint.retry_after(m, now=now + 700))
+    t('running past its end: Retry-After a minute, and the words say it runs over', maint.retry_after(maint.read(now=now + 3000), now=now + 3000) == 60
+      and 'over' in maint.words(maint.read(now=now + 3000), now=now + 3000), maint.words(maint.read(now=now + 3000), now=now + 3000))
+    t('a reason with odd characters is cleaned for the header', '\n' not in maint.header(maint.announce(start=now, minutes=5, why='a\nb;c'), now=now))
+    prev = maint.end()
+    t('off: the record comes back (with what was loaded before), nothing is announced after', prev and maint.read() is None, prev)
+
+    print('maintenance after the batches: it starts when no batch has sent a request for 2 minutes')
+    maint.announce(after_batches=True, minutes=20, why='reboot')
+    t('waiting for the batches: phase says so, nothing refused yet', maint.read()['phase'] == 'waiting' and 'after the batches' in maint.words(maint.read()))
+    busy = [dict(kind='batch', since=now - 5)]
+    t('a batch request in flight: it waits', maint.tick(busy, [], now=now) is False and maint.read()['phase'] == 'waiting')
+    t('a batch answered a minute ago: it still waits', maint.tick([], [dict(kind='batch', at=now - 60)], now=now) is False)
+    t('no batch for 2 minutes (a chat does not count): it starts, and runs its 20 minutes from then',
+      maint.tick([dict(kind='chat', since=now - 1)], [dict(kind='batch', at=now - 130)], now=now) is True and maint.read(now=now)['phase'] == 'on'
+      and abs(maint.read(now=now)['end'] - (now + 1200)) < 2, maint.read(now=now))
+    maint.end()
+
+    print('maintenance and the keeper: it stands down while on, and puts the models back after')
+    real = L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok
+    L.read_ok = lambda: True
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False)}
+    L.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
+    L.SWAP_LOCK = os.path.join(box, 'swap2.lock'); crashes.MISS = 0.3
+    listing = [[row(B), row(C2)]]
+    L.loaded = lambda fresh=False, force=False: list(listing[0])
+    L.api_models = lambda timeout=3: {r['id']: 65536 for r in listing[0]}
+    L.busy_slots = lambda: {}
+    loads, starts = [], []
+    models.load = lambda key, ident, context, parallel: (loads.append(ident), crashes.loaded_now([ident]), (True, 'ok'))[2]
+    models.unload = lambda ident: (True, '')
+    models._lms, models.free_gb = (lambda *a, **k: (True, '')), (lambda: 100.0)
+    models.ensure_server = lambda *a, **k: starts.append(1) or True
+    reset(time.time() - 600)
+    crashes_before = sum(1 for l in open(crashes.RECORD) if '"crash"' in l) if os.path.exists(crashes.RECORD) else 0
+    maint.announce(start=time.time() - 1, minutes=30, why='updating LM Studio')
+    words = models.keep()
+    t('on: the keeper notes what is loaded and stands down', maint.read()['before'] == [B] and any('maintenance' in w for w in words), (maint.read().get('before'), words))
+    listing[0] = [row(B)]
+    models.keep(); time.sleep(0.4); words = models.keep()
+    t('on: a copy gone (LM Studio restarting) is not loaded again, and no server is started', not loads and not starts, (loads, words))
+    listing[0] = []                                            # LM Studio came back with nothing loaded
+    words = models.end_maintenance()
+    t('off: the families loaded before are loaded again (first copy; the keeper adds the rest), the server started first',
+      loads == [B] and starts and any('loaded again after maintenance' in w for w in words), (loads, words))
+    crashes_after = sum(1 for l in open(crashes.RECORD) if '"crash"' in l) if os.path.exists(crashes.RECORD) else 0
+    t('nothing that went away during maintenance is recorded as a crash', crashes_after == crashes_before, (crashes_before, crashes_after))
+    L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -378,6 +452,7 @@ def main():
         test_install_dry(box)
         test_first_settings()
         test_runs()
+        test_maintenance(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

@@ -305,6 +305,50 @@ def run(box):
         th.join(30); Fake.slow = 3.0
         t('a request in flight carries its run too, so the dash moves on at once', live and live[0].get('run_done') == 18, live)
 
+        print('the door: maintenance, announced and on')
+        from localmodels import maint
+        maint.FILE = os.path.join(box, 'maintenance.json')
+        maint.announce(start=time.time() + 600, minutes=30, why='updating LM Studio')
+        plan()
+        code, r, h = ask(tag='announced')
+        t('announced: requests are answered, and every answer carries the notice', code == 200 and (h.get('X-Hub-Maintenance') or '').startswith('announced'), h.get('X-Hub-Maintenance'))
+        plan('slow'); Fake.slow = 3.0
+        got = {}
+        th = threading.Thread(target=lambda: got.update(zip(('code', 'r', 'h'), ask(tag='inflight')))); th.start()
+        time.sleep(1.0)
+        maint.begin()
+        th.join(30)
+        t('a request being answered when maintenance starts finishes', got.get('code') == 200, got.get('code'))
+        plan()
+        code, r, h = ask(tag='during')
+        ra = int(h.get('Retry-After') or 0)
+        t('on: a new request gets 503 with Retry-After to the end and the notice, nothing forwarded',
+          code == 503 and 1700 <= ra <= 1800 and h.get('X-Hub-Maintenance', '').startswith('on') and not Fake.seen, (code, ra, h.get('X-Hub-Maintenance'), Fake.seen))
+        req = urllib.request.Request(url + '/v1/messages', data=json.dumps(dict(model=F, messages=[])).encode(), headers={'Content-Type': 'application/json', 'X-Kind': 'test'})
+        try: urllib.request.urlopen(req, timeout=10); code, err = 200, {}
+        except urllib.error.HTTPError as e: code, err = e.code, json.loads(e.read() or b'{}')
+        t("on, Anthropic's API: overloaded_error in words that name the maintenance", code == 503 and err.get('error', {}).get('type') == 'overloaded_error' and 'maintenance' in err['error'].get('message', ''), err)
+        health = json.loads(urllib.request.urlopen(url + '/hub/health', timeout=5).read())
+        t('the health page says it too', (health.get('maintenance') or {}).get('phase') == 'on', health.get('maintenance'))
+        was = gateway._start['at']
+        t("on: the door never starts LM Studio's server (the person is working on it)", gateway.start_lmstudio('test') is False and gateway._start['at'] == was)
+        maint.end()
+        plan()
+        code, r, h = ask(tag='after')
+        t('off: answered again, no notice', code == 200 and not h.get('X-Hub-Maintenance'), (code, h.get('X-Hub-Maintenance')))
+        plan('slow', 'slow'); Fake.slow = 4.0
+        ths = [threading.Thread(target=ask, kwargs=dict(tag=f'fill{i}', kind='batch')) for i in range(2)]
+        for x in ths: x.start()
+        time.sleep(0.8)
+        got = {}
+        th = threading.Thread(target=lambda: got.update(zip(('code', 'r', 'h'), ask(tag='queued', kind='batch')))); th.start()
+        time.sleep(0.8)
+        maint.announce(start=time.time() - 1, minutes=10, why='test')
+        for x in ths + [th]: x.join(30)
+        maint.end(); Fake.slow = 3.0
+        t('a request still waiting for its turn when maintenance starts is refused at its turn, never sent',
+          got.get('code') == 503 and 'queued' not in [s_[1] for s_ in Fake.seen], (got.get('code'), Fake.seen))
+
         print("the door: every API LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, LM Studio's own)")
         def streamed(what, path):
             plan(what); crashes.WAKE.clear(); crashes._seen_state['nudged'] = 0
