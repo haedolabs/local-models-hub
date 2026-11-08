@@ -1,6 +1,6 @@
 {
   "name": "local-models-hub",
-  "description": "local-models hub: reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.",
+  "description": "Local Models Hub: reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.",
   "owner": {
     "name": "Haedo Labs"
   },

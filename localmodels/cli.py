@@ -13,6 +13,11 @@
                                  tell every program and Claude session the local models go down for a while; while on,
                                  new requests get 503 with Retry-After and the keeper stands down; off loads again what was
                                  loaded. With no words: what is set, and which batches would run into it
+  localmodels name               each project as seen and as shown on every screen, with its batches, jobs and scripts
+  localmodels name project <as seen> <shown>            what every screen calls a project (a folder or an X-Project)
+  localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
+  localmodels name private <project> | public <project> private: screens show only the names set for it
+  localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
                                  (--no-think: no thinking: several times faster, for lookups and extraction)
@@ -34,7 +39,7 @@
 """
 import glob, json, os, plistlib, re, shutil, subprocess, sys, time, urllib.request
 
-from . import HOME, VERSION, llmshare
+from . import HOME, NAME, VERSION, llmshare
 
 LABEL = os.environ.get('LOCALMODELS_LABEL') or 'com.local-models.hub'
 OLD_LABELS = ()                                          # earlier LaunchAgent labels an install retires
@@ -130,7 +135,8 @@ def status():
 
 
 def log(hours=24):
-    rows = llmshare.requests_log(hours)
+    from . import names
+    rows = [names.request(r) for r in llmshare.requests_log(hours)]
     if not rows: print(f'no requests through the hub in the last {hours:g} hours'); return 0
     print(f'the last {hours:g} hours through the hub: {len(rows)} requests')
     for p, v in sorted(llmshare.by_project(rows).items(), key=lambda x: -x[1]['requests']):
@@ -499,6 +505,49 @@ def uninstall():
     return 0
 
 
+def name_cmd(a):
+    """localmodels name [project <seen> <shown> | batch <project> <seen> <shown> | private|public <project> | forget <project> [<seen>]]."""
+    from . import dash, names, runs, sessions
+    words = [x for x in a if x != 'name']
+    try:
+        if words[:1] == ['project'] and len(words) == 3:
+            names.set_project(words[1], words[2]); print(f'{words[1]} shows as {names.project(words[1])} on every screen'); return 0
+        if words[:1] == ['batch'] and len(words) == 4:
+            names.set_label(words[1], words[2], words[3]); print(f'in {names.project(words[1])}, {words[2]} shows as {words[3]}'); return 0
+        if words[:1] in (['private'], ['public']) and len(words) == 2:
+            names.set_private(words[1], words[0] == 'private')
+            print(f"{names.project(words[1])} is {'private: screens show only the names set for it (no session titles, no unnamed scripts, steps or batches)' if words[0] == 'private' else 'public: names show as they are seen unless named'}")
+            return 0
+        if words[:1] == ['forget'] and len(words) in (2, 3):
+            names.forget(words[1], words[2] if len(words) == 3 else None); print('forgotten'); return 0
+    except OSError as e: print(f'could not write {names.FILE}: {e}'); return 1
+    if words:
+        print('localmodels name project <as seen> <shown> | batch <project> <as seen> <shown> | private <project> | public <project> | forget <project> [<as seen>]')
+        return 2
+    seen = {}                                                   # as seen -> {requests, batches, jobs, scripts, sessions}
+    def at(p): return seen.setdefault(p or '?', dict(requests=0, batches=set(), jobs=set(), scripts=set(), sessions=0))
+    for r in llmshare.requests_log(24 * 7):
+        s = at(r.get('project')); s['requests'] += 1
+        if r.get('run'): s['batches'].add(r['run'])
+        p = runs.parse_step(r.get('step'))
+        if p: s['jobs'].add(p[0])
+    for c in sessions.recent(72): at(c.get('project'))['sessions'] += 1
+    for u in dash.users(shown=False):
+        if u.get('app'): at(u.get('project'))['scripts'].add(u['app'])
+    print(f'names are set in {names.FILE}; as seen -> shown, the last 7 days:')
+    for p in sorted(seen, key=lambda x: -seen[x]['requests']):
+        s, shown = seen[p], names.project(p)
+        head = f"  {p}" + (f" -> {shown}" if shown != p else '') + (' (private)' if names.private(p) else '')
+        bits = [f"{s['requests']} requests"] if s['requests'] else []
+        if s['sessions']: bits.append(f"{s['sessions']} Claude Code session{'s' if s['sessions'] > 1 else ''}")
+        print(head + ': ' + ', '.join(bits))
+        for kind in ('batches', 'jobs', 'scripts'):
+            if s[kind]:
+                print(f"     {kind}: " + ', '.join(x + (f" -> {names.label(p, x)}" if names.label(p, x) != x else '') for x in sorted(s[kind])))
+    print('set one: localmodels name project <as seen> <shown> | batch <project> <as seen> <shown> | private <project>')
+    return 0
+
+
 def _minutes(word):
     """'30m', '30', '1h', '1h30m', '90s' -> minutes (at least 1), or None."""
     word = (word or '').strip().lower()
@@ -529,10 +578,11 @@ def maintenance_cmd(a):
     if not words:
         mt = maint.view()
         print('maintenance: ' + (mt['words'] if mt else 'none set'))
+        from . import names
         for g in sorted(dash.live_runs().values(), key=lambda g: g['started']):
-            p = g if g['kind'] == 'run' else g
+            p = g
             clash = mt and mt.get('start') and p.get('finish') and p['finish'] > mt['start']
-            print(f"  {g['project']} · {g['name']}: {p['done']} of {p['total'] or '?'}"
+            print(f"  {names.project(g['project'])} · {names.label(g['project'], g['name']) or 'a batch'}: {p['done']} of {p['total'] or '?'}"
                   + (f", done about {finish_words(p['finish'])}" if p.get('finish') else ', no estimate yet')
                   + (' · ends after maintenance starts' if clash else ''))
         return 0
@@ -554,9 +604,10 @@ def maintenance_cmd(a):
     print('set: ' + maint.words(m))
     print('  every answer from the door now carries X-Hub-Maintenance; the dash, `localmodels`, the status tool and the')
     print('  Claude Code hook say it; when it starts, new requests get 503 with Retry-After and the keeper stands down')
+    from . import names
     for g in sorted(dash.live_runs().values(), key=lambda g: g['started']):
         if m.get('start') and g.get('finish') and g['finish'] > m['start']:
-            print(f"  note: {g['project']} · {g['name']} is due to finish about {finish_words(g['finish'])}, after it starts")
+            print(f"  note: {names.project(g['project'])} · {names.label(g['project'], g['name']) or 'a batch'} is due to finish about {finish_words(g['finish'])}, after it starts")
     if m['phase'] != 'on': return 0
     rows = llmshare.loaded(fresh=True)
     if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
@@ -607,7 +658,7 @@ def check():
     try:
         page = urllib.request.urlopen(llmshare.HUB + '/', timeout=5).read()
         snap = json.load(urllib.request.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
-        t('the dashboard answers', b'Local models' in page and 'lmstudio' in snap, f'{llmshare.HUB}/ (localmodels open)')
+        t('the dashboard answers', NAME.encode() in page and b'__HUB_NAME__' not in page and 'lmstudio' in snap, f'{llmshare.HUB}/ (localmodels open)')
     except (OSError, ValueError) as e: t('the dashboard answers', False, str(e))
     try: models = json.load(urllib.request.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio answers through the door', True, f'{len(models)} models listed')
     except OSError as e: t('LM Studio answers through the door', False, str(e))
@@ -820,6 +871,7 @@ def main(argv):
     if verb == 'keep': return keep()
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
+    if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)
     if verb == 'notice':
         from . import maint; return maint.notice_main()
     if verb == 'crashes':

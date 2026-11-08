@@ -56,6 +56,15 @@ with llmshare.lease('<project>', [model], 'batch', log_dir=folder) as run:   # l
 
 - A lease holds the project's name, the model ids, a kind and the Claude Code session if there is one. It never holds a prompt, a file name or any content.
 
+## Names on the screens
+- **Every screen shows names the person chooses:** the dash, `localmodels`, `localmodels log`, the terminal dash and the `status` tool. The hub records what a program or folder calls itself (`X-Project`, else its folder); `~/Library/Application Support/LocalModels/names.json` maps that to what is shown, at the moment a screen reads, so a new name applies to all past history.
+- `localmodels name` lists every project as seen and as shown, with the batches (`X-Run`), jobs (the phase in `X-Step`) and scripts it has used. Then:
+  - `localmodels name project <as seen> <shown>`: what every screen calls a project. Several names seen can show as one, e.g. a folder and the `X-Project` its scripts send.
+  - `localmodels name batch <project> <as seen> <shown>`: a name for one of its batches, jobs or scripts.
+  - `localmodels name private <project>` (and `public`): the screens show only the names set for it, with no Claude Code session titles and no unnamed scripts, free-text steps or batch names. A count such as `8 of 360` stays.
+  - `localmodels name forget <project> [<as seen>]`: drop one label, or the whole entry.
+- A program can still name itself and its batch (`X-Project`, `X-Run`); the person's names apply on top.
+
 ## Maintenance
 - **The person running the Mac sets it:** `localmodels maintenance in 15m for 30m updating LM Studio` (or `at 20:30`, `now`, or `after-batches`, which starts once no batch has sent a request for 2 minutes). `localmodels maintenance` alone says what is set and which batches would run into it; `localmodels maintenance off` ends it.
 - **Announced** (before it starts), everything works, and the hub says it everywhere: every answer from the door carries the header `X-Hub-Maintenance` (`announced; starts=<local time>; until=<local time>; minutes=30; why=...`), the dash shows it at the top and flags a batch or job due to finish after it starts, `localmodels` and the `status` tool say it, `/hub/health` has it, and a Claude Code hook adds one line to every session's next prompt.

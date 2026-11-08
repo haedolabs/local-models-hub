@@ -16,7 +16,7 @@ THE MAC        the programs using the most processor and memory; the bar: time, 
 """
 import glob, hashlib, json, os, re, shutil, subprocess, sys, time, urllib.request
 
-from . import HOME, llmshare, maint, runs, sessions, whois
+from . import HOME, llmshare, maint, names, runs, sessions, whois
 
 COLOR = sys.stdout.isatty() and '--no-color' not in sys.argv
 C = dict(r='31', g='32', y='33', b='34', m='35', c='36', w='37', B='1', d='2', R='7')
@@ -171,7 +171,7 @@ def attach_runs(out):
         r['since'] = g['started']
 
 
-def users():
+def users(shown=True):
     """Every program using a local model now, one row per program: [{pid, project, app, session, title, kind, models,
     since, answering, waiting, direct, via, step, batch}], busiest first."""
     rows = {}
@@ -222,7 +222,8 @@ def users():
             out.append(dict(pid=0, project="LM Studio's own chat", app='LM Studio', kind='chat', models=busy, since=_cache['own'][0],
                             answering=1, waiting=0, direct=0, via=None, step=None, batch=None, title=None, session=None, lease=False))
     else: _cache.pop('own', None)
-    attach_runs(out)
+    attach_runs(out)                                            # matched on the names as seen; then shown as the person named them
+    if shown: out = [names.user(r) for r in out]               # shown=False: the names as seen (localmodels name lists them)
     return sorted(out, key=lambda r: (-(r['answering'] + r['direct'] + r['waiting'] > 0), r['since']))
 
 
@@ -240,11 +241,11 @@ def _hub_pid():
 
 
 def claude(hours=3):
-    return every('sessions', 3, lambda: sessions.recent(hours))
+    return every('sessions', 3, lambda: [names.session(c) for c in sessions.recent(hours)])
 
 
 def last_hour():
-    return every('lasthour', 10, lambda: llmshare.by_project(llmshare.requests_log(1)))
+    return every('lasthour', 10, lambda: llmshare.by_project([names.request(r) for r in llmshare.requests_log(1)]))
 
 
 NAMES = {'LM Studio': 'LM Studio (the local models)', 'WindowServer': 'the screen', 'kernel_task': 'macOS itself', 'claude': 'Claude Code',

@@ -14,7 +14,8 @@ runs while nobody looks, except the memory sample.
 """
 import collections, json, os, re, threading, time
 
-from . import HOME, VERSION, crashes, dash, llmshare, maint, recycle, sessions
+from . import HOME, NAME, VERSION, crashes, dash, llmshare, maint, names, recycle, sessions
+from . import names as names_mod          # colors() takes a parameter called names
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
 COLORS = os.path.join(llmshare.SHARED, 'colors.json')   # project -> color slot, first come, kept while the project is seen
@@ -34,6 +35,8 @@ def colors(names=()):
         except (OSError, ValueError): d = {}
         if 'slots' not in d: d = dict(slots={k: v for k, v in d.items() if isinstance(v, int)}, seen={})
         slots, seen, now, changed = d['slots'], d.setdefault('seen', {}), time.time(), False
+        for old in [p for p in slots if names_mod.project(p) != p]:    # a name the person renamed gives up its slot
+            slots.pop(old, None); seen.pop(old, None); changed = True
         for n in names:
             if not n: continue
             if seen.get(n, 0) < now - 3600: seen[n] = now; changed = True
@@ -47,7 +50,7 @@ def colors(names=()):
         if changed:
             try: os.makedirs(llmshare.SHARED, exist_ok=True); llmshare._write(COLORS, d)
             except OSError: pass
-        return dict(slots)
+        return {n: slots.get(n, 0) for n in names if n}               # only the names on screen, never the whole history
 
 
 def _cached(key, seconds, fn):
@@ -77,7 +80,7 @@ def about(home=None):
         m = json.load(open(os.path.join(home, '.claude-plugin', 'plugin.json')))
         src = m.get('repository') or m.get('homepage')
     except (OSError, ValueError): pass
-    return dict(version=VERSION, license=lic, copyright=cr, source=src if isinstance(src, str) and src.startswith('https://') else None)
+    return dict(name=NAME, version=VERSION, license=lic, copyright=cr, source=src if isinstance(src, str) and src.startswith('https://') else None)
 
 
 def snapshot():
@@ -88,7 +91,7 @@ def _snapshot():
     lm, users, cs = dash.lmstudio(), dash.users(), dash.claude()
     holders = collections.defaultdict(collections.Counter)          # copy -> {project: answering}
     for f in llmshare.inflight():
-        if f.get('state') == 'answering': holders[f.get('copy') or f.get('model')][f.get('project') or '?'] += 1
+        if f.get('state') == 'answering': holders[f.get('copy') or f.get('model')][names.project(f.get('project'))] += 1
     try: view = _cached('recycle-view', 10, lambda: recycle.view(lm['models']))
     except Exception: view = dict(copies={}, job=None, last={})
     job = view.get('job')
@@ -148,7 +151,7 @@ def _history(minutes):
     for r in rows:
         end, dur, wait = r.get('at', 0), r.get('seconds') or 0, r.get('waited') or 0
         start = end - dur
-        p = r.get('project') or '?'
+        p = names.project(r.get('project'))
         spread(start, start + wait, lambda i, s: waiting.__setitem__(i, waiting[i] + s))
         spread(start + wait, end, lambda i, s, p=p: answering[p].__setitem__(i, answering[p][i] + s))
         work = max(0.001, end - start - wait)
@@ -156,7 +159,7 @@ def _history(minutes):
         if toks: spread(start + wait, end, lambda i, s, k=toks / work: tokens.__setitem__(i, tokens[i] + s * k))   # tokens a second, averaged over the bucket
     live = 0
     for f in llmshare.inflight():                       # the requests in flight now: the chart's right edge is the present, not the last finished request
-        p, since = f.get('project') or '?', f.get('since') or now
+        p, since = names.project(f.get('project')), f.get('since') or now
         if f.get('state') == 'answering':
             a0 = f.get('answering_since') or since
             spread(since, a0, lambda i, s: waiting.__setitem__(i, waiting[i] + s))
@@ -169,15 +172,15 @@ def _history(minutes):
     req = collections.defaultdict(lambda: [0] * nb)
     for r in rows:
         i = int((r.get('at', 0) - b0) // bar)
-        if 0 <= i < nb: req[r.get('project') or '?'][i] += 1
+        if 0 <= i < nb: req[names.project(r.get('project'))][i] += 1
     mem = [(t, u) for t, u in list(_mem) if t >= now - minutes * 60]
     rnd = lambda xs: [round(x, 2) for x in xs]
-    names = sorted(set(answering) | set(req))
+    shown = sorted(set(answering) | set(req))
     return dict(start=t0, step=step, n=n, now=now, answering={p: rnd(v) for p, v in answering.items()}, waiting=rnd(waiting),
                 tokens=rnd(tokens), at_once=llmshare.at_once(), live=live,
                 requests=dict(start=b0, step=bar, n=nb, by=dict(req)),
                 memory=dict(t=[round(t) for t, _ in mem], used=[round(u, 1) for _, u in mem], total=round(dash.mac()['total'])),
-                colors=colors(names))
+                colors=colors(shown))
 
 
 def recent(n=25):
@@ -185,11 +188,12 @@ def recent(n=25):
     except (TypeError, ValueError): n = 25
     rows = llmshare.requests_log(24)[-n:]
     out = []
-    for r in reversed(rows):
+    for raw in reversed(rows):
+        r = names.request(raw)                                   # the project and the step as the person named them
         out.append(dict(at=r.get('at'), project=r.get('project'), kind=r.get('kind'), model=r.get('model'), copy=r.get('copy'),
                         seconds=r.get('seconds'), waited=r.get('waited'), tokens=(r.get('prompt_tokens') or 0) + (r.get('completion_tokens') or 0),
                         out_tokens=r.get('completion_tokens') or 0, status=r.get('status'), step=r.get('step'), note=r.get('note'), tries=r.get('tries'),
-                        title=sessions.title_of(r.get('session'), r.get('host_session'))))
+                        title=None if names.private(raw.get('project')) else sessions.title_of(r.get('session'), r.get('host_session'))))
     return out
 
 
@@ -218,5 +222,5 @@ def sampler():
 
 
 def page():
-    try: return open(PAGE, 'rb').read()
+    try: return open(PAGE, 'rb').read().replace(b'__HUB_NAME__', NAME.encode())     # one name, from the package
     except OSError: return b'<p>dash.html is missing from the hub</p>'

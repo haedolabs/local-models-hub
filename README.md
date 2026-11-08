@@ -1,4 +1,4 @@
-# local-models hub
+# Local Models Hub
 
 Reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.
 
@@ -46,7 +46,7 @@ A client declares a run with three request headers (`X-Run`, `X-Run-Total`, `X-R
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory;
   - crash and recycle history.
 - **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history` and `/hub/recent`.
-- **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `maintenance`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
+- **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `maintenance`, `name`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
 
 ## Install
 
@@ -132,6 +132,11 @@ Then point clients at `http://localhost:1235/v1` (any API key), or `http://local
 | `headroom_gb` | free memory kept when loading an instance |
 
 The file is re-read when its modification time changes. A file that fails to parse leaves the last valid configuration in force and is reported on the status line and the dashboard.
+
+**Display names:** `~/Library/Application Support/LocalModels/names.json`, set with `localmodels name`, maps what a project is seen as (its `X-Project`, else its folder) to what every screen shows, at read time, so renames apply to past history too:
+- `localmodels name project <as seen> <shown>`: one project shown under one name; a folder and a header can show as one.
+- `localmodels name batch <project> <as seen> <shown>`: a label for one of its batches (`X-Run`), jobs (the phase in `X-Step`) or scripts.
+- `localmodels name private <project>`: show only the labels set for it, with no Claude Code session titles and no unlabelled scripts, steps or batch names.
 
 **Environment:**
 
