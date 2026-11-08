@@ -332,10 +332,10 @@ class Door(http.server.BaseHTTPRequestHandler):
         """A request from a peer's hub (this Mac serves as a peer): only with the shared token, never from a web page, and
         only what a front needs: a model's work, the model listing, and this Mac's report. Loads, unloads, recycles,
         maintenance and the dashboard stay this Mac's own business."""
-        if self.headers.get('Origin'): return self._send(403, dict(error='the link answers hubs, not web pages'))
+        if self.headers.get('Origin'): return self._send(403, dict(error='forbidden: requests with an Origin header are not accepted on the peer link'))
         if not peers.token_ok(self.headers.get('X-Hub-Token')):
-            return self._send(401, dict(error='the link needs the token this Mac shares with its peers (peer-token)'))
-        if (self.headers.get('Host') or '').lower() not in self.server.hosts: return self._send(403, dict(error='not this link\'s address'))
+            return self._send(401, dict(error='unauthorized: missing or invalid X-Hub-Token (peer-token)'))
+        if (self.headers.get('Host') or '').lower() not in self.server.hosts: return self._send(403, dict(error='forbidden: Host does not match the link listener address'))
         self._link = llmshare.clean(self.headers.get('X-Hub-From'), 40) or 'a peer'
         path = self.path
         route = path.split('?')[0].rstrip('/').lower()
@@ -350,7 +350,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             if not isinstance(j, dict): j = {}
             self._dialect = dialect(route)
             return self.generate(path.split('?')[0].rstrip('/') + ('?' + path.split('?', 1)[1] if '?' in path else ''), body, j, self.headers.get('X-Project'))
-        return self._send(403, dict(error="not over the link: only a model's work, the model listing and this Mac's report"))
+        return self._send(403, dict(error='forbidden on the peer link: only inference endpoints, the model list, /hub/peer and /hub/health are served'))
 
     # ---- a request that makes a model work
     def _candidates(self, model, skip=(), kind=None):
@@ -393,7 +393,7 @@ class Door(http.server.BaseHTTPRequestHandler):
     def generate(self, path, body, j, project):
         t0, host, front = time.time(), self.client_address[0], self._link
         if front:                                          # over the link: the front named the program; nothing here to look up
-            pid, who = 0, dict(app=f"{front}'s hub")
+            pid, who = 0, dict(app=f'peer gateway {front}')
         else:
             pid = whois.peer_pid(self.client_address[1], PORT, '[::1]' if ':' in host else '127.0.0.1') or 0
             who = whois.identity(pid) if pid else {}
@@ -460,7 +460,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                         if peer: peers.LINK.answered(chosen)
                         note = getattr(self, '_note', None) or note; break
                     if peer and not self._sent and code != 499 and len(skip) < 16:   # the peer could not take it, and nothing reached
-                        skip.add(peer); note = f'sent again here: {why}'             # the program: back in the queue, here or another peer
+                        skip.add(peer); note = f'requeued locally: {why}'             # the program: back in the queue, here or another peer
                         rec.update(state='waiting for a turn', copy=None)
                         try: llmshare._write(mark, rec)
                         except OSError: pass
@@ -505,16 +505,16 @@ class Door(http.server.BaseHTTPRequestHandler):
         name, target = (peers.split(peer)[1], None) if peer else (None, None)
         if peer:
             target, extra = peers.LINK.target(peer)
-            if not target: return 502, {}, f'{name} is no longer in the settings'
+            if not target: return 502, {}, f'peer {name}: removed from settings'
             headers.update(along or {}); headers.update(extra); headers['X-Timeout'] = str(peers.PEER_WAIT)
-        who = name or 'LM Studio'
+        who = f'peer {name}' if name else 'LM Studio'
         up = None
         for attempt in (1, 2):
             try: up = Upstream(method, path, body if method in ('POST', 'PUT') else None, headers, base=target); break
             except OSError as e:
                 if peer:
                     w = peers.reach_words(e); peers.LINK.failed(peer, 0, w)
-                    return 502, {}, f'{name}: {w}'
+                    return 502, {}, f'peer {name}: {w}'
                 if attempt == 1 and start_lmstudio(): continue
                 if model: return 502, {}, f"LM Studio's server is not answering on {UP} ({e})"
                 code, _ = self._send(502, dict(error=f"LM Studio's server is not answering on {UP} ({e}): start it in LM Studio's Developer tab, or: lms server start"))
@@ -530,9 +530,9 @@ class Door(http.server.BaseHTTPRequestHandler):
             done.set(); up.close()
             if gone[0]: return 499, {}, 'the program hung up during the answer'
             if peer:
-                w = peers.reach_words(e) if isinstance(e, OSError) else f'it dropped the connection ({type(e).__name__})'
+                w = peers.reach_words(e) if isinstance(e, OSError) else f'connection dropped before the response ({type(e).__name__})'
                 peers.LINK.failed(peer, 0, w)
-                return 502, {}, f'{name}: {w}'
+                return 502, {}, f'peer {name}: {w}'
             if model: return 502, {}, f'LM Studio dropped the connection ({type(e).__name__})'
             code, _ = self._send(502, dict(error=f'LM Studio dropped the connection ({type(e).__name__})'))
             return code, {}, None
@@ -545,7 +545,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                 except (ValueError, AttributeError): said = None
                 said = said.get('message') if isinstance(said, dict) else said
                 peers.LINK.failed(peer, code, str(said or '')[:200], dict(resp.getheaders()))
-                return code, {}, f'{name} answered {code}' + (f' ({str(said)[:160]})' if said else '')
+                return code, {}, f'peer {name} returned HTTP {code}' + (f' ({str(said)[:160]})' if said else '')
             if code >= 400:
                 data = resp.read(200_000)
                 text = data.decode('utf-8', 'replace')
@@ -584,9 +584,9 @@ class Door(http.server.BaseHTTPRequestHandler):
                             if name in LAST_EVENTS: whole = True; failed = failed or name in FAILED_EVENTS   # a stream without event: lines
                     if line in (b'\n', b'\r\n'): self.wfile.flush()
                 look = peers.WAKE.set if peer else crashes.nudge                # who looks at once: the link, or this Mac's keeper
-                if whole and failed: self._note = f'{who} ended the answer with an error'; look()
+                if whole and failed: self._note = f'{who}: stream ended with an error event' if peer else 'LM Studio ended the answer with an error'; look()
                 if not whole:                                                # the stream ended without its last event: cut short
-                    self._note = f'{who} cut the answer short'; look()
+                    self._note = f'{who}: stream truncated (no terminal event)' if peer else 'LM Studio cut the answer short'; look()
                     self.wfile.write(CUT.get(self._dialect, CUT['openai']))
                 self.wfile.flush()
                 return code, usage, None
@@ -601,8 +601,8 @@ class Door(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError): return 499, usage, 'the program hung up during the answer'   # LM Studio stops when we do
         except (http.client.IncompleteRead, http.client.HTTPException, OSError) as e:
             if self._sent: return code, usage, None                   # a stream cut short: the program saw it end
-            if peer: peers.LINK.failed(peer, 0, f'it cut the answer short ({type(e).__name__})')
-            return 502, {}, f'{who} cut the answer short ({type(e).__name__})'
+            if peer: peers.LINK.failed(peer, 0, f'response truncated ({type(e).__name__})')
+            return 502, {}, (f'{who}: response truncated' if peer else 'LM Studio cut the answer short') + f' ({type(e).__name__})'
         finally: up.close()
 
     # ---- the hub's own pages
@@ -686,26 +686,27 @@ def listen_link():
             if key != cur:
                 if srv:
                     srv.shutdown(); srv.server_close(); srv = None
-                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} the door no longer listens for peers on {cur[0]}:{cur[1]}", flush=True)
+                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {cur[0]}:{cur[1]} stopped", flush=True)
                 cur, peers.LISTEN['words'] = None, None
                 if want:
                     problem = peers.token_problem()
-                    if problem: words = f'not listening for peers: {problem}'
+                    if problem: words = f'link listener not started: {problem}'
                     else:
                         try:
                             srv = link_server(want['address'], want['port'])
                             threading.Thread(target=srv.serve_forever, daemon=True).start()
                             cur = key
                             port_name = peers.ports().get(srv.iface) if srv.iface else None
-                            words = (f"listening for peers on {want['address']}:{want['port']}" + (f' ({port_name or srv.iface})' if srv.iface else '')
+                            words = (f"listening on {want['address']}:{want['port']} for peers (token required)"
+                                     + (f", interface {srv.iface}" + (f' ({port_name})' if port_name else '') if srv.iface else '')
                                      + ('' if not srv.iface or peers.bridge(srv.iface, {srv.iface: port_name}) or peers.loopback(want['address'])
-                                        else ': that is not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
+                                        else '; warning: not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
                         except OSError as e:
-                            words = f"not listening for peers on {want['address']}:{want['port']} yet ({e.strerror or e}): is the address on this Mac (the Thunderbolt Bridge's fixed address)?"
+                            words = f"link listener not bound to {want['address']}:{want['port']} ({e.strerror or e}): address not configured on any interface (assign the Thunderbolt Bridge static address)"
                     peers.LISTEN['words'] = words
-                    if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} the door is {words}", flush=True); said = words
+                    if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
                 else: said = None
-        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} the link listener stumbled: {type(e).__name__}: {e}", flush=True)
+        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener error: {type(e).__name__}: {e}", flush=True)
         time.sleep(5)
 
 

@@ -148,9 +148,9 @@ def plan(rows, busy=None):
             elif idle and c['tokens'] >= th['soft']: why, rank = f"it is idle and has {c['tokens']:,} tokens processed since it was loaded, past the soft limit of {th['soft']:,}", 1 + s
             else: continue
             if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
-                _held[base] = (f'its recycle ({why}) waits: it is the only copy on this Mac and the hub has not loaded it here, so it is '
-                               "not sure LM Studio would let it load again; LM Studio's model-loading guardrail set to Off, or one "
-                               'load by the hub here (after a crash, or with `localmodels use` after an unload), settles it')
+                _held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
+                               "the instance manager here, guardrail not Off); set LM Studio's model-loading guardrail to Off, or load it once "
+                               'through the instance manager (crash recovery, or `localmodels use` after an unload)')
                 continue
             if best is None or rank > best[0]: best = (rank, i, base, c, round(s, 2), why)
     if not best: return None

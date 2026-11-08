@@ -28,7 +28,7 @@ INSTRUCTIONS = (
 _o = lambda props, req=(): {'type': 'object', 'properties': props, 'required': list(req)}
 TOOLS = [
     {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each copy\'s work since it was loaded against its '
-     'recycle band), the hub, its peers (other Macs whose copies take requests when this Mac\'s slots are full) and the link to each, every program using a model by '
+     'recycle band), the hub, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every program using a model by '
      'project and Claude session (batches with their progress), crashes and recycles, and the last hour by project.',
      'inputSchema': _o({})},
     {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (where to send requests, "
