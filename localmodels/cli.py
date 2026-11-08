@@ -29,7 +29,8 @@
   localmodels start | stop | restart     the hub's door (start on an open door does nothing; restart waits for quiet)
   localmodels gateway            the door in the foreground (what launchd runs)
   localmodels mcp                the MCP server (Claude Code starts it)
-  localmodels publish [--version X.Y.Z] [--remote URL]   tests, version stamped, committed, tagged and pushed
+  localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
+                                 the version stamped, committed, tagged and pushed (--dry: the checks only)
 """
 import glob, json, os, plistlib, re, shutil, subprocess, sys, time, urllib.request
 
@@ -659,6 +660,66 @@ def _git(*args, check=True):
     return r.stdout.strip()
 
 
+PRIVATE_WORDS = os.environ.get('LOCALMODELS_PRIVATE_WORDS') or os.path.join(llmshare.SHARED, 'private-words.txt')
+EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'     # git's empty tree: "since the start" when nothing is tagged
+
+
+def read_words(path):
+    """A private word list: one pattern a line (a regular expression, case does not matter; a line that is not a valid
+    one is read as plain text), `allow: <pattern>` for text that may appear though it holds a word, # for comments.
+    -> (words, allows), or None when there is no such file."""
+    try: lines = open(path).read().split('\n')
+    except OSError: return None
+    def rx(p):
+        try: return re.compile(p, re.I)
+        except re.error: return re.compile(re.escape(p), re.I)
+    words, allows = [], []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'): continue
+        if line.lower().startswith('allow:'): allows.append(rx(line[6:].strip()))
+        else: words.append(rx(line))
+    return words, allows
+
+
+def private_check(repo, words_file):
+    """What would go public in the next push, read against the private word list: every line added since the last
+    release tag, the names of files added, and the commit messages. -> {status ('skipped', 'clean' or 'hits'), since,
+    lines, files, commits, hits: [(where, text)]}."""
+    out = dict(status='skipped', since=None, lines=0, files=0, commits=0, hits=[])
+    wl = read_words(words_file)
+    if wl is None: return out
+    words, allows = wl
+    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True).stdout
+    tag = git('describe', '--tags', '--abbrev=0').strip() or None
+    base, out['since'] = tag or EMPTY_TREE, tag
+
+    def held(text):
+        for a in allows: text = a.sub(' ', text)
+        return any(w.search(text) for w in words)
+    path, n = None, 0
+    for line in git('diff', '--unified=0', '--no-color', '--no-ext-diff', f'{base}..HEAD').split('\n'):
+        if line.startswith('+++ '): path = line[6:] if line.startswith('+++ b/') else None; continue
+        if line.startswith('@@'):
+            m = re.search(r'\+(\d+)', line); n = int(m.group(1)) if m else 0; continue
+        if line.startswith('+') and path:
+            out['lines'] += 1
+            if held(line[1:]): out['hits'].append((f'{path}:{n}', line[1:].strip()[:160]))
+            n += 1
+    for f in git('diff', '--name-only', '--diff-filter=AR', f'{base}..HEAD').split('\n'):
+        if not f: continue
+        out['files'] += 1
+        if held(f): out['hits'].append((f'file name {f}', f))
+    for rec in git('log', '--format=%h%x00%B%x1e', f'{base}..HEAD' if tag else 'HEAD').split('\x1e'):
+        if '\x00' not in rec: continue
+        sha, body = rec.strip().split('\x00', 1)
+        out['commits'] += 1
+        for line in body.split('\n'):
+            if held(line): out['hits'].append((f'commit {sha}', line.strip()[:160]))
+    out['status'] = 'hits' if out['hits'] else 'clean'
+    return out
+
+
 def publish(a):
     """Tests, the version stamped into the code and the plugin manifest, a commit, a tag, a push. Nothing leaves this Mac
     until the push, and the push needs a remote (--remote URL the first time, or set up by hand)."""
@@ -671,6 +732,28 @@ def publish(a):
     for name, good, note in run_tests():
         print(f"   {'ok  ' if good else 'FAIL'} {name}: {note}"); bad = bad or not good
     if bad: print('   fix the tests first; nothing published'); return 1
+    print('2. the plugin check:')
+    claude = shutil.which('claude')
+    if claude:
+        try: r = subprocess.run([claude, 'plugin', 'validate', HOME], capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.SubprocessError) as e: print(f'   could not run claude plugin validate: {e}; nothing published'); return 1
+        if r.returncode != 0:
+            for line in (r.stdout + r.stderr).strip().split('\n')[-12:]: print('   ' + line)
+            print('   fix the plugin first; nothing published'); return 1
+        print('   claude plugin validate: passed' + (' with warnings' if 'warning' in (r.stdout + r.stderr).lower() else ''))
+    else: print('   the claude command is not on PATH: not checked')
+    print('3. the privacy check:')
+    pc = private_check(HOME, PRIVATE_WORDS)
+    if pc['status'] == 'skipped':
+        print(f'   no private word list at {PRIVATE_WORDS}: not checked (one word or pattern a line, `allow: <pattern>` for what may')
+        print('   appear, # for notes; then every release is read against it before anything is pushed)')
+    elif pc['status'] == 'hits':
+        for where, text in pc['hits'][:30]: print(f'   {where}: {text}')
+        if len(pc['hits']) > 30: print(f"   ... and {len(pc['hits']) - 30} more")
+        print(f"   nothing published: change these, or add an `allow:` line to {PRIVATE_WORDS} for what is fine to make public"); return 1
+    else:
+        print(f"   clean: {pc['lines']} new lines, {pc['files']} new files and {pc['commits']} commit messages since {pc['since'] or 'the start'}")
+    if '--dry' in a: print('--dry: the checks only; nothing stamped, committed or pushed'); return 0
     cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
     want = opt(a, '--version')
     if not want:
@@ -692,20 +775,20 @@ def publish(a):
         _git('commit', '-q', '-m', f'Release {want}')
         _git('tag', '-a', f'v{want}', '-m', f'Release {want}')
     except RuntimeError as e: print(f'git: {e}'); return 1
-    print(f'2. version {want} stamped, committed and tagged (v{want}) on {branch}')
+    print(f'4. version {want} stamped, committed and tagged (v{want}) on {branch}')
     remote = opt(a, '--remote')
     try:
         if remote and 'origin' not in _git('remote').split(): _git('remote', 'add', 'origin', remote)
         if 'origin' not in _git('remote').split():
-            print('3. no remote yet: create an empty repository on GitHub (public), then either\n'
+            print('5. no remote yet: create an empty repository on GitHub (public), then either\n'
                   f'   localmodels publish --remote git@github.com:<owner>/<repo>.git   (next time; this release is committed and tagged)\n'
                   '   or: git remote add origin <url> && git push -u origin main --follow-tags')
             return 0
         _git('push', 'origin', branch, '--follow-tags')
         url = _git('remote', 'get-url', 'origin')
-    except RuntimeError as e: print(f'3. push failed: {e}'); return 1
+    except RuntimeError as e: print(f'5. push failed: {e}'); return 1
     m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', url)
-    print(f'3. pushed to {url}')
+    print(f'5. pushed to {url}')
     if m: print(f'   install line for Claude Code users: /plugin install local-models --marketplace {m.group(1)}/{m.group(2)}')
     return 0
 
