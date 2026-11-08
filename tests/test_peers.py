@@ -302,7 +302,9 @@ def test_commands(box):
         code, out = run('add', 'stray', '169.254.12.34')
         t('a link-local address is taken, with the warning', code == 0 and 'link-local' in out and any('link-local' in w for w in peers.problems()), out)
         run('remove', 'stray')
-        code, out = run('serve', '192.168.213.2')
+        real_iface, peers.interface_of = peers.interface_of, (lambda addr: None)   # whatever this Mac's own bridge holds
+        try: code, out = run('serve', '192.168.213.2')
+        finally: peers.interface_of = real_iface
         t('peer serve writes the address this Mac listens on, and says when no interface holds it yet',
           code == 0 and json.load(open(llmshare.MODELS)).get('serve') == {'address': '192.168.213.2'} and peers.serving() == {'address': '192.168.213.2', 'port': llmshare.HUB_PORT}
           and 'no interface' in out, out)
