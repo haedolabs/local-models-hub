@@ -1,7 +1,7 @@
 {
   "name": "local-models",
   "description": "One LM Studio on a Mac, shared by every project and every Claude Code session: a door on localhost:1235 that takes turns, names who sent each request, keeps model copies loaded, reloads and recycles them across crashes, runs local read-only agents, and shows it all on one dashboard. The MCP tools: status, guide, ask, batch, job_status, swap_check.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "Haedo Labs"
   },
