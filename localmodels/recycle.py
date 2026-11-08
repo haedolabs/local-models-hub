@@ -23,10 +23,10 @@ written count is the tighter one there; with short answers the processed count r
 "tokens" is marked DRAINING, the door sends it nothing new (gateway.generate leaves it out; a lone copy's requests, or
 requests that name that copy, are held as after a crash), its requests in flight finish, and when none is left (the slot
 locks and LM Studio's own status agree) models.keep unloads it and loads it again with the family's settings, under the
-swap lock, and records it in crashes.jsonl (event "recycled"). The unload names the exact instance (models.unload: LM
-Studio's REST API, since its server also resolves a plain name by model key, which is the first copy's identifier), and
-models._recycle checks which instance went: when LM Studio took another one, that one is loaded again at once and the
-recycle is given up and retried after RETRY. A copy past "soft" that is idle anyway is recycled on the spot, so the hard
+swap lock, and records it in crashes.jsonl (event "recycled"). LM Studio's server resolves an unload by name to the
+oldest-loaded instance of that model key, which is a family's first copy's name: so the first copy is recycled only when it
+is the oldest, and an older sibling goes first (oldest_first). models._recycle also checks which instance went: when LM
+Studio took another one, that one is loaded again at once and the recycle is given up and retried after RETRY. A copy past "soft" that is idle anyway is recycled on the spot, so the hard
 drain rarely runs. before_batch: when a batch begins it asks the door (POST /hub/recycle, which
 agent.batch does; or `localmodels recycle`), and a copy past that share of its band is recycled first, so a night's work
 starts on fresh copies. One copy at a time; never while its family has a copy down or missing; two minutes between two
@@ -184,11 +184,28 @@ def plan(rows, busy=None):
             if best is None or rank > best[0]: best = (rank, i, base, c, round(s, 2), why)
     if not best: return None
     _, copy, base, c, s, why = best
+    older = oldest_first(rows, copy)
+    if older:                                                # LM Studio would unload `older` by this name: it goes first
+        th = thresholds((llmshare.settings().get('families') or {}).get(base)) or DEFAULT
+        why = f'{older} first, so that {copy} becomes the oldest instance of its model key (LM Studio unloads the oldest by that name); {copy} is due: {why}'
+        copy = older
+        c = counts(copy, _since(seen, copy)); s = round(share(c, th), 2)
     with crashes._state() as st2:
         rr = _r(st2)
         if rr['job']: return None
         rr['job'] = dict(copy=copy, family=base, state='draining', since=time.time(), why=why, counts=c, share=s)
     return f'{copy}: draining for recycle ({why})'
+
+
+def oldest_first(rows, copy):
+    """When this copy's identifier is also its model key (a family's first copy), LM Studio's server resolves an unload by
+    that name to the oldest-loaded instance of the key, whichever its identifier (measured: its REST API and `lms unload`
+    alike, with its listing oldest first). -> the older sibling an unload would take instead, or None when this copy is
+    the oldest (or its name is unambiguous)."""
+    row = next((x for x in rows if x['id'] == copy), None)
+    if not row or row.get('key') != copy: return None
+    same = [x['id'] for x in rows if x.get('key') == copy]
+    return same[0] if same and same[0] != copy else None
 
 
 def ready(rows, busy):

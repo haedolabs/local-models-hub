@@ -212,10 +212,10 @@ def load(key, ident, context, parallel):
 
 
 def unload(ident):
-    """Unload one instance by its exact identifier: LM Studio's REST API (POST /api/v1/models/unload {instance_id}) names an
-    instance. `lms unload` only where that API is missing (an older LM Studio): there LM Studio's server resolves the name it
-    is given by model key too, so the bare id of a family's first replica (which is also the model key) can take a sibling;
-    measured: a recycle of the first replica unloaded the second. -> (ok, words)."""
+    """Unload one instance: LM Studio's REST API (POST /api/v1/models/unload {instance_id}), `lms unload` where that API is
+    missing (an older LM Studio). Both pass a name that LM Studio's server also resolves by model key, to the oldest-loaded
+    instance of that key (measured): a family's first replica, named by its key, is unloaded only when it is the oldest
+    (recycle.oldest_first orders the recycles), and unload_exactly says what went. -> (ok, words)."""
     if not _ok_id(ident): return False, f'refused: {ident!r} is not a model id'
     req = urllib.request.Request(llmshare.LMSTUDIO + '/api/v1/models/unload', data=json.dumps(dict(instance_id=ident)).encode(),
                                  headers={'Content-Type': 'application/json'})
@@ -470,6 +470,7 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         have = {r['id'] for r in llmshare.loaded()}
         add = [c for c in want if c not in have or c in drop]
         if dry: return 0, f"would unload {', '.join(drop) or 'nothing'}; would load {', '.join(add) or 'nothing'}"
+        drop = sorted(drop, key=lambda i: llmshare.family(i) == i)   # <id>:N first: a bare id (a model key) is unambiguous once its siblings are gone
         for _ in range(2):                                   # what is still listed is unloaded again, once
             for i in drop: unload(i)
             now = _listed()
