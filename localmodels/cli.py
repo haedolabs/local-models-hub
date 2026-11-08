@@ -309,10 +309,23 @@ def lms_found():
     return os.path.exists(llmshare.LMS)
 
 
+def _fitted():
+    """The first settings for this Mac: its memory and the models LM Studio has downloaded (models.first_settings)."""
+    from . import models
+    return models.first_settings(models.downloaded() if lms_found() else None, models.mem_gb())
+
+
+def _fitted_words(s):
+    if not s.get('families'): return 'no model managed yet: ' + s.get('why', '')
+    return '; '.join(f"{k} as {f['copies']} {'copy' if f['copies'] == 1 else 'copies'} of {f['parallel']} answers at once, context {f['context']:,}"
+                     for k, f in s['families'].items())
+
+
 def install(wait=90, plugin=False, dry=False, no_claude=False):
     uid = f'gui/{os.getuid()}'
     if dry:
-        print(f"would write the settings file {llmshare.MODELS} from the hub's default" if not os.path.exists(llmshare.MODELS) else f'would keep the settings: {llmshare.MODELS}')
+        if os.path.exists(llmshare.MODELS): print(f'would keep the settings: {llmshare.MODELS}')
+        else: print(f'would write the settings file {llmshare.MODELS}, fitted to this Mac: {_fitted_words(_fitted())}')
         print(f"would copy the door's code to {INSTALLED} and start it at login as {LABEL} ({PLIST}) with {PY}, after a moment with no request passing through")
         if plugin: print("would leave the hub's tools and the rules to the Claude Code plugin (no registration, no signpost line)")
         elif no_claude: print('would register nothing with Claude Code and add no signpost line (--no-claude)')
@@ -322,8 +335,9 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         return 0
     os.makedirs(LOGS, exist_ok=True)
     if not os.path.exists(llmshare.MODELS):
-        os.makedirs(llmshare.SHARED, exist_ok=True); shutil.copy2(llmshare.MODELS_DEFAULT, llmshare.MODELS)
-        print(f"0. the settings file {llmshare.MODELS} written from the hub's default (edit it; the door reads it as it changes)")
+        os.makedirs(llmshare.SHARED, exist_ok=True); fitted = _fitted()
+        with open(llmshare.MODELS, 'w') as f: json.dump(fitted, f, indent=1); f.write('\n')
+        print(f'0. the settings file {llmshare.MODELS} written, fitted to this Mac: {_fitted_words(fitted)} (edit it; the door reads it as it changes)')
     else: print(f'0. the settings: {llmshare.MODELS}')
     running = _loaded() or any(_loaded(o) for o in OLD_LABELS)
     if running and not quiet(wait):
