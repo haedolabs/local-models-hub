@@ -47,17 +47,14 @@ def free_port():
 
 
 def build(state, name, change=None):
-    """A release folder from this checkout (the deployed files, RELEASE.json); change(folder) alters it first."""
-    tmp = os.path.join(state, 'releases', f'.tmp-{name}')
+    """A release folder (cli.build_release, as install builds one): from this checkout, or from a copy change(folder) alters."""
+    from localmodels import cli
+    if not change: return cli.build_release(ROOT, state)
+    src = os.path.join(os.path.dirname(state), f'src-{name}')
     for rel in dash.deploy_files(ROOT):
-        os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True); shutil.copy2(os.path.join(ROOT, rel), os.path.join(tmp, rel))
-    if change: change(tmp)
-    d = os.path.join(state, 'releases', dash.deploy_digest(tmp))
-    json.dump(dict(digest=os.path.basename(d), version='test', state_protocol=1, channel=SUP.CHANNEL, supervisor=SUP.supervisor_digest(tmp), built=time.time()),
-              open(os.path.join(tmp, 'RELEASE.json'), 'w'))
-    if os.path.exists(d): shutil.rmtree(tmp)
-    else: os.rename(tmp, d)
-    return d
+        os.makedirs(os.path.dirname(os.path.join(src, rel)), exist_ok=True); shutil.copy2(os.path.join(ROOT, rel), os.path.join(src, rel))
+    change(src)
+    return cli.build_release(src, state)
 
 
 def call(state, op, timeout=180, **fields):
@@ -189,6 +186,9 @@ def run(box, procs):
     t('gen 1 drained and exited once its stream had finished', gone, call(state, 'status').get('workers'))
     t('the roles moved to gen 2', wait_for(lambda: set((health(port).get('roles') or {}).values()) == {h.get('pid')}, 10), health(port).get('roles'))
     t('the hub link points at release 2', os.path.realpath(os.path.join(state, 'hub')) == os.path.realpath(r2), os.readlink(os.path.join(state, 'hub')))
+    rel = json.load(open(os.path.join(r2, 'RELEASE.json')))
+    t('a release is named by its digest and says what it holds', rel.get('digest') == os.path.basename(r2) and rel.get('state_protocol') == 1
+      and rel.get('supervisor') == SUP.supervisor_digest(r2) and dash.deploy_digest(r2) == os.path.basename(r2), rel)
 
     print('a release that cannot start')
     with Hammer(port) as hm:

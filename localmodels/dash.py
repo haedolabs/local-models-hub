@@ -288,6 +288,21 @@ def _procs():
     return out
 
 
+def gateway_words():
+    """The gateway's workers in one line, from the registry: 'gateway: gen 8 (pid 4123) serving 3f9a12c0 since 10:42;
+    draining: gen 7 (pid 3988): 5 connections, 2 queued, oldest 14 min'. None when no gateway is registered."""
+    rows = llmshare.live_gateways()
+    if not rows: return None
+    clock = lambda t: time.strftime('%H:%M', time.localtime(float(t or 0)))
+    parts = [f"gen {r.get('gen')} (pid {r['pid']}) {r.get('role') or '?'} {str(r.get('code') or '')[:8]} since {clock(r.get('started'))}"
+             for r in rows if r.get('role') in ('serving', 'warming')]
+    draining = [r for r in rows if r.get('role') == 'draining']
+    if draining:
+        parts.append('draining: ' + ', '.join(f"gen {r.get('gen')} (pid {r['pid']}): {r.get('open') or 0} connections, {r.get('queued') or 0} queued"
+                                               + (f", oldest {int(float(r['oldest']) // 60)} min" if r.get('oldest') else '') for r in draining))
+    return 'gateway: ' + '; '.join(parts)
+
+
 def gateway_pids():
     """The gateway processes on this Mac (never counted as clients that bypass the gateway): the registry's live gateways,
     draining ones included, and the supervisor; a gateway older than the registry by its marks, or by /hub/health when no

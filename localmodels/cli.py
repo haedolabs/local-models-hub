@@ -130,6 +130,8 @@ def status():
     if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + (' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
     print(f"gateway: {'listening on ' + llmshare.HUB if d['up'] else 'down (localmodels start)'}"
           + (' · stale code: localmodels install' if d['up'] and d['stale'] else ''))
+    gw = dash.gateway_words()
+    if gw: print('  ' + gw[len('gateway: '):])                          # the workers: serving, and draining with what they finish
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
     if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (last valid settings in effect)')
@@ -957,14 +959,95 @@ def maintenance_cmd(a):
     return 0
 
 
-def door(verb):
+# ---------------------------------------------------------------- releases and the supervisor
+def build_release(root=None, shared=None):
+    """releases/<D>: an immutable copy of the files a gateway runs (dash.deploy_files) and its RELEASE.json {digest,
+    version, state_protocol, channel, supervisor, built}, built in releases/.tmp-<D>-<pid>/ and renamed into place; an
+    existing D is reused. -> its folder."""
+    from . import dash, supervisor
+    root, shared = root or HOME, shared or llmshare.SHARED
+    d = dash.deploy_digest(root)
+    dest = os.path.join(shared, 'releases', d)
+    if os.path.isfile(os.path.join(dest, 'RELEASE.json')): return dest
+    tmp = os.path.join(shared, 'releases', f'.tmp-{d}-{os.getpid()}')
+    shutil.rmtree(tmp, ignore_errors=True)
+    for rel in dash.deploy_files(root):
+        os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+        shutil.copy2(os.path.join(root, rel), os.path.join(tmp, rel))
+    if dash.deploy_digest(tmp) != d:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f'the copy differs from {root} (a file changed while it was copied): run install again')
+    with open(os.path.join(tmp, 'RELEASE.json'), 'w') as f:
+        json.dump(dict(digest=d, version=VERSION, state_protocol=llmshare.STATE_PROTOCOL, channel=supervisor.CHANNEL,
+                       supervisor=supervisor.supervisor_digest(tmp), built=round(time.time(), 1)), f)
+    try: os.rename(tmp, dest)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if not os.path.isfile(os.path.join(dest, 'RELEASE.json')): raise          # else another install built it meanwhile
+    return dest
+
+
+def supervisor_call(op, timeout=300, say=None, **fields):
+    """One operation on the running supervisor's control socket (status, deploy, restart, rollback, upgrade). Its progress
+    lines go to say(words). -> its final reply {done, ok, ...}, or None when no supervisor answers."""
+    import socket
+    path = (llmshare.supervisor() or {}).get('sock')
+    if not path: return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(timeout)
+    try:
+        s.connect(path)
+        s.sendall((json.dumps(dict(op=op, **fields)) + '\n').encode())
+        buf = b''
+        while True:
+            x = s.recv(65536)
+            if not x: return None
+            buf += x
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                try: m = json.loads(line)
+                except ValueError: continue
+                if m.get('done'): return m
+                if say and m.get('progress'): say(m['progress'])
+    except OSError: return None
+    finally: s.close()
+
+
+def sweep_workers(grace=5.0):
+    """After a bootout: SIGTERM every registered gateway whose lock is still held (an adopted worker is not launchd's
+    child), SIGKILL what is left after `grace` seconds. -> how many were signalled."""
+    import signal as _signal
+    pids = [r['pid'] for r in llmshare.live_gateways() if r['pid'] != os.getpid()]
+    for pid in pids:
+        try: os.kill(pid, _signal.SIGTERM)
+        except OSError: pass
+    end = time.time() + grace
+    while time.time() < end and [r for r in llmshare.live_gateways() if r['pid'] in pids]:
+        time.sleep(0.2); llmshare._live.clear(); llmshare._gw['at'] = 0.0
+    for r in llmshare.live_gateways():
+        if r['pid'] in pids:
+            try: os.kill(r['pid'], _signal.SIGKILL)
+            except OSError: pass
+    return len(pids)
+
+
+def door(verb, a=()):
     uid = f'gui/{os.getuid()}'
     if verb == 'start' and _loaded() and llmshare.hub_up(fresh=True): print(f'gateway already listening on {llmshare.HUB}'); return 0
-    if verb in ('stop', 'restart') and _loaded() and not quiet():
-        print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle')
+    sup = llmshare.supervisor()
+    if verb in ('restart', 'rollback') and sup and '--cold' not in a:   # a handoff: no quiet gate, nothing refused or cut
+        r = supervisor_call(verb, say=lambda w: print('  ' + w))
+        print((r or {}).get('words') or (r or {}).get('why') or 'no answer from the supervisor')
+        return 0 if r and r.get('ok') else 1
+    if verb == 'rollback': print('rollback needs the supervisor (an install with releases)'); return 1
+    if verb in ('stop', 'restart') and _loaded() and '--now' not in a and not quiet():
+        print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle, or --now')
         return 3
-    if verb == 'stop':
-        r = _launchctl('bootout', f'{uid}/{LABEL}'); print('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()); return r.returncode
+    if verb == 'stop' or (verb == 'restart' and sup):                  # restart --cold: a new run (load_at_start applies)
+        r = _launchctl('bootout', f'{uid}/{LABEL}')
+        n = sweep_workers()
+        if verb == 'stop':
+            print(('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()) + (f'; {n} workers ended' if n else ''))
+            return r.returncode
     if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
     if verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
     else: r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)
@@ -1244,7 +1327,7 @@ def main(argv):
     if verb == 'install':
         w = num(a, '--wait', 1.5); return install(w * 60, plugin='--plugin' in a, dry='--dry' in a, no_claude='--no-claude' in a) if w is not None else 2
     if verb == 'uninstall': return uninstall()
-    if verb in ('start', 'stop', 'restart'): return door(verb)
+    if verb in ('start', 'stop', 'restart', 'rollback'): return door(verb, a)
     if verb == 'gateway':
         if '--worker' in a:                                  # a worker, started by the supervisor (worker.py)
             from . import worker
