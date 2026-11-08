@@ -13,10 +13,100 @@ all than one copy of eight (GUIDE.md, "Where to send requests"). So:
            other model has the room; swapping back brings both.
 Every load and unload holds llmshare's swap lock, so the keeper and a swap never interleave. LM Studio's server is
 started only when it is down: `lms server start` on a running server restarts it and cuts every request in flight.
-"""
-import json, re, subprocess, time, urllib.error, urllib.request
 
-from . import crashes, llmshare, maint, recycle
+When LM Studio refuses a load (its model-loading guardrail: "insufficient system resources"; the GUI's "Load anyway" has
+no equivalent in its CLI or API), the keeper says so in words a person can act on, records what it was refused under
+(conditions(): LM Studio's settings file and the GPU's memory limit), and does not try again until one of them changes or
+a person loads the model; a lone copy the hub has not loaded on this Mac is never unloaded for a recycle (recycle.plan),
+since the load that should follow might be refused: make before break. gpu() and gpu_words() say when a model is
+bigger than the memory macOS lets the GPU hold (iogpu.wired_limit_mb, which resets at every restart); gpu_plist() is
+the LaunchDaemon that sets it at every boot (com.local-models.gpu-limit, installed by a person: `localmodels peer
+gpu-limit`).
+
+A dedicated Mac (a peer that does nothing else) marks its family "load_at_start": when the door starts, the keeper loads
+it once nothing of it is loaded, after LM Studio is up (its daemon started if it is not running) and the GPU may hold
+it: at most 3 tries, 30 s apart, then it says how to load it by hand. Once loaded (or unloaded later by a person), it
+is not loaded at start again until the door starts again. While the login loader from before the hub is installed
+(com.local-models.load-at-login), the keeper leaves loading to it; `localmodels install` retires that loader once a
+family is loaded at start, so one loader runs, never two.
+"""
+import json, os, re, subprocess, time, urllib.error, urllib.request
+
+from . import crashes, llmshare, maint, peers, recycle
+
+GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resource guardrail', re.I)
+GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # sets the GPU's limit at every boot (a person installs it)
+LOADER = os.path.expanduser('~/Library/LaunchAgents/com.local-models.load-at-login.plist')   # a dedicated Mac's loader from before the hub
+START_TRIES, START_GAP = 3, 30                            # loads tried at start, and seconds between them
+_gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
+_start, _woke, _sizes = {}, {'at': 0.0}, {}              # this door run: each family's load at start; LM Studio started; sizes on disk
+
+
+def refused(out):
+    """The message when LM Studio's output says its loading guardrail stopped a load, else None."""
+    if not GUARDRAIL.search(str(out or '')): return None
+    return ("load refused by LM Studio's model-loading guardrail (insufficient system resources). Fix: Settings → Model loading "
+            'guardrails → Off (modelLoadingGuardrails.mode "off"; the instance manager enforces headroom_gb itself), or load it '
+            'once in the LM Studio UI with "Load anyway". No retry until the guardrail setting or iogpu.wired_limit_mb changes')
+
+
+def conditions():
+    """What a refused load depends on: (when LM Studio's settings file last changed, iogpu.wired_limit_mb). Read at most
+    every 5 s (a peer's report asks for it every 2 s)."""
+    if time.time() - _cond['at'] < 5: return _cond['v']
+    try: m = round(os.path.getmtime(os.path.join(peers.LMSTUDIO_HOME, 'settings.json')), 1)
+    except OSError: m = 0
+    try: mb = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError): mb = 0
+    _cond.update(at=time.time(), v=(m, mb))
+    return (m, mb)
+
+
+def gpu():
+    """How much memory this Mac lets the GPU hold: {limit_gb, set (by iogpu.wired_limit_mb), total_gb} (read once a minute).
+    Unset, macOS lets it hold about three quarters of memory on a Mac of 36 GB or more, two thirds below."""
+    if time.time() - _gpu['at'] < 60 and _gpu['v']: return _gpu['v']
+    total = mem_gb()
+    try: mb = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError): mb = 0
+    v = dict(limit_gb=round(mb / 1024 if mb else total * (0.75 if total >= 36 else 2 / 3), 1), set=bool(mb), total_gb=round(total, 1),
+             boot=os.path.exists(GPU_DAEMON))
+    _gpu.update(at=time.time(), v=v)
+    return v
+
+
+def gpu_plist(total_gb=None):
+    """The LaunchDaemon that sets the GPU's limit at every boot, before login and LM Studio: all but 8 GB of memory
+    (40960 MB on a 48 GB Mac)."""
+    mb = (int(round(total_gb if total_gb is not None else mem_gb())) - 8) * 1024
+    return dict(Label='com.local-models.gpu-limit', ProgramArguments=['/usr/sbin/sysctl', f'iogpu.wired_limit_mb={mb}'], RunAtLoad=True)
+
+
+def guardrail_words(g, size_gb, mode):
+    """Words when LM Studio's guardrail is on and the model nearly fills what the GPU may hold, before any load is refused:
+    then only "Off" lets `lms load` through (measured on a 48 GB Mac: refused at every context under Relaxed, Custom
+    42 GB and with alwaysAllowLoadAnyway). Else None."""
+    if mode == 'off' or not g or not size_gb or not g.get('limit_gb') or size_gb <= 0.75 * g['limit_gb']: return None
+    return (f'LM Studio model-loading guardrail enabled (mode "{mode or "default"}") and the model uses over 75% of the GPU wired '
+            'limit: CLI/API loads will be refused (load_at_start, crash recovery). Set modelLoadingGuardrails.mode "off" '
+            '(Settings → Model loading guardrails → Off); the instance manager enforces headroom_gb itself')
+
+
+def gpu_words(g, size_gb):
+    """Words when a model of size_gb does not fit in what the GPU may hold (with room for its context), or fits only
+    because the limit was raised by hand and will reset at the next restart; else None."""
+    if not g or not size_gb or not g.get('limit_gb'): return None
+    total = g.get('total_gb', 0)
+    room = int(total) - 8                                    # what the GPU may hold with 8 GB left to macOS and the apps
+    if size_gb + 1.5 > g['limit_gb']:
+        if size_gb + 1.5 > room:
+            return f"model needs {size_gb:.1f} GiB + KV cache, above the maximum GPU wired limit for this host ({room} GiB): use a smaller quantization"
+        return (f"GPU wired limit {g['limit_gb']:.0f} GiB < model {size_gb:.1f} GiB + KV cache: run `sudo sysctl iogpu.wired_limit_mb={room * 1024}`, "
+                "then restart LM Studio; the value resets on reboot (`localmodels peer gpu-limit` writes the boot LaunchDaemon)")
+    if g.get('set') and not g.get('boot') and size_gb + 1.5 > total * (0.75 if total >= 36 else 2 / 3):
+        return (f"GPU wired limit {g['limit_gb']:.0f} GiB is set at runtime only and resets on reboot: "
+                "`localmodels peer gpu-limit` writes the boot LaunchDaemon")
+    return None
 
 
 def _lms(*args, timeout=900):
@@ -113,9 +203,11 @@ def ensure_server(why='after a load'):
 
 
 def load(key, ident, context, parallel):
+    """Load one copy with lms; -> (ok, LM Studio's words). What came of it is kept (crashes.load_ok, load_refused)."""
     if not (_ok_id(key) and _ok_id(ident)): return False, f'refused: {key!r} / {ident!r} is not a model id'
     ok, out = _lms('load', key, '--identifier', ident, '-c', str(int(context)), '--parallel', str(int(parallel)), '-y')
-    if ok: crashes.loaded_now([ident])
+    if ok: crashes.loaded_now([ident]); crashes.load_ok(llmshare.family(ident))
+    elif refused(out): crashes.load_refused(llmshare.family(ident), refused(out), conditions())
     return ok, out
 
 
@@ -138,7 +230,9 @@ def keep():
         return did + ['maintenance: the keeper stands down (no loads, reloads, recycles or server starts)']
     began = time.time()
     rows = llmshare.loaded(fresh=True)
-    if not llmshare.read_ok(): return did                   # the listing failed or is unsure: nothing to decide on
+    if not llmshare.read_ok():                              # the listing failed or is unsure: nothing to decide on, except
+        w = wake(fams)                                       # a dedicated Mac whose LM Studio is not running at all
+        return did + ([w] if w else [])
     busy = llmshare.busy_slots()
     try:
         back = crashes.watch(rows, listed_at=began, busy=busy)
@@ -156,27 +250,94 @@ def keep():
         if want:
             gone = crashes.confirm_missing(want, rows, busy)
             todo += [(b, f, c) for c in want if c in gone]
+    boot = []                                                # a dedicated Mac: families to load at start, now
+    for b, f in fams.items():
+        if not isinstance(f, dict) or not f.get('load_at_start') or b in down: continue
+        go, w = at_start(b, f, have, room)
+        if go: boot.append((b, f))
+        if w: did.append(w)
     try:
         w = recycle.give_up_if_stuck() or recycle.plan(rows, busy)
         if w: did.append(w)
     except Exception as e: did.append(f'the recycle plan stumbled: {type(e).__name__}: {e}')
     job, ready = recycle.ready(rows, busy)
     if down: job, ready = None, False                        # a family down after a crash: its reload first, no recycle in the same pass
-    if not todo and not back and not (job and ready): return did
+    if not todo and not back and not boot and not (job and ready): return did
     with llmshare.swapping(wait=0) as got:
         if not got: return did                              # a swap is under way: the next pass looks again
         for j in back: did += _again(j, room)
+        for b, f in boot: did += _load_at_start(b, f)
         for base, f, c in todo:
             ids = {r['id']: r for r in llmshare.loaded(fresh=True)}
             if base not in ids or c in ids: continue        # it changed meanwhile
+            blocked = crashes.load_blocked(base, conditions())
+            if blocked: did.append(f'{c}: load skipped: {blocked}'); break
             first, free = ids[base], free_gb()
             if free < gb(first['size']) + room:
                 did.append(f"{c} waits for room: {free:.0f} GB free, a copy needs {gb(first['size']) + room:.0f} with headroom"); break
             ok, out = load(f.get('key') or first['key'], c, f.get('context') or first['context'], f.get('parallel') or first['parallel'])
-            did.append(f'{c} loaded' if ok else f'{c} could not load: {out[-200:]}')
+            did.append(f'{c} loaded' if ok else f'{c}: load failed: {refused(out) or out[-200:]}')
         if job and ready: did += _recycle(job, fams)
     llmshare.loaded(fresh=True)
     return did
+
+
+def wake(fams):
+    """A dedicated Mac right after login: a family to load at start, and LM Studio not running at all (its server refuses
+    connections and `lms ps` fails). Its daemon is started (lms daemon up; never stopped), once a door run. -> words or None."""
+    if _woke['at'] or not any(isinstance(f, dict) and f.get('load_at_start') for f in fams.values()) or server_up(): return None
+    _woke['at'] = time.time()
+    ok, out = _lms('daemon', 'up', timeout=120)
+    ensure_server('to load a family at start')
+    return "LM Studio not running: started llmster (`lms daemon up`) for load_at_start: " + ', '.join(b for b, f in fams.items() if isinstance(f, dict) and f.get('load_at_start')) + \
+        ('' if ok else f' (lms: {out[-160:]})')
+
+
+def _size_of(key):
+    """A downloaded model's size in GB (`lms ls --json`, read once a door run), or 0 when it cannot be said."""
+    if key not in _sizes:
+        rows = downloaded()
+        if rows is None: return 0
+        m = next((m for m in rows if isinstance(m, dict) and m.get('modelKey') == key), None)
+        _sizes[key] = (m.get('sizeBytes') or 0) / 2**30 if m else 0
+    return _sizes[key]
+
+
+def at_start(b, f, have, room):
+    """Whether to load a family marked load_at_start now: -> (load now, words or None). Not when any copy of it is loaded
+    (then this start is done), when it was loaded or given up on in this door run, while the login loader from before the
+    hub is installed (it loads it), when LM Studio refused it and nothing has changed, when the GPU may not hold it yet,
+    when there is not room, or during the pause after a failed try."""
+    s = _start.setdefault(b, dict(tries=0, next=0.0, done=False))
+    if any(llmshare.family(i) == b for i in have): s['done'] = True; return False, None
+    if s['done']: return False, None
+    if os.path.exists(LOADER): return False, f'{b}: load_at_start deferred to LaunchAgent com.local-models.load-at-login (`localmodels install` retires it)'
+    blocked = crashes.load_blocked(b, conditions())
+    if blocked: return False, f'{b}: load_at_start blocked: {blocked}'
+    size, g = _size_of(f.get('key') or b), gpu()
+    if size and g.get('limit_gb') and size + 1.5 > g['limit_gb']:
+        return False, f"{b}: load_at_start waiting for GPU wired limit ({g['limit_gb']:.0f} GiB < {size:.1f} GiB + KV cache)"
+    free = free_gb()
+    if size and free < size + room: return False, f'{b}: load_at_start waiting for memory: {free:.0f} GiB free, {size + room:.0f} GiB required (incl. headroom_gb)'
+    if time.time() < s['next']: return False, None
+    return True, None
+
+
+def _load_at_start(b, f):
+    """Load a family's first copy at start (under the swap lock): its settings' key, context and slots. -> words."""
+    s = _start.setdefault(b, dict(tries=0, next=0.0, done=False))
+    s['tries'] += 1
+    ok, out = load(f.get('key') or b, b, f.get('context') or 32768, f.get('parallel') or 4)
+    if ok:
+        s['done'] = True; ensure_server()                  # LM Studio may turn its server off when a model changes
+        return [f'{b}: loaded (load_at_start' + (f', attempt {s["tries"]}' if s['tries'] > 1 else '') + ')']
+    if refused(out): return [f'{b}: load_at_start failed: {refused(out)}']   # recorded: no try until something changes
+    s['next'] = time.time() + START_GAP
+    if s['tries'] >= START_TRIES:
+        s['done'] = True
+        s['words'] = f'{b}: load_at_start failed after {START_TRIES} attempts ({out[-160:]}); load manually: localmodels use {b}'
+        return [s['words']]
+    return [f'{b}: load_at_start attempt {s["tries"]}/{START_TRIES} failed, retry in {START_GAP} s: {out[-160:]}']
 
 
 def end_maintenance():
@@ -205,6 +366,8 @@ def end_maintenance():
 def _again(job, room):
     """Load a crashed model again, every copy it should have, the way it was loaded (under the swap lock). -> words."""
     base, did, t0, tried = job['base'], [], time.time(), False
+    blocked = crashes.load_blocked(base, conditions())
+    if blocked: return [f'{base}: crash recovery reload skipped: {blocked}']     # it would be refused again: nothing has changed
     for c in job['ids']:
         if c in {r['id'] for r in llmshare.loaded(fresh=True)}: continue
         need, free = (gb(job['size']) + room if job['size'] else 0), free_gb()
@@ -214,8 +377,8 @@ def _again(job, room):
         if not tried: crashes.trying(base); tried = True
         ok, out = load(job['key'], c, job['context'] or 32768, job['parallel'] or 4)
         if not ok:
-            crashes.loaded(base, [c], False, time.time() - t0, out)
-            did.append(f'{c} crashed and could not be loaded again: {out[-200:]}'); return did
+            crashes.loaded(base, [c], False, time.time() - t0, refused(out) or out)
+            did.append(f'{c}: crash recovery reload failed: {refused(out) or out[-200:]}'); return did
     if not tried: return did                               # someone else loaded it meanwhile: the next look records it
     ensure_server()                                        # LM Studio may turn its server off when a model changes
     crashes.loaded(base, job['ids'], True, time.time() - t0)
@@ -231,8 +394,8 @@ def _recycle(job, fams):
     unload(copy)
     ok, out = load(f.get('key') or base, copy, f.get('context') or 32768, f.get('parallel') or 4)
     ensure_server()
-    recycle.done(copy, ok, time.time() - t0, '' if ok else out)
-    return [f"{copy} recycled in {time.time() - t0:.0f} s: {job['why']}" if ok else f'{copy} could not be loaded back after its recycle: {out[-200:]}']
+    recycle.done(copy, ok, time.time() - t0, '' if ok else refused(out) or out)
+    return [f"{copy} recycled in {time.time() - t0:.0f} s: {job['why']}" if ok else f'{copy}: reload after recycle failed: {refused(out) or out[-200:]}']
 
 
 def plan(ident, context=None):

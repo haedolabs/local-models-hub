@@ -93,7 +93,9 @@ def _write(path, rec):
 
 # ---------------------------------------------------------------- what LM Studio holds
 def _lms_ps():
-    """-> (rows, ok) from `lms ps --json` (the text table when an older lms has no --json)."""
+    """-> (rows, ok) from `lms ps --json` (the text table when an older lms has no --json). A row LM Link lists from another
+    Mac (its deviceIdentifier set) is left out: it is not a copy on this Mac (the hub links Macs itself: peers.py). Each
+    row keeps what names the model across Macs: the variant LM Studio loaded, its size in bytes and its format."""
     try: r = subprocess.run([LMS, 'ps', '--json'], capture_output=True, text=True, timeout=PS_TIMEOUT)
     except (OSError, subprocess.SubprocessError): return [], False
     out = r.stdout.strip()
@@ -103,10 +105,11 @@ def _lms_ps():
         if isinstance(data, list):
             rows = []
             for m in data:
-                if not isinstance(m, dict) or not m.get('identifier'): continue
+                if not isinstance(m, dict) or not m.get('identifier') or m.get('deviceIdentifier'): continue
                 rows.append(dict(id=m['identifier'], key=m.get('modelKey') or m['identifier'], state=str(m.get('status') or 'idle').upper(),
                                  size=f"{(m.get('sizeBytes') or 0) / 2**30:.2f} GB", context=_int(m.get('contextLength')), parallel=_int(m.get('parallel')),
-                                 queued=_int(m.get('queued')), type=m.get('type')))
+                                 queued=_int(m.get('queued')), type=m.get('type'), variant=m.get('selectedVariant') or None,
+                                 bytes=m.get('sizeBytes') if isinstance(m.get('sizeBytes'), int) else None, format=m.get('format')))
             return rows, True
     try: r = subprocess.run([LMS, 'ps'], capture_output=True, text=True, timeout=PS_TIMEOUT)
     except (OSError, subprocess.SubprocessError): return [], False
@@ -201,9 +204,13 @@ def settings_error():
 
 
 def family(model):
-    """The id a model's copies share: qwen/qwen3.6-35b-a3b:2 -> qwen/qwen3.6-35b-a3b (a model loaded once is its own)."""
-    m = re.match(r'^(.+):(\d+)$', str(model or ''))
-    return m.group(1) if m else model
+    """The id a model's copies share: qwen/qwen3.6-35b-a3b:2 -> qwen/qwen3.6-35b-a3b (a model loaded once is its own), and a
+    copy on a peer Mac, 'qwen/qwen3.6-35b-a3b on macbook' (peers.py), is a copy of the same family."""
+    s = str(model or '')
+    on = ' on ' in s
+    if on: s = s.split(' on ', 1)[0]
+    m = re.match(r'^(.+):(\d+)$', s)
+    return m.group(1) if m else (s if on else model)
 
 
 def copy_ids(base, n):
@@ -230,9 +237,19 @@ def at_once(model=None):
     that gives the most. Batches through the hub send this many."""
     rows = loaded()
     if model is None:
-        return max([at_once(f) for f in {family(r['id']) for r in rows}] or [1])
+        fams = {family(r['id']) for r in rows}
+        try:
+            from . import peers                              # the families this Mac's peers serve for it count too
+            fams |= {f for p in peers.view() for f in (p.get('families') or {})}
+        except Exception: pass
+        return max([at_once(f) for f in fams] or [1])
     ids = {r['id'] for r in rows}
-    return sum(parallel_of(c) for c in copies(model) if c in ids) or parallel_of(model)
+    here = sum(parallel_of(c) for c in copies(model) if c in ids)
+    try:
+        from . import peers
+        there = peers.capacity(model)
+    except Exception: there = 0
+    return (here + there) or parallel_of(model)
 
 
 @contextlib.contextmanager
@@ -253,9 +270,30 @@ def swapping(wait=120):
 
 
 # ---------------------------------------------------------------- rule 1: a slot per request
+REMOTE = None              # the door's link to its peers (peers.LINK): it counts their slots, which only the door sends to
+
+
+class _Remote:
+    """A slot held on a peer Mac's copy (peers.Link.take), given back like a lock."""
+    def __init__(self, c): self.c = c
+
+    def release(self):
+        if REMOTE is not None: REMOTE.give(self.c)
+
+
+def _release(h):
+    if isinstance(h, _Remote): h.release(); return
+    try: fcntl.flock(h, fcntl.LOCK_UN)
+    finally: h.close()
+
+
 def _take(models):
-    """Try each model's slots once; -> (the lock handle, the model) or (None, None)."""
+    """Try each model's slots once (a copy on a peer, '<family> on <peer>', by the door's link); -> (the lock handle,
+    the model) or (None, None)."""
     for m in models:
+        if ' on ' in m:
+            if REMOTE is not None and REMOTE.take(m): return _Remote(m), m
+            continue
         d = os.path.join(SLOTS, _safe(m)); os.makedirs(d, exist_ok=True)
         for i in range(parallel_of(m)):
             h = open(os.path.join(d, f'slot-{i}.lock'), 'a+')
@@ -297,9 +335,7 @@ def slot_any(models, wait=3600, kind='other'):
     waited = time.time() - t0
     if waited > 2: _note('slot wait', family(got), waited)
     try: yield got, waited
-    finally:
-        try: fcntl.flock(held, fcntl.LOCK_UN)
-        finally: held.close()
+    finally: _release(held)
 
 
 @contextlib.contextmanager
@@ -401,12 +437,12 @@ def swap_blockers(models):
     for d in sorted(leases(), key=lambda d: d.get('since', 0)):
         hit = sorted({m for m in d.get('models') or [] if family(m) in fams})
         if (d.get('pid') == os.getpid() and d.get('via') != 'hub') or not hit: continue
-        key = (d.get('project'), d.get('pid'))
+        key = (d.get('project'), d.get('pid'), d.get('from'))
         if key in seen: continue
         seen.add(key)
         since = time.strftime('%H:%M', time.localtime(float(d.get('since') or 0)))
         what = 'requests through the hub' if d.get('via') == 'hub' and d.get('kind') == 'other' else f"a {d.get('kind')}"
-        why.append(f"{what} in the {d.get('project')} project (since {since}) is using {', '.join(hit)}")
+        why.append(f"{what} in the {d.get('project')} project{' on ' + str(d['from']) if d.get('from') else ''} (since {since}) is using {', '.join(hit)}")
     if not why:
         for r in loaded():
             if r['id'] in ms and r['state'] in ('GENERATING', 'PROCESSING'):

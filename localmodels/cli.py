@@ -19,6 +19,18 @@
   localmodels name private <project> | public <project> private: screens show only the names set for it
   localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
+  localmodels peer               peer status: each configured peer (state, RTT, interface, replicas, slots) and the link
+                                 listener when this host serves as a peer
+  localmodels peer add <name> <address>   add a peer gateway by its Thunderbolt Bridge address (port 1235 by default)
+  localmodels peer remove <name>
+  localmodels peer serve <address> | off  serve as a peer: bind a link listener on that address (token required)
+  localmodels peer token         create peer-token (0600) if missing; print the ssh command that copies it to another host
+  localmodels peer gpu-limit     write the boot LaunchDaemon com.local-models.gpu-limit (iogpu.wired_limit_mb = total - 8 GiB)
+                                 and print the sudo commands that install it; verify an installed one
+  localmodels peer copy-model <model> <user@peer> [--dry]   replicate an LM Studio catalog model to a peer over SSH
+                                 (definition, weights, model-data.json records, default load config); LM Studio closed there
+  localmodels peer test [name]   force a poll from the gateway and probe from this terminal (separates macOS Local
+                                 Network blocking of the gateway from a link failure); print the route
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
                                  (--no-think: no thinking: several times faster, for lookups and extraction)
   localmodels batch <jobs.json> [--dir FOLDER] [--parallel N]
@@ -37,7 +49,7 @@
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
                                  the version stamped, committed, tagged and pushed (--dry: the checks only)
 """
-import glob, json, os, plistlib, re, shutil, subprocess, sys, time, urllib.request
+import glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
 
 from . import HOME, NAME, VERSION, llmshare
 
@@ -52,7 +64,7 @@ SIGNPOST_FILE = os.path.expanduser('~/.claude/CLAUDE.md')
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {HOME}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never straight to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_door.py', 'test_agent.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_door.py', 'test_agent.py', 'test_peers.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -108,6 +120,7 @@ def status():
     print(f"LM Studio: server {lm['server']} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (the last listing failed: this is the one before)'))
     if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (the last good settings stand)')
+    for line in peer_lines(d['up']): print(line)
     try:
         v = recycle.view(lm['models'])
         if v['copies']:
@@ -183,6 +196,262 @@ def crashes_cmd(days=7, scan=False):
     down = crashes.down()
     print('down now: ' + '; '.join(d['words'] for d in down) if down else 'down now: nothing (every model that crashed is loaded again, or was let go)')
     return 0
+
+
+# ---------------------------------------------------------------- peers: other Macs' hubs
+def door_link(force=False, timeout=8):
+    """The door's look at its peers, and this Mac as a peer (GET /hub/link; force: POST, the door looks now), or None
+    when the door does not answer it (closed, or running code from before peers)."""
+    try:
+        req = urllib.request.Request(llmshare.HUB + '/hub/link', data=b'{}' if force else None, headers={'Content-Type': 'application/json'})
+        d = json.load(urllib.request.urlopen(req, timeout=timeout))
+        return d if isinstance(d, dict) and 'peers' in d else None
+    except (OSError, ValueError): return None
+
+
+def peer_lines(door_up=True):
+    """The status's lines about peers: one a peer, one when this Mac serves as one ([] when neither)."""
+    from . import peers
+    out, seen = [], set()
+    for p in peers.view():
+        seen.add(p['name']); out.append('  peer ' + p['words'])
+    for name in peers.configured():
+        if name not in seen: out.append(f"  peer {name}: not polled yet" + ('' if door_up else ' (gateway not running)'))
+    for w in peers.problems(): out.append(f'  peer settings error: {w}')
+    if peers.serving():
+        d = door_link() if door_up else None
+        out.append('  link listener: ' + ((d or {}).get('listening') or ('gateway not running' if not door_up else
+                                                                       'no status (gateway runs code without peer support: localmodels install)')))
+        try: out += [f'  peer report warning: {wn}' for wn in (peers.report().get('keeper') or {}).get('warnings') or []]
+        except Exception as e: out.append(f'  peer report error: {type(e).__name__}: {e}')
+    return out
+
+
+def edit_settings(change):
+    """Change this Mac's settings file (models.json) in place; the door rereads it as it changes. -> words or None."""
+    src = llmshare.MODELS if os.path.exists(llmshare.MODELS) else llmshare.MODELS_DEFAULT
+    try: d = json.load(open(src))
+    except (OSError, ValueError) as e: return f'settings not readable: {src} ({type(e).__name__}: {e})'
+    change(d)
+    os.makedirs(os.path.dirname(llmshare.MODELS), exist_ok=True)
+    tmp = llmshare.MODELS + '.tmp'
+    with open(tmp, 'w') as f: json.dump(d, f, indent=1); f.write('\n')
+    os.replace(tmp, llmshare.MODELS)
+    return None
+
+
+def token_copy(peer_ssh='<user>@<the other Mac>'):
+    """The command that copies peer-token to another host over SSH (the token is never printed)."""
+    from . import peers
+    rel = os.path.relpath(peers.TOKEN_FILE, os.path.expanduser('~'))
+    return f"""ssh {peer_ssh} 'mkdir -p "{os.path.dirname(rel)}" && umask 077 && cat > "{rel}" && chmod 600 "{rel}"' < "{peers.TOKEN_FILE}\""""
+
+
+def token_words():
+    from . import peers
+    made = peers.make_token()
+    return f"peer-token: {peers.TOKEN_FILE} ({'created' if made else 'existing'}, mode 0600; must be identical on every host; never printed)"
+
+
+LOADER_LABEL = 'com.local-models.load-at-login'
+
+
+def retire_loader(dry=False):
+    """A dedicated peer's login loader from before the hub (com.local-models.load-at-login): retired once a family in the
+    settings is loaded at start by the keeper ("load_at_start": true), so one loader runs, never two; kept otherwise, as
+    the only loader. -> a line in words, or '' when there is none."""
+    from . import models
+    if not os.path.exists(models.LOADER): return ''
+    fams = [b for b, f in (llmshare.settings().get('families') or {}).items() if isinstance(f, dict) and f.get('load_at_start')]
+    if not fams: return f'LaunchAgent {LOADER_LABEL} stays: no family has "load_at_start": true, so it remains the only loader'
+    if dry: return f"would retire LaunchAgent {LOADER_LABEL}: the instance manager loads {', '.join(fams)} at gateway start"
+    _launchctl('bootout', f'gui/{os.getuid()}/{LOADER_LABEL}')
+    try: os.remove(models.LOADER)
+    except OSError as e: return f'could not remove {models.LOADER} ({e}): LaunchAgent {LOADER_LABEL} may still run alongside the instance manager'
+    return f"LaunchAgent {LOADER_LABEL} retired (bootout, plist removed; script and log kept): the instance manager loads {', '.join(fams)} at gateway start"
+
+
+PEER_CHECK = r"""printf 'home=%s\n' "$HOME"
+if [ -d "$HOME/.lmstudio" ]; then echo lmstudio=yes; else echo lmstudio=no; fi
+s=$("$HOME/.lmstudio/bin/lms" daemon status 2>&1)
+if printf '%s' "$s" | grep -q "is running" && ! printf '%s' "$s" | grep -q "not running"; then echo running=its daemon; fi
+if pgrep -x "LM Studio" >/dev/null 2>&1; then echo running=its window; fi
+d=$(sed -n 's/.*"downloadsFolder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.lmstudio/settings.json" 2>/dev/null | head -1)
+printf 'downloads=%s\n' "$d"
+"""
+
+
+def copy_model_cmd(w, dry=False):
+    """localmodels peer copy-model <model> <user@peer> [--dry]: the model the same on a peer as here, as LM Studio keeps
+    it (peers.copy_plan), with LM Studio closed there (it reads these files when it starts and writes them as it runs)."""
+    from . import peers
+    w = [x for x in w if not x.startswith('--')]
+    if len(w) != 3: print('localmodels peer copy-model <model> <user@peer> [--dry]   (LM Studio closed on the peer)'); return 2
+    want, target = w[1], w[2]
+    fam = (llmshare.settings().get('families') or {}).get(want) or {}
+    key = fam.get('key') or want
+    variant = fam.get('variant') or next((r.get('variant') for r in llmshare.loaded() if llmshare.family(r['id']) == want and r.get('variant')), None)
+    try: plan = peers.copy_plan(key, variant)
+    except ValueError as e: print(e); return 1
+    code, out = peers.remote(target, PEER_CHECK)
+    info = {}
+    for line in out.split('\n'):
+        k, eq, v = line.partition('=')
+        if eq and k in ('home', 'lmstudio', 'running', 'downloads'): info.setdefault(k, []).append(v.strip())
+    if code != 0 or not info.get('home'):
+        print(f"ssh {target} failed ({out.strip()[-200:] or code}): key-based auth without a password prompt is required"); return 1
+    if info.get('running'):
+        print(f"LM Studio is running on {target} ({' and '.join(info['running'])}): quit it there first (the UI app, and llmster: "
+              '`lms daemon down`), then retry. LM Studio reads these files at startup and rewrites them while running.'); return 1
+    if (info.get('lmstudio') or ['no'])[0] != 'yes':
+        print(f'no ~/.lmstudio on {target}: start LM Studio there once, quit it, then retry'); return 1
+    home = info['home'][0]
+    downloads = (info.get('downloads') or [''])[0] or home + '/.lmstudio/models'
+    dest = dict(definition=f"{home}/.lmstudio/hub/models/{key}", weights=f"{downloads}/{plan['weights_key']}",
+                data=f'{home}/.lmstudio/.internal/model-data.json', config=f'{home}/.lmstudio/.internal/user-concrete-model-default-config/{key}.json')
+    print(f"{'would copy' if dry else 'copying'} {key} to {target}:")
+    print(f"  definition: {plan['definition']}/ -> {dest['definition']}/")
+    print(f"  weights ({plan['bytes'] / 2**30:.1f} GiB, {plan['weights_key']}): {plan['weights']}/ -> {dest['weights']}/")
+    print(f"  model-data.json records: {', '.join(r[0] for r in plan['records'])} (merged; the peer's file backed up)")
+    if plan['config']: print(f"  default load config: {plan['config']} -> {dest['config']}")
+    if dry: print('--dry: nothing copied'); return 0
+    q = shlex.quote
+    for what in ('definition', 'weights'):
+        code, out = peers.send(plan[what], target, dest[what])
+        if code != 0: print(f'  {what}: rsync failed ({out.strip()[-200:]}); nothing else changed on {target}'); return 1
+        print(f'  {what}: copied')
+    code, out = peers.remote(target, f'cat {q(dest["data"])} 2>/dev/null; true')
+    try: doc = json.loads(out) if out.strip() else None
+    except ValueError:
+        print(f"  model-data.json on {target} is not valid JSON: left unchanged (definition and weights copied; LM Studio may list the model twice)"); return 1
+    merged = json.dumps(peers.merge_records(doc, plan['records'])).encode()
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    code, out = peers.remote(target, f'set -e; mkdir -p {q(os.path.dirname(dest["data"]))}; if [ -f {q(dest["data"])} ]; then cp {q(dest["data"])} '
+                                     f'{q(dest["data"] + ".bak-" + stamp)}; fi; cat > {q(dest["data"] + ".tmp")}; mv {q(dest["data"] + ".tmp")} {q(dest["data"])}', merged)
+    if code != 0: print(f'  model-data.json: write failed ({out.strip()[-200:]})'); return 1
+    print(f'  model-data.json: records merged (previous file: model-data.json.bak-{stamp})')
+    if plan['config']:
+        code, out = peers.remote(target, f'mkdir -p {q(os.path.dirname(dest["config"]))} && cat > {q(dest["config"])}', open(plan['config'], 'rb').read())
+        print('  default load config: ' + ('copied' if code == 0 else f'copy failed ({out.strip()[-160:]})'))
+    print(f"done. On {target} after LM Studio restarts: `lms ls` lists {key} once; `lms ps --json` reports selectedVariant {variant or '<variant>'} once loaded")
+    return 0
+
+
+def gpu_limit_cmd():
+    """localmodels peer gpu-limit: the boot job for this Mac's GPU limit, written beside the settings with the lines a
+    person runs to install it (an administrator password); one already installed is checked against it."""
+    import plistlib
+    from . import models
+    want = models.gpu_plist()
+    name = os.path.basename(models.GPU_DAEMON)
+    system = '/Library/LaunchDaemons/' + name
+    mb = want['ProgramArguments'][1].split('=', 1)[1]
+    try: cur = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError): cur = 0
+    have = None
+    if os.path.exists(models.GPU_DAEMON):
+        try: have = plistlib.load(open(models.GPU_DAEMON, 'rb'))
+        except (OSError, ValueError, plistlib.InvalidFileException): have = {}
+        if have == want:
+            print(f"installed: {name} sets iogpu.wired_limit_mb={mb} at boot (total {models.mem_gb():.0f} GiB - 8 GiB); current value: {cur or 'default (0)'}")
+            return 0
+        said = ' '.join((have or {}).get('ProgramArguments') or []) or 'something else'
+        print(f'installed, but it runs `{said}`; expected iogpu.wired_limit_mb={mb} (total {models.mem_gb():.0f} GiB - 8 GiB)')
+    mine = os.path.join(os.path.dirname(llmshare.MODELS), name)
+    os.makedirs(os.path.dirname(mine), exist_ok=True)
+    with open(mine, 'wb') as f: plistlib.dump(want, f)
+    print(f'wrote {mine}: LaunchDaemon setting iogpu.wired_limit_mb={mb} at boot, before login and LM Studio (current value: {cur or "default (0)"})')
+    print('install (requires an administrator password):')
+    if have is not None: print(f'  sudo launchctl bootout system/{want["Label"]}')
+    print(f'  sudo cp "{mine}" /Library/LaunchDaemons/')
+    print(f'  sudo chown root:wheel {system}')
+    print(f'  sudo chmod 644 {system}')
+    print(f'  sudo launchctl bootstrap system {system}')
+    return 1 if have is not None else 0
+
+
+def peer_cmd(a):
+    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model ...]."""
+    from . import peers
+    w = [x for x in a if x != 'peer']
+    verb = w[0] if w else ''
+    if not verb:
+        print(f'gateway name sent to peers: {peers.me()} (settings key "name")')
+        lines = peer_lines(llmshare.hub_up(fresh=True))
+        if not lines: print('no peers configured and no link listener: localmodels peer add <name> <address> (GUIDE.md, Peers)')
+        for line in lines: print(line)
+        if (peers.configured() or peers.serving()) and peers.token_problem(): print(f'  peer-token error: {peers.token_problem()}')
+        return 0
+    if verb == 'add' and len(w) == 3:
+        name, u = w[1], peers.parse_url(w[2])
+        if not peers.NAME.match(name): print(f'invalid peer name {name!r}: allowed characters are letters, digits, ".", "_", "-"'); return 2
+        if not u: print(f'invalid address {w[2]!r}: expected 192.168.213.2 or http://192.168.213.2:1235'); return 2
+        err = edit_settings(lambda s: s.setdefault('peers', {}).__setitem__(name, dict(url=u[0])))
+        if err: print(err); return 1
+        print(f'peer {name} added: {u[0]} ({llmshare.MODELS}; the gateway polls it within seconds)')
+        if peers.address_words(u[1]): print(f'  warning: {peers.address_words(u[1])}')
+        print('  ' + token_words())
+        print('next (GUIDE.md, Peers, lists every step and which need a person):')
+        print(f'  1. copy peer-token to {name}: {token_copy(f"<user>@{u[1]}")}')
+        print(f'  2. on {name}: localmodels peer serve {u[1]}')
+        print('  3. here: localmodels peer test')
+        return 0
+    if verb == 'remove' and len(w) == 2:
+        if w[1] not in peers.configured(): print(f'no peer named {w[1]}'); return 2
+        err = edit_settings(lambda s: (s.get('peers') or {}).pop(w[1], None) if isinstance(s.get('peers'), dict) else None)
+        if err: print(err); return 1
+        print(f'peer {w[1]} removed: no new requests are routed to it (in-flight requests complete)'); return 0
+    if verb == 'serve' and len(w) == 2:
+        if w[1] == 'off':
+            err = edit_settings(lambda s: s.pop('serve', None))
+            if err: print(err); return 1
+            print('link listener disabled: the gateway closes it within 5 s (loopback listeners unaffected)'); return 0
+        addr = w[1].strip('[]')
+        try: peers.ipaddress.ip_address(addr.split('%')[0])
+        except ValueError: print(f'invalid address {addr!r}: expected an IP address of this host (the Thunderbolt Bridge static address, e.g. 192.168.213.2)'); return 2
+        err = edit_settings(lambda s: s.__setitem__('serve', dict(address=addr)))
+        if err: print(err); return 1
+        iface = peers.interface_of(addr)
+        port = peers.ports().get(iface) if iface else None
+        print(f'link listener configured: {addr}:{llmshare.HUB_PORT}' + (f', interface {iface}' + (f' ({port})' if port else '') if iface else ''))
+        if not iface: print('  warning: no interface has that address configured yet; the listener binds once one does (GUIDE.md, Peers: static address)')
+        elif not peers.bridge(iface, {iface: port} if port else {}) and not peers.loopback(addr): print(f'  warning: {iface} is not the Thunderbolt Bridge')
+        if peers.address_words(addr): print(f'  warning: {peers.address_words(addr)}')
+        print('  ' + token_words())
+        print('  the gateway binds it within 5 s (X-Hub-Token required); `localmodels peer` shows the listener state')
+        return 0
+    if verb == 'gpu-limit' and len(w) == 1: return gpu_limit_cmd()
+    if verb == 'copy-model': return copy_model_cmd(w, '--dry' in a)
+    if verb == 'token' and len(w) == 1:
+        print(token_words())
+        print(f'copy to another host: {token_copy()}')
+        return 0
+    if verb == 'test' and len(w) <= 2:
+        d = door_link(force=True)
+        if d is None: print("gateway did not answer /hub/link: not running (localmodels start), or running code without peer support (localmodels install)"); return 1
+        ps = [p for p in d['peers'] if len(w) == 1 or p['name'] == w[1]]
+        if not ps: print(f'no peer named {w[1]}' if len(w) == 2 else 'no peers configured: localmodels peer add <name> <address>'); return 2
+        bad = 0
+        for p in ps:
+            print('gateway poll: ' + p['words'])
+            tok, here = peers.token(), None
+            try:
+                req = urllib.request.Request(p['url'] + '/hub/health', headers={'X-Hub-Token': tok or ''})
+                peers._open(req, timeout=peers.CONNECT).read(); here = 'connected, token accepted'
+            except urllib.error.HTTPError as e: here = f"connected, HTTP {e.code}" + (' (peer-token mismatch)' if e.code in (401, 403) else '')
+            except OSError as e: here = peers.reach_words(e)
+            print(f'  terminal probe: {here}')
+            if p['state'] == 'down' and here.startswith('connected'):
+                print('  terminal connects but the gateway does not: macOS Local Network privacy is blocking the gateway (a LaunchAgent). '
+                      'System Settings → Privacy & Security → Local Network → enable python3, then: localmodels peer test')
+            iface, port = peers.route_of(p['host'])
+            print(f"  route: {port or iface or 'none'}" + (f' ({iface})' if iface and port and iface not in port else '')
+                  + (f" · {peers.route_words(iface, {iface: port} if port else {})}" if peers.route_words(iface, {iface: port} if port else {}) else ''))
+            bad += p['state'] != 'up'
+        if d.get('serving'): print(f"link listener: {d.get('listening') or 'not bound yet'}")
+        return 1 if bad else 0
+    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model <model> <user@peer>]')
+    return 2
 
 
 def recycle_cmd(a):
@@ -411,6 +680,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         else: print(f"would register the hub's tools for every Claude Code session (claude mcp add --scope user local-models), add one signpost line to {SIGNPOST_FILE}, "
                     f"and add the maintenance hook to {SETTINGS_FILE} (silent unless maintenance is set)")
         print(f"would link the localmodels command into the first writable of {', '.join(BINS)}")
+        if retire_loader(dry=True): print(retire_loader(dry=True))
         print('nothing written (--dry)')
         return 0
     os.makedirs(LOGS, exist_ok=True)
@@ -444,6 +714,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         else: r = _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
     print(f"2. the door starts at login ({PLIST}): {'open on ' + llmshare.HUB if up else 'NOT answering: ' + (r.stderr.strip() or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
+    if up and retire_loader(dry=True): print('   ' + retire_loader())
     if plugin:
         print("3. the hub's tools come with the Claude Code plugin (its .mcp.json): nothing registered here")
         print("4. no signpost line: the plugin's skill carries the rules into every session")
@@ -671,6 +942,13 @@ def check():
         want = llmshare.copy_ids(base, f.get('copies', 1))
         have = [c for c in want if c in ids]
         t(f'{base} has its copies', len(have) == len(want), f'{len(have)} of {len(want)} loaded, {llmshare.at_once(base)} answers at once')
+    from . import peers
+    for p in peers.view():
+        t(f"peer {p['name']}: reachable over the link", p['state'] == 'up', p['words'])
+    if peers.serving():
+        dl = door_link()
+        t('link listener bound', bool(dl and (dl.get('listening') or '').startswith('listening')),
+          (dl or {}).get('listening') or 'no status (gateway runs code without peer support: localmodels install)')
     for name, good, note in run_tests():
         t(f'{name[5:-3]}: the sandbox tests pass', good, note)
     down = crashes.down()
@@ -872,6 +1150,7 @@ def main(argv):
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
     if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)
+    if verb in ('peer', 'peers'): return peer_cmd(a)
     if verb == 'notice':
         from . import maint; return maint.notice_main()
     if verb == 'crashes':

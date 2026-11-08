@@ -27,13 +27,22 @@ holds the Mac awake (caffeinate). Loading or unloading a model through the door 
 it (rule 3). Everything else passes straight through. If LM Studio's server is off, the door starts it (never when it is
 already up: that restarts it) and tries once more.
 Serves this Mac only (127.0.0.1 and ::1) and refuses web pages from other sites (Host and Origin are checked).
+
+Peers (peers.py): a family a peer Mac has loaded with the same fingerprint is one more copy, after this Mac's own: the
+next request goes to a peer only when every slot here is busy, never more than the peer said it has free for this Mac,
+with the project, session, kind, step and run sent along. A peer that cannot take it (its door closed, its maintenance,
+the token refused, no slot in time) answers before any byte reaches the program, so the request is sent again here. A Mac
+that serves as a peer ("serve" in its settings) also listens on that address, bound to its interface, where it answers
+only requests with the shared token, and only a model's work, the model listing and its own report (over_link).
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, crashes, llmshare, maint, recycle, runs, web, whois
+from . import VERSION, crashes, llmshare, maint, peers, recycle, runs, web, whois
 
+llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
 UP = llmshare.LMSTUDIO
+LINK_PASS = ('X-Project', 'X-Session', 'X-Kind', 'X-Step', 'X-Run', 'X-Run-Total', 'X-Run-Done')   # who a request is from, sent along to a peer
 GEN = re.compile(r'/(chat/completions|completions|embeddings|responses|messages|chat)$')
 SWAP = re.compile(r'/(load|unload)$')
 PASS = ('content-type', 'authorization', 'accept', 'x-api-key', 'anthropic-version', 'openai-organization')
@@ -62,13 +71,14 @@ def log(rec):
     llmshare._append(llmshare.REQUESTS, rec, roll_at=LOG_MAX)
 
 
-def touch(pid, project, kind, model, who, delta):
+def touch(pid, project, kind, model, who, delta, front=None):
     """The hub's lease for a program that sends it requests: written at each request, refreshed while one is in flight,
-    and left to age out two minutes after the last."""
-    path = os.path.join(llmshare.LEASES, f'{llmshare._safe(project)}-{pid}-hub.json')
+    and left to age out two minutes after the last. front: the peer Mac that sent it over the link (one lease per front
+    and project, so a swap here is refused while a front's batch uses the model)."""
+    path = os.path.join(llmshare.LEASES, f'{llmshare._safe(project)}-{pid}' + (f'-{llmshare._safe(front)}' if front else '') + '-hub.json')
     with _lock:
         e = _live.setdefault(path, dict(n=0, rec=dict(v=llmshare.VERSION, project=project, pid=pid, models=[], kind=kind,
-                                                       since=time.time(), via='hub', app=who.get('app'))))
+                                                       since=time.time(), via='hub', app=who.get('app'), **({'from': front} if front else {}))))
         e['n'] = max(0, e['n'] + delta)
         rec = e['rec']
         if model and model not in rec['models']: rec['models'].append(model)
@@ -188,11 +198,24 @@ def known(model):
     return base in {llmshare.family(i) for i in (crashes._read().get('seen') or {})}
 
 
+def _keepalive(sock):
+    """TCP keepalive on a connection to a peer: a link that dies during a long answer is noticed in about 25 s (the
+    peer's system answers the probes even while its model is busy), not after the hour a read may take."""
+    for level, opt, val in ((socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1), (socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPALIVE', 0x10), 10),
+                            (socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPINTVL', 0x101), 5), (socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPCNT', 0x102), 3)):
+        try: sock.setsockopt(level, opt, val)
+        except OSError: pass
+
+
 class Upstream:
-    """One request to LM Studio over our own connection, so a thread watching the program can cut it short."""
-    def __init__(self, method, path, body, headers):
-        u = urllib.parse.urlsplit(UP)
-        self.conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=3600)
+    """One request to LM Studio (or to a peer's door: base) over our own connection, so a thread watching the program
+    can cut it short."""
+    def __init__(self, method, path, body, headers, base=None):
+        u = urllib.parse.urlsplit(base or UP)
+        if base:                                         # a peer: connect within seconds, then wait as long as the answer takes
+            self.conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=peers.CONNECT)
+            self.conn.connect(); _keepalive(self.conn.sock); self.conn.sock.settimeout(3600)
+        else: self.conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=3600)
         self.conn.request(method, path, body=body, headers=headers)
         self.resp = None
 
@@ -214,7 +237,7 @@ class Upstream:
 class Door(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     server_version = f'localmodels-hub/{VERSION}'
-    _sent, _dialect = False, 'openai'
+    _sent, _dialect, _link = False, 'openai', None      # _link: the front's name, for a request that came over the link
 
     def log_message(self, *a): pass
 
@@ -283,6 +306,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             if not self._sent: self._send(500, dict(error=f'the hub stumbled: {type(e).__name__}: {e}'))
 
     def _any(self, method):
+        if getattr(self.server, 'link', False): return self.over_link(method)
         if not self._allowed(): return self._send(403, dict(error='the hub answers programs on this Mac, not web pages'))
         path, project = self.path, self.headers.get('X-Project')
         if path.startswith('/hub/'): return self.hub(method, path)
@@ -304,14 +328,49 @@ class Door(http.server.BaseHTTPRequestHandler):
         if method == 'POST' and GEN.search(route): return self.generate(path, body, j, project)
         return self.forward(method, path, body, False)
 
+    def over_link(self, method):
+        """A request from a peer's hub (this Mac serves as a peer): only with the shared token, never from a web page, and
+        only what a front needs: a model's work, the model listing, and this Mac's report. Loads, unloads, recycles,
+        maintenance and the dashboard stay this Mac's own business."""
+        if self.headers.get('Origin'): return self._send(403, dict(error='forbidden: requests with an Origin header are not accepted on the peer link'))
+        if not peers.token_ok(self.headers.get('X-Hub-Token')):
+            return self._send(401, dict(error='unauthorized: missing or invalid X-Hub-Token (peer-token)'))
+        if (self.headers.get('Host') or '').lower() not in self.server.hosts: return self._send(403, dict(error='forbidden: Host does not match the link listener address'))
+        self._link = llmshare.clean(self.headers.get('X-Hub-From'), 40) or 'a peer'
+        path = self.path
+        route = path.split('?')[0].rstrip('/').lower()
+        if method == 'GET' and route == '/hub/peer': return self._send(200, peers.report(self._link))
+        if method == 'GET' and route == '/hub/health':
+            return self._send(200, dict(ok=True, hub='local-models', version=VERSION, name=peers.me(), maintenance=maint.view()))
+        if method == 'GET' and route in ('/v1/models', '/api/v0/models', '/api/v1/models'): return self.forward('GET', path, b'', False)
+        if method == 'POST' and GEN.search(route) and not SWAP.search(route):
+            body = self._body()
+            try: j = json.loads(body) if body else {}
+            except ValueError: j = {}
+            if not isinstance(j, dict): j = {}
+            self._dialect = dialect(route)
+            return self.generate(path.split('?')[0].rstrip('/') + ('?' + path.split('?', 1)[1] if '?' in path else ''), body, j, self.headers.get('X-Project'))
+        return self._send(403, dict(error='forbidden on the peer link: only inference endpoints, the model list, /hub/peer and /hub/health are served'))
+
     # ---- a request that makes a model work
-    def _candidates(self, model):
-        """The copies this request may go to right now: the model's loaded copies, less those down after a crash or
-        being drained for a recycle. A request that names one copy goes to that copy, or to its siblings when that copy
-        is down or draining. [] when nothing can answer: the door then holds, or answers 503, never forwards the bare id."""
+    def _candidates(self, model, skip=(), kind=None):
+        """The copies this request may go to right now, in the order it takes them: the model's loaded copies, less those
+        down after a crash or being drained for a recycle, and the family's copies on peers (peers.LINK: those up, with
+        the same model, and not skipped because this request failed there). A person waiting (chat, ask) takes this Mac's
+        copies first, the fastest per request; anything else takes each Mac's first copy before a second copy on any one
+        Mac, since a peer's GPU and memory are its own (measured: a second copy here added 23%, a peer 38%; GUIDE.md,
+        Peers). A request that names one copy goes to that copy, or to its siblings when that copy is down or draining.
+        [] when nothing can answer: the door then holds, or answers 503, never forwards the bare id. A request that came
+        over the link is answered here only (no chains of Macs)."""
         out = [c for c in llmshare.copies(model) if c not in crashes.down_copies(model) and c not in recycle.draining()]
         if not out and llmshare.family(model) != model:
             out = [c for c in llmshare.copies(llmshare.family(model)) if c not in crashes.down_copies(model) and c not in recycle.draining()]
+        if not self._link and (llmshare.family(model) == model or not out):
+            there = peers.LINK.replicas(model, skip)
+            if there and len(out) > 1 and kind not in llmshare.PEOPLE:
+                first = [c for c in there if peers.LINK.first_free(c)]
+                out = out[:1] + first + out[1:] + [c for c in there if c not in first]
+            else: out += there
         return out
 
     def _hold(self, model, rec, mark, t0, until=None):
@@ -332,13 +391,16 @@ class Door(http.server.BaseHTTPRequestHandler):
         return time.time() - h0
 
     def generate(self, path, body, j, project):
-        t0, host = time.time(), self.client_address[0]
-        pid = whois.peer_pid(self.client_address[1], PORT, '[::1]' if ':' in host else '127.0.0.1') or 0
-        who = whois.identity(pid) if pid else {}
+        t0, host, front = time.time(), self.client_address[0], self._link
+        if front:                                          # over the link: the front named the program; nothing here to look up
+            pid, who = 0, dict(app=f'peer gateway {front}')
+        else:
+            pid = whois.peer_pid(self.client_address[1], PORT, '[::1]' if ':' in host else '127.0.0.1') or 0
+            who = whois.identity(pid) if pid else {}
         project = llmshare.clean(project or who.get('project') or 'unknown', 80) or 'unknown'
         who = dict(who, session=llmshare.clean(self.headers.get('X-Session') or who.get('session'), 120) or None)
         kind = llmshare.clean(self.headers.get('X-Kind'), 20).lower()
-        if kind not in llmshare.KINDS: kind = own_kind(pid) or 'other'
+        if kind not in llmshare.KINDS: kind = (own_kind(pid) if pid else None) or 'other'
         step = llmshare.clean(self.headers.get('X-Step'), 120) or None
         run = runs.from_headers(self.headers)                                  # X-Run, X-Run-Total, X-Run-Done: the whole run
         model = llmshare.clean(j.get('model') or next((llmshare.family(r['id']) for r in llmshare.loaded()), None) or 'unknown', 200)
@@ -346,13 +408,16 @@ class Door(http.server.BaseHTTPRequestHandler):
         except ValueError: xt = 0
         until = t0 + 0.9 * min(86400.0, max(5.0, xt)) if xt > 0 else None     # the program's own budget: never wait past it
         holder = pid or os.getpid()
-        touch(holder, project, kind, model, who, +1)
+        touch(holder, project, kind, model, who, +1, front)
         mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{next(_n)}.json')
         rec = dict(hub_pid=os.getpid(), pid=pid, project=project, session=who.get('session'), host_session=who.get('host_session'),
-                   kind=kind, model=model, app=who.get('app'), since=t0, state='waiting for a turn', **({'step': step} if step else {}), **run)
+                   kind=kind, model=model, app=who.get('app'), since=t0, state='waiting for a turn', **({'step': step} if step else {}), **run,
+                   **({'via': 'link', 'from': front} if front else {}))
         try: os.makedirs(llmshare.INFLIGHT, exist_ok=True); llmshare._write(mark, rec)
         except OSError: pass
-        code, usage, waited, chosen, held, note, tries = 0, {}, 0.0, model, 0.0, None, 0
+        code, usage, waited, chosen, held, note, tries, peer = 0, {}, 0.0, model, 0.0, None, 0, None
+        sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
+        sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
         try:
             base = llmshare.family(model)
             m = maint.on()
@@ -364,15 +429,16 @@ class Door(http.server.BaseHTTPRequestHandler):
                 code, _ = self._send(503, dict(error=f'{base} is down after a crash and the hub has stopped loading it again: load it by hand (localmodels use {base})'), retry_after=600)
                 note = 'left down'
             else:
-                for attempt in (1, 2):
-                    tries = attempt
+                attempt, skip = 1, set()                       # skip: the peers this request could not be sent to
+                while True:
+                    tries += 1
                     held += self._hold(model, rec, mark, t0, until)
                     if client_gone(self.connection): code, note = 499, 'the program hung up while it waited'; break
-                    if not self._candidates(model):      # the hold ran out, or no copy is loaded and none is on the way
+                    if not self._candidates(model, skip):  # the hold ran out, or no copy is loaded and none is on the way
                         why = (f'{base} is still loading again' if crashes.reloading(model) else
                                f'{base} is being recycled' if recycle.draining() else f'no copy of {base} is loaded (localmodels use {base})')
                         code, _ = self._send(503, dict(error=f'{why}: try again in {RETRY_AFTER} s'), retry_after=RETRY_AFTER); note = why; break
-                    with llmshare.slot_any(lambda: self._candidates(model), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600, kind=kind) as (chosen, w):
+                    with llmshare.slot_any(lambda: self._candidates(model, skip, kind), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600, kind=kind) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'the program hung up while it waited'; break
                         m = maint.on()
@@ -383,17 +449,30 @@ class Door(http.server.BaseHTTPRequestHandler):
                         rec.update(state='answering', answering_since=time.time(), copy=chosen)
                         try: llmshare._write(mark, rec)
                         except OSError: pass
-                        sent = json.dumps(dict(j, model=chosen)).encode() if chosen != j.get('model') else body
-                        code, usage, why = self.forward('POST', path, sent, bool(j.get('stream')), (chosen, model) if chosen != model else None, model)
+                        peer = peers.split(chosen)[1]
+                        if peer:                                    # a copy on a peer: it is asked for the family, and names it back
+                            sent = json.dumps(dict(j, model=base)).encode()
+                            code, usage, why = self.forward('POST', path, sent, bool(j.get('stream')), (base, model) if base != model else None, model, chosen, sent_along)
+                        else:
+                            sent = json.dumps(dict(j, model=chosen)).encode() if chosen != j.get('model') else body
+                            code, usage, why = self.forward('POST', path, sent, bool(j.get('stream')), (chosen, model) if chosen != model else None, model)
                     if not why:                                         # answered, or a genuine error passed through
+                        if peer: peers.LINK.answered(chosen)
                         note = getattr(self, '_note', None) or note; break
+                    if peer and not self._sent and code != 499 and len(skip) < 16:   # the peer could not take it, and nothing reached
+                        skip.add(peer); note = f'requeued locally: {why}'             # the program: back in the queue, here or another peer
+                        rec.update(state='waiting for a turn', copy=None)
+                        try: llmshare._write(mark, rec)
+                        except OSError: pass
+                        continue
                     note = why; crashes.nudge()
                     if attempt == 2 or code == 499: break
+                    attempt += 1
                     rec.update(state='waiting: the model crashed and is loading again', copy=None)
                     try: llmshare._write(mark, rec)
                     except OSError: pass
                     for _ in range(15):                                 # the keeper notices within seconds; _hold waits for the rest
-                        if crashes.reloading(model) or not self._candidates(model): break
+                        if crashes.reloading(model) or not self._candidates(model, skip): break
                         time.sleep(1)
                 if note and not self._sent and code != 499:
                     code, _ = self._send(503, dict(error=f'the model did not answer ({note}); the hub is bringing it back: try again in {RETRY_AFTER} s'), retry_after=RETRY_AFTER)
@@ -403,26 +482,39 @@ class Door(http.server.BaseHTTPRequestHandler):
         finally:
             try: os.remove(mark)
             except OSError: pass
-            touch(holder, project, kind, model, who, -1)
-            if code >= 400 and code != 499 and note != 'maintenance': crashes.nudge()   # maybe the model crashed: the keeper looks at once
+            touch(holder, project, kind, model, who, -1, front)
+            if code >= 400 and code != 499 and note != 'maintenance' and not peers.split(chosen)[1]: crashes.nudge()   # maybe the model crashed: the keeper looks at once
             p, c = _usage(usage)
             log(dict(at=round(time.time(), 1), project=project, session=who.get('session'), host_session=who.get('host_session'),
                      kind=kind, model=model, copy=chosen, endpoint=path.split('?')[0].rstrip('/').rsplit('/', 1)[-1], status=code, stream=bool(j.get('stream')),
                      seconds=round(time.time() - t0, 2), waited=round(held + (waited or 0), 2), prompt_tokens=p, completion_tokens=c,
                      **({'held': round(held, 2)} if held else {}), **({'note': note} if note else {}), **({'step': step} if step else {}),
-                     **({'tries': tries} if tries > 1 else {}), **run))
+                     **({'tries': tries} if tries > 1 else {}), **run, **({'peer': peers.split(chosen)[1]} if peers.split(chosen)[1] else {}),
+                     **({'from': front} if front else {})))
 
-    def forward(self, method, path, body, stream, rename=None, model=None):
+    def forward(self, method, path, body, stream, rename=None, model=None, peer=None, along=None):
         """Pass one request to LM Studio and its answer back; rename=(copy, model): the answer names the model asked
         for, not the copy that answered. -> (status, usage, why): why is None when the program got an answer (or a genuine
-        error), else words for a failure the program did not see: a crashed or unloaded model, a dropped connection."""
+        error), else words for a failure the program did not see: a crashed or unloaded model, a dropped connection.
+        peer: a copy on a peer ('<family> on <peer>'): the request goes to that Mac's door with the token and along (who it
+        is from), and why is also set when the peer could not take it (its door closed, its maintenance, the token, no
+        slot in time): nothing reached the program, so the door sends it again here."""
         a, b = (f'"{rename[0]}"'.encode(), f'"{rename[1]}"'.encode()) if rename else (None, None)
         headers = {k: v for k, v in self.headers.items() if k.lower() in PASS}
         if method in ('POST', 'PUT'): headers['Content-Length'] = str(len(body))
+        name, target = (peers.split(peer)[1], None) if peer else (None, None)
+        if peer:
+            target, extra = peers.LINK.target(peer)
+            if not target: return 502, {}, f'peer {name}: removed from settings'
+            headers.update(along or {}); headers.update(extra); headers['X-Timeout'] = str(peers.PEER_WAIT)
+        who = f'peer {name}' if name else 'LM Studio'
         up = None
         for attempt in (1, 2):
-            try: up = Upstream(method, path, body if method in ('POST', 'PUT') else None, headers); break
+            try: up = Upstream(method, path, body if method in ('POST', 'PUT') else None, headers, base=target); break
             except OSError as e:
+                if peer:
+                    w = peers.reach_words(e); peers.LINK.failed(peer, 0, w)
+                    return 502, {}, f'peer {name}: {w}'
                 if attempt == 1 and start_lmstudio(): continue
                 if model: return 502, {}, f"LM Studio's server is not answering on {UP} ({e})"
                 code, _ = self._send(502, dict(error=f"LM Studio's server is not answering on {UP} ({e}): start it in LM Studio's Developer tab, or: lms server start"))
@@ -437,16 +529,27 @@ class Door(http.server.BaseHTTPRequestHandler):
         except (http.client.HTTPException, OSError) as e:
             done.set(); up.close()
             if gone[0]: return 499, {}, 'the program hung up during the answer'
+            if peer:
+                w = peers.reach_words(e) if isinstance(e, OSError) else f'connection dropped before the response ({type(e).__name__})'
+                peers.LINK.failed(peer, 0, w)
+                return 502, {}, f'peer {name}: {w}'
             if model: return 502, {}, f'LM Studio dropped the connection ({type(e).__name__})'
             code, _ = self._send(502, dict(error=f'LM Studio dropped the connection ({type(e).__name__})'))
             return code, {}, None
         finally: done.set()
         code, ctype, usage = resp.status, resp.getheader('Content-Type') or 'application/json', {}
         try:
+            if code >= 400 and peer and (code in (401, 403, 404, 408, 409, 429) or code >= 500):   # the peer did not take it
+                data = resp.read(200_000)
+                try: said = json.loads(data).get('error')
+                except (ValueError, AttributeError): said = None
+                said = said.get('message') if isinstance(said, dict) else said
+                peers.LINK.failed(peer, code, str(said or '')[:200], dict(resp.getheaders()))
+                return code, {}, f'peer {name} returned HTTP {code}' + (f' ({str(said)[:160]})' if said else '')
             if code >= 400:
                 data = resp.read(200_000)
                 text = data.decode('utf-8', 'replace')
-                if model and known(model) and code < 500:
+                if model and not peer and known(model) and code < 500:
                     if re.search(r'crashed', text, re.I): return code, {}, f'LM Studio answered {code}: the model crashed'
                     if GONE.search(text): return code, {}, f'LM Studio answered {code}: the model is not loaded'
                     asked = rename[0] if rename else model                  # the words are new: is the copy that answered still there?
@@ -480,9 +583,10 @@ class Door(http.server.BaseHTTPRequestHandler):
                             name = str(ev.get('type', '')).encode()
                             if name in LAST_EVENTS: whole = True; failed = failed or name in FAILED_EVENTS   # a stream without event: lines
                     if line in (b'\n', b'\r\n'): self.wfile.flush()
-                if whole and failed: self._note = 'LM Studio ended the answer with an error'; crashes.nudge()
+                look = peers.WAKE.set if peer else crashes.nudge                # who looks at once: the link, or this Mac's keeper
+                if whole and failed: self._note = f'{who}: stream ended with an error event' if peer else 'LM Studio ended the answer with an error'; look()
                 if not whole:                                                # the stream ended without its last event: cut short
-                    self._note = 'LM Studio cut the answer short'; crashes.nudge()
+                    self._note = f'{who}: stream truncated (no terminal event)' if peer else 'LM Studio cut the answer short'; look()
                     self.wfile.write(CUT.get(self._dialect, CUT['openai']))
                 self.wfile.flush()
                 return code, usage, None
@@ -497,7 +601,8 @@ class Door(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError): return 499, usage, 'the program hung up during the answer'   # LM Studio stops when we do
         except (http.client.IncompleteRead, http.client.HTTPException, OSError) as e:
             if self._sent: return code, usage, None                   # a stream cut short: the program saw it end
-            return 502, {}, f'LM Studio cut the answer short ({type(e).__name__})'
+            if peer: peers.LINK.failed(peer, 0, f'response truncated ({type(e).__name__})')
+            return 502, {}, (f'{who}: response truncated' if peer else 'LM Studio cut the answer short') + f' ({type(e).__name__})'
         finally: up.close()
 
     # ---- the hub's own pages
@@ -513,6 +618,11 @@ class Door(http.server.BaseHTTPRequestHandler):
             if route == '/hub/snapshot': return self._send(200, web.snapshot())
             if route == '/hub/history': return self._send(200, web.history((q.get('minutes') or [60])[0]))
             if route == '/hub/recent': return self._send(200, web.recent((q.get('n') or [25])[0]))
+            if route == '/hub/peer': return self._send(200, peers.report())          # what this Mac would tell a front
+            if route == '/hub/link':                                                # this Mac's look at its peers (POST: look now)
+                if method == 'POST': peers.LINK.poll(force=True)
+                return self._send(200, dict(me=peers.me(), peers=peers.LINK.view(), serving=peers.serving(), listening=peers.LISTEN.get('words'),
+                                            problems=peers.problems()))
             if route == '/hub/recycle' and method == 'POST':
                 body = self._body()
                 try: j = json.loads(body) if body else {}
@@ -525,15 +635,79 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
-        return self._send(404, dict(error='no such hub page: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, POST /hub/recycle'))
+        return self._send(404, dict(error='no such hub page: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, POST /hub/recycle'))
 
 
 class Server(http.server.ThreadingHTTPServer):
-    daemon_threads, request_queue_size = True, 128
+    daemon_threads, request_queue_size, link = True, 128, False
 
 
 class Server6(Server):
     address_family = socket.AF_INET6
+
+
+class LinkServer(Server):
+    """The door's listener for its peers' hubs (this Mac serves as a peer): on one address, bound to its interface."""
+    link, hosts, iface = True, frozenset(), None
+
+
+class LinkServer6(LinkServer):
+    address_family = socket.AF_INET6
+
+
+def link_server(address, port):
+    """A listener on this address only, bound to the interface that holds it (IP_BOUND_IF), so a packet for it that
+    arrives on another interface is not answered. -> the server, not yet serving."""
+    six = ':' in address
+    srv = (LinkServer6 if six else LinkServer)((address, port), Door, bind_and_activate=False)
+    srv.iface = peers.interface_of(address)
+    if srv.iface:
+        try:
+            idx = socket.if_nametoindex(srv.iface)
+            if six: srv.socket.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
+            else: srv.socket.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+        except OSError: pass
+    try: srv.server_bind(); srv.server_activate()
+    except OSError: srv.server_close(); raise
+    host = f'[{address}]' if six else address
+    srv.hosts = frozenset({f'{host}:{port}'.lower()})
+    return srv
+
+
+def listen_link():
+    """While the settings say this Mac serves as a peer ("serve": {"address": ...}), the door also listens there (checked
+    every 5 s, so a change needs no restart; an address not on this Mac yet, the Thunderbolt Bridge still coming up, is
+    tried again). The words say what it does, for the status line."""
+    cur, srv, said = None, None, None
+    while True:
+        try:
+            want = peers.serving()
+            key = (want['address'], want['port']) if want else None
+            if key != cur:
+                if srv:
+                    srv.shutdown(); srv.server_close(); srv = None
+                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {cur[0]}:{cur[1]} stopped", flush=True)
+                cur, peers.LISTEN['words'] = None, None
+                if want:
+                    problem = peers.token_problem()
+                    if problem: words = f'link listener not started: {problem}'
+                    else:
+                        try:
+                            srv = link_server(want['address'], want['port'])
+                            threading.Thread(target=srv.serve_forever, daemon=True).start()
+                            cur = key
+                            port_name = peers.ports().get(srv.iface) if srv.iface else None
+                            words = (f"listening on {want['address']}:{want['port']} for peers (token required)"
+                                     + (f", interface {srv.iface}" + (f' ({port_name})' if port_name else '') if srv.iface else '')
+                                     + ('' if not srv.iface or peers.bridge(srv.iface, {srv.iface: port_name}) or peers.loopback(want['address'])
+                                        else '; warning: not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
+                        except OSError as e:
+                            words = f"link listener not bound to {want['address']}:{want['port']} ({e.strerror or e}): address not configured on any interface (assign the Thunderbolt Bridge static address)"
+                    peers.LISTEN['words'] = words
+                    if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
+                else: said = None
+        except Exception as e: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener error: {type(e).__name__}: {e}", flush=True)
+        time.sleep(5)
 
 
 def awake(caf, idle_since):
@@ -586,6 +760,8 @@ def main(argv=()):
         srv6 = Server6(('::1', PORT), Door); threading.Thread(target=srv6.serve_forever, daemon=True).start()
     except OSError: pass
     threading.Thread(target=beats, daemon=True).start()
+    threading.Thread(target=listen_link, daemon=True).start()          # this Mac as a peer, when the settings say so
+    threading.Thread(target=peers.poller, daemon=True).start()         # this Mac's look at its peers, when it has any
     if not os.environ.get('LOCALMODELS_NO_KEEPER'): threading.Thread(target=keeper, daemon=True).start()
     threading.Thread(target=web.sampler, daemon=True).start()           # memory every 15 s, for the dashboard's chart
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} the local-models hub's door is open: {llmshare.HUB} -> LM Studio at {UP}", flush=True)
