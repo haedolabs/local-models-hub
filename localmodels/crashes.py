@@ -333,6 +333,18 @@ def swapped(to):
             del st['down'][base]
 
 
+def after_maintenance(rows):
+    """Maintenance is over: what LM Studio wrote to its log meanwhile (a restart, unloads) is skipped, never read as
+    crashes, and the keeper's picture starts from what is loaded now (a copy still loaded keeps its count)."""
+    now = time.time()
+    have = {r['id'] for r in rows}
+    with _state() as st:
+        st['log'] = {}                                       # the next look starts at the end of the log
+        seen = {i: dict(s, loaded=True) for i, s in (st.get('seen') or {}).items() if i in have}
+        for i in have: seen.setdefault(i, dict(loaded=True, since=now))
+        st['seen'], st['down'], st['missing'] = seen, {}, {}
+
+
 def nudge():
     """A request through the door failed: maybe a crash. The keeper looks at once (at most every 5 s)."""
     if time.time() - _seen_state.get('nudged', 0) > 5:

@@ -75,6 +75,9 @@ def status():
                              + (f" ({int(100 * c['share'])}% of its recycle band)" if c.get('share') is not None else '')) for i, c in v['copies'].items()}
         if v.get('job'): out['recycling'] = recycle.words(v['job'])
     except Exception as e: out['copies'] = f'could not read: {e}'
+    from . import maint
+    mt = maint.view()
+    if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
     if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error() + ' (the last good settings stand)'
     cr = dash.crash_view()
     if cr['down'] or cr['last']:
@@ -84,7 +87,9 @@ def status():
         out['using_now'].append(dict(project=r['project'], kind=dash.kind_words(r), models=r['models'],
                                      state=f"{r['answering']} answering, {r['waiting']} waiting" + (f", {r['direct']} straight to LM Studio (not through the hub)" if r['direct'] else ''),
                                      since=time.strftime('%H:%M', time.localtime(r['since'])), claude_session=r.get('title') or (bool(r.get('session')) or None),
-                                     step=r.get('step'), progress=f"{b['done']} of {b['total']}" if b.get('total') else None))
+                                     step=r.get('step'), progress=f"{b['done']} of {b['total']}" if b.get('total') else None,
+                                     batch_done_about=time.strftime('%H:%M', time.localtime(b['finish'])) if b.get('finish') else None,
+                                     job=(f"{(r.get('job') or {}).get('name')}: {r['job']['done']} of {r['job']['total']}" if (r.get('job') or {}).get('total') else None)))
     return out
 
 

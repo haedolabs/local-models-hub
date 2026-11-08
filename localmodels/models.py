@@ -16,7 +16,7 @@ started only when it is down: `lms server start` on a running server restarts it
 """
 import json, re, subprocess, time, urllib.error, urllib.request
 
-from . import crashes, llmshare, recycle
+from . import crashes, llmshare, maint, recycle
 
 
 def _lms(*args, timeout=900):
@@ -129,6 +129,13 @@ def keep():
     first copy is loaded (if it fits), and recycle a copy that is due (recycle.py). -> what it did, in words."""
     conf = llmshare.settings()
     fams, room, did = conf.get('families') or {}, float(conf.get('headroom_gb', 8)), []
+    try:
+        if maint.tick(llmshare.inflight(), llmshare.requests_log(0.1)): did.append('maintenance starts: the batches are quiet')
+    except Exception as e: did.append(f'the maintenance look stumbled: {type(e).__name__}: {e}')
+    if maint.on():                                           # the person is working on LM Studio: note what is loaded, do nothing
+        rows = llmshare.loaded(fresh=True)
+        if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
+        return did + ['maintenance: the keeper stands down (no loads, reloads, recycles or server starts)']
     began = time.time()
     rows = llmshare.loaded(fresh=True)
     if not llmshare.read_ok(): return did                   # the listing failed or is unsure: nothing to decide on
@@ -168,6 +175,29 @@ def keep():
             ok, out = load(f.get('key') or first['key'], c, f.get('context') or first['context'], f.get('parallel') or first['parallel'])
             did.append(f'{c} loaded' if ok else f'{c} could not load: {out[-200:]}')
         if job and ready: did += _recycle(job, fams)
+    llmshare.loaded(fresh=True)
+    return did
+
+
+def end_maintenance():
+    """Maintenance is over: skip what LM Studio logged meanwhile, clear the record, then load again each model that was
+    loaded when it began (its first copy; the keeper adds the other copies on its next pass). -> what it did, in words."""
+    rows = llmshare.loaded(fresh=True, force=True)
+    crashes.after_maintenance(rows)                          # before the record goes, so no keeper pass reads the restart as crashes
+    prev = maint.end()
+    if not prev: return ['no maintenance was set']
+    have = {r['id'] for r in rows}
+    todo = [b for b in prev.get('before') or [] if b not in have]
+    if not todo: return ['maintenance is over; what was loaded before is loaded']
+    fams, did = llmshare.settings().get('families') or {}, []
+    ensure_server('after maintenance')
+    with llmshare.swapping(wait=120) as got:
+        if not got: return [f"maintenance is over, but a swap is under way: load {', '.join(todo)} by hand (localmodels use <model>)"]
+        for b in todo:
+            f = fams.get(b)
+            if not f: did.append(f'{b} was loaded before but is not in the settings: load it by hand (localmodels use {b})'); continue
+            ok, out = load(f.get('key') or b, b, f.get('context') or 32768, f.get('parallel') or 4)
+            did.append(f'{b} loaded again after maintenance' if ok else f'{b} could not be loaded again: {out[-200:]}')
     llmshare.loaded(fresh=True)
     return did
 

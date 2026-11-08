@@ -1,0 +1,11 @@
+{
+  "description": "The local-models hub's maintenance notice: one line in a session while the hub has maintenance set, nothing otherwise.",
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/localmodels\" notice", "timeout": 5}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/localmodels\" notice", "timeout": 5}]}
+    ]
+  }
+}

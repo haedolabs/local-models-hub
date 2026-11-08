@@ -9,6 +9,10 @@
   localmodels keep               one pass of the door's keeper: a crashed model loaded again, missing copies, a recycle due
   localmodels recycle [model] | --status   ask for fresh copies before a batch (copies past half their band are recycled
                                  first) | each copy's work since it was loaded against its band
+  localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off
+                                 tell every program and Claude session the local models go down for a while; while on,
+                                 new requests get 503 with Retry-After and the keeper stands down; off loads again what was
+                                 loaded. With no words: what is set, and which batches would run into it
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
                                  (--no-think: no thinking: several times faster, for lookups and extraction)
@@ -90,6 +94,9 @@ def opt(a, name, default=None):
 def status():
     from . import dash, recycle
     d, lm, users, cs = dash.door(), dash.lmstudio(), dash.users(), dash.claude()
+    from . import maint
+    mt = maint.view()
+    if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + (' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
     print(f"the hub's door: {'open on ' + llmshare.HUB if d['up'] else 'closed (localmodels start)'}"
           + (' · runs older code: localmodels install' if d['up'] and d['stale'] else ''))
     print(f"LM Studio: server {lm['server']} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
@@ -329,6 +336,43 @@ def _plist():
                 StandardErrorPath=os.path.join(LOGS, 'gateway.log'), EnvironmentVariables=env, SoftResourceLimits=dict(NumberOfFiles=8192))
 
 
+SETTINGS_FILE = os.path.expanduser('~/.claude/settings.json')
+HOOK_EVENTS = ('SessionStart', 'UserPromptSubmit')
+
+
+def hook_command():
+    """The command Claude Code runs before each prompt: the installed copy's `localmodels notice` (silent unless maintenance)."""
+    return f'"{PY}" "{os.path.join(INSTALLED, "bin", "localmodels")}" notice'
+
+
+def with_hook(settings, cmd, add=True):
+    """Claude Code's settings with the hub's hook added for SessionStart and UserPromptSubmit (once), or taken out; the
+    person's own hooks and settings are left as they are."""
+    hooks = settings.setdefault('hooks', {})
+    for ev in HOOK_EVENTS:
+        kept = [e for e in hooks.get(ev, []) if not any('localmodels' in h.get('command', '') and h.get('command', '').endswith(' notice')
+                                                      for h in e.get('hooks', []))]
+        if add: kept.append(dict(hooks=[dict(type='command', command=cmd, timeout=5)]))
+        if kept: hooks[ev] = kept
+        else: hooks.pop(ev, None)
+    if not hooks: settings.pop('hooks')
+    return settings
+
+
+def set_hook(add=True):
+    """Write the hook into (or out of) ~/.claude/settings.json. -> a line in words."""
+    try: cur = json.load(open(SETTINGS_FILE)) if os.path.exists(SETTINGS_FILE) else {}
+    except (OSError, ValueError) as e:
+        return f'could not read {SETTINGS_FILE} ({type(e).__name__}): the maintenance hook is not ' + ('added' if add else 'taken out')
+    new = with_hook(json.loads(json.dumps(cur)), hook_command(), add)
+    if new == cur: return f"the maintenance hook is {'already in' if add else 'not in'} {SETTINGS_FILE}"
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    tmp = SETTINGS_FILE + '.tmp'
+    with open(tmp, 'w') as f: json.dump(new, f, indent=2); f.write('\n')
+    os.replace(tmp, SETTINGS_FILE)
+    return f"the maintenance hook {'added to' if add else 'taken out of'} {SETTINGS_FILE} (it adds a line to a session only while maintenance is set)"
+
+
 def lms_found():
     """Whether LM Studio's command-line tool is where the hub looks (LMS, ~/.lmstudio/bin/lms, or on PATH)."""
     return os.path.exists(llmshare.LMS)
@@ -354,7 +398,8 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         print(f"would copy the door's code to {INSTALLED} and start it at login as {LABEL} ({PLIST}) with {PY}, after a moment with no request passing through")
         if plugin: print("would leave the hub's tools and the rules to the Claude Code plugin (no registration, no signpost line)")
         elif no_claude: print('would register nothing with Claude Code and add no signpost line (--no-claude)')
-        else: print(f"would register the hub's tools for every Claude Code session (claude mcp add --scope user local-models) and add one signpost line to {SIGNPOST_FILE}")
+        else: print(f"would register the hub's tools for every Claude Code session (claude mcp add --scope user local-models), add one signpost line to {SIGNPOST_FILE}, "
+                    f"and add the maintenance hook to {SETTINGS_FILE} (silent unless maintenance is set)")
         print(f"would link the localmodels command into the first writable of {', '.join(BINS)}")
         print('nothing written (--dry)')
         return 0
@@ -414,6 +459,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         else:
             with open(SIGNPOST_FILE, 'a') as f: f.write(('' if not text or text.endswith('\n') else '\n') + SIGNPOST + '\n')
             print(f'4. the signpost line added to {SIGNPOST_FILE}')
+        print('   ' + set_hook(True))
     src = os.path.join(HOME, 'bin', 'localmodels')
     for d in BINS:
         link = os.path.join(d, 'localmodels')
@@ -440,11 +486,80 @@ def uninstall():
         lines = [l for l in open(SIGNPOST_FILE).read().split('\n') if 'local-models hub signpost' not in l]
         tmp = SIGNPOST_FILE + '.tmp'; open(tmp, 'w').write('\n'.join(lines)); os.replace(tmp, SIGNPOST_FILE)
     print(f'3. the signpost line is out of {SIGNPOST_FILE}')
+    print('   ' + set_hook(False))
     src = os.path.join(HOME, 'bin', 'localmodels')
     for d in BINS:
         link = os.path.join(d, 'localmodels')
         if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(src): os.remove(link)
     print('4. the localmodels command is off PATH (the repo and the settings file are untouched)')
+    return 0
+
+
+def _minutes(word):
+    """'30m', '30', '1h', '1h30m', '90s' -> minutes (at least 1), or None."""
+    word = (word or '').strip().lower()
+    if word.isdigit(): return max(1, int(word))
+    m = re.fullmatch(r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?', word)
+    if not m or not any(m.groups()): return None
+    h, mi, s = (int(x) if x else 0 for x in m.groups())
+    return max(1, h * 60 + mi + round(s / 60))
+
+
+def _at(word):
+    """'20:30' -> that time today, or tomorrow when it has passed; None when it is not a time."""
+    m = re.fullmatch(r'(\d{1,2}):(\d\d)', word or '')
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59: return None
+    t = time.localtime()
+    at = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, int(m.group(1)), int(m.group(2)), 0, 0, 0, -1))
+    return at + 86400 if at <= time.time() else at
+
+
+def maintenance_cmd(a):
+    """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off."""
+    from . import dash, maint, models
+    words = [x for x in a if x != 'maintenance']
+    if words[:1] == ['off']:
+        for line in models.end_maintenance(): print(line)
+        print('the hub is back to normal: requests are answered, the keeper keeps the copies loaded')
+        return 0
+    if not words:
+        mt = maint.view()
+        print('maintenance: ' + (mt['words'] if mt else 'none set'))
+        for g in sorted(dash.live_runs().values(), key=lambda g: g['started']):
+            p = g if g['kind'] == 'run' else g
+            clash = mt and mt.get('start') and p.get('finish') and p['finish'] > mt['start']
+            print(f"  {g['project']} · {g['name']}: {p['done']} of {p['total'] or '?'}"
+                  + (f", done about {finish_words(p['finish'])}" if p.get('finish') else ', no estimate yet')
+                  + (' · ends after maintenance starts' if clash else ''))
+        return 0
+    start, after, minutes, why, i = None, False, 30, [], 0
+    while i < len(words):
+        w = words[i]
+        if w == 'in' and i + 1 < len(words) and _minutes(words[i + 1]):
+            start = time.time() + 60 * _minutes(words[i + 1]); i += 2; continue
+        if w == 'at' and i + 1 < len(words) and _at(words[i + 1]):
+            start = _at(words[i + 1]); i += 2; continue
+        if w == 'for' and i + 1 < len(words) and _minutes(words[i + 1]):
+            minutes = _minutes(words[i + 1]); i += 2; continue
+        if w == 'now': start = time.time(); i += 1; continue
+        if w in ('after-batches', 'after'): after = True; i += 1; continue
+        why.append(w); i += 1
+    if start is None and not after:
+        print('say when: localmodels maintenance in 15m | at 20:30 | now | after-batches [for 30m] [why ...]'); return 2
+    m = maint.announce(start=start, minutes=minutes, why=' '.join(why), after_batches=after)
+    print('set: ' + maint.words(m))
+    print('  every answer from the door now carries X-Hub-Maintenance; the dash, `localmodels`, the status tool and the')
+    print('  Claude Code hook say it; when it starts, new requests get 503 with Retry-After and the keeper stands down')
+    for g in sorted(dash.live_runs().values(), key=lambda g: g['started']):
+        if m.get('start') and g.get('finish') and g['finish'] > m['start']:
+            print(f"  note: {g['project']} · {g['name']} is due to finish about {finish_words(g['finish'])}, after it starts")
+    if m['phase'] != 'on': return 0
+    rows = llmshare.loaded(fresh=True)
+    if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
+    n = len(llmshare.inflight())
+    if n: print(f'waiting for the {n} requests being answered to finish (up to 10 min) ...')
+    if quiet(wait=600, still=3): print('quiet: nothing is being answered. Go ahead. When done: localmodels maintenance off')
+    else: print(f'{len(llmshare.inflight())} requests are still being answered after 10 min; they finish on their own. When done: localmodels maintenance off')
     return 0
 
 
@@ -618,6 +733,9 @@ def main(argv):
     if verb == 'use': return use(a)
     if verb == 'keep': return keep()
     if verb == 'recycle': return recycle_cmd(a)
+    if verb == 'maintenance': return maintenance_cmd(a)
+    if verb == 'notice':
+        from . import maint; return maint.notice_main()
     if verb == 'crashes':
         d = num(a, '--days', 7.0); return crashes_cmd(d, '--scan' in a) if d is not None else 2
     if verb == 'ask':

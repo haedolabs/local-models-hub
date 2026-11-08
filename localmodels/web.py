@@ -14,7 +14,7 @@ runs while nobody looks, except the memory sample.
 """
 import collections, json, os, threading, time
 
-from . import crashes, dash, llmshare, recycle, sessions
+from . import crashes, dash, llmshare, maint, recycle, sessions
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
 COLORS = os.path.join(llmshare.SHARED, 'colors.json')   # project -> color slot, first come, kept while the project is seen
@@ -96,6 +96,8 @@ def _snapshot():
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],
                claude=[dict(c, uses=any(u.get('session') == c['id'] for u in users)) for c in cs],
                mac=dash.mac(), top=dash.every('top', 5, dash.top), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
+    try: out['maintenance'] = maint.view()
+    except Exception: out['maintenance'] = None
     out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'straight to LM Studio'])
     return out
 
