@@ -18,6 +18,10 @@
   localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
   localmodels name private <project> | public <project> private: screens show only the names set for it
   localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
+  localmodels present on [for 2h] [show a,b] | off      screenshot mode: screens show the projects named (the demo's
+                                 and local-models by default) and every other one as "other", with no session titles
+  localmodels demo [--minutes 60] [--dry]   a synthetic workload under generic names (made-up records, three projects,
+                                 every slot filled) for screenshots and load tests
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
   localmodels errors [--minutes 1440] [--trace]   what the hub recorded as going wrong (endpoints, background loops, the
                                  dashboard's render errors), newest first; --trace adds each traceback
@@ -897,6 +901,47 @@ def errors_cmd(minutes=1440, trace=False):
     return 0
 
 
+def present_cmd(a):
+    """localmodels present on [for 2h] [show a,b] | off: screenshot mode (names.py)."""
+    from . import demo, names
+    words = [x for x in a if x != 'present']
+    if words[:1] == ['off']:
+        names.present_off(); print('screenshot mode off: every screen shows names as set'); return 0
+    if words[:1] == ['on']:
+        minutes, keep, i = 120, demo.names() + ['local-models'], 1
+        while i < len(words):
+            if words[i] == 'for' and i + 1 < len(words) and _minutes(words[i + 1]): minutes = _minutes(words[i + 1]); i += 2; continue
+            if words[i] == 'show' and i + 1 < len(words): keep = [x for x in words[i + 1].split(',') if x]; i += 2; continue
+            print(f'not understood: {words[i]} (localmodels present on [for 2h] [show a,b])'); return 2
+        d = names.set_present(minutes, keep)
+        print(f"screenshot mode on until {time.strftime('%H:%M', time.localtime(d['until']))}: screens show {', '.join(d['keep'])} by name, "
+              'every other project as "other", no session titles, no error details (localmodels present off ends it)')
+        return 0
+    d = names.presenting()
+    print(f"screenshot mode on until {time.strftime('%H:%M', time.localtime(d['until']))}, showing {', '.join(d['keep'])}" if d else 'screenshot mode off')
+    return 0
+
+
+def demo_cmd(a):
+    """localmodels demo [--minutes 60] [--dry]: a synthetic workload under generic names (demo.py)."""
+    from . import demo
+    minutes = 60.0
+    if '--minutes' in a:
+        try: minutes = float(a[a.index('--minutes') + 1])
+        except (IndexError, ValueError): print('localmodels demo [--minutes 60] [--dry]'); return 2
+    if '--dry' in a:
+        model, n, share = demo.plan(minutes)
+        print(f"would send {n} requests at once on {model or '(no model loaded)'} for {minutes:g} min, through {llmshare.HUB}: "
+              + ', '.join(f'{p[0]} ({share[p[0]]} at once: {p[1]}, {p[2]})' for p in demo.PROJECTS))
+        return 0
+    if not llmshare.hub_up(fresh=True): print(f'gateway down at {llmshare.HUB}: localmodels start'); return 1
+    if '--project' in a:                                  # one project's program, started by the demo itself
+        opt = lambda k, d=None: a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else d
+        out = demo.run(minutes=minutes, workers=int(opt('--workers', 1)), model=opt('--model'), seed=int(opt('--seed', 0)), only=opt('--project'))
+        return 0 if all(v['done'] for v in out.values()) else 1
+    return demo.spawn(minutes)
+
+
 def maintenance_cmd(a):
     """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off."""
     from . import dash, maint, models
@@ -1212,6 +1257,8 @@ def main(argv):
     if verb == 'keep': return keep()
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
+    if verb == 'present': return present_cmd(a)
+    if verb == 'demo': return demo_cmd(a)
     if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)
     if verb in ('peer', 'peers'): return peer_cmd(a)
     if verb == 'notice':

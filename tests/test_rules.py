@@ -640,6 +640,32 @@ def test_names(box):
     t('forget a label, then a project name: back to as seen', names.project('folder-123') == 'folder-123' and names.label('casework', 'night run') == 'night run')
     t('the names file stays a plain JSON object', isinstance(json.load(open(names.FILE)), dict))
 
+    print('screenshot mode: the projects kept show by name; every other one as "other", private; no session title anywhere')
+    from localmodels import web
+    names.set_present(5, ['research', 'local-models'])
+    t('a kept project shows as it is, any other as "other"', names.project('research') == 'research' and names.project('folder-123') == 'other'
+      and names.project('casework') == 'other', (names.project('research'), names.project('folder-123')))
+    u = names.user(dict(project='folder-123', app='private-script.py', step='extract files 3 of 9', title='Secret title',
+                        batch=dict(name='filings', phase='extract files', now=[dict(step='notes on a person')])))
+    t('a client of another project: "other", no script, no title, no batch or job names, a count only',
+      u['project'] == 'other' and u['app'] is None and u['title'] is None and u['step'] == '3 of 9' and u['batch']['name'] is None
+      and u['batch']['now'][0]['step'] is None, u)
+    k = names.user(dict(project='research', app='demo', step='records 4 of 40', title='a title', batch=dict(name='consistency check')))
+    t("a kept project's steps and batch show, but never a session title", k['step'] == 'records 4 of 40' and k['batch']['name'] == 'consistency check' and k['title'] is None, k)
+    c = names.session(dict(id='s2', project='local-models', title='Email to someone'))
+    t('a Claude Code session: its kept project shows, its title is replaced', c['project'] == 'local-models' and c['title'] == 'a Claude Code session', c)
+    real = web.errors.summary
+    web.errors.summary = lambda minutes=10: dict(count=2, minutes=10, last=dict(at=1, source='gateway', where='GET /x', error='a path /Users/someone'))
+    try: snap = web.snapshot()
+    except Exception as e: snap = {'error': repr(e)}
+    web.errors.summary = real
+    t('the error banner keeps its count, never the details', snap.get('errors') == dict(count=2, minutes=10), snap.get('errors'))
+    with open(names._present_file(), 'w') as f: json.dump(dict(until=time.time() - 1, keep=['research']), f)
+    names._present['checked'] = 0.0
+    t('at its end it is off by itself: names as set again', names.project('folder-123') == 'folder-123' and names.presenting() is None)
+    names.present_off()
+    t('off: names as set', names.project('folder-123') == 'folder-123' and names.presenting() is None)
+
 
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')

@@ -427,6 +427,20 @@ def run(box):
         t('its die is the gold token, its corner is transparent', pixel(d, 32, 32) == gold + (255,) and pixel(d, 0, 0)[3] == 0, (pixel(d, 32, 32), pixel(d, 0, 0)))
         page = urllib.request.urlopen(url + '/', timeout=10).read()
         t('the page links it (tab, bookmarks, favorites)', b'rel="icon" type="image/png" sizes="64x64" href="/favicon.png"' in page and b'rel="apple-touch-icon"' in page)
+
+        print('the demo: generic batches through the gateway, made-up records, every request named')
+        from localmodels import demo
+        n0 = len(open(llmshare.REQUESTS).read().strip().split('\n')); plan()
+        out = demo.run(url=url, minutes=0.03, workers=3, model=F, say=lambda *x: None, seed=7)
+        time.sleep(0.5)
+        new = [json.loads(l) for l in open(llmshare.REQUESTS).read().strip().split('\n')[n0:]]
+        t('three generic projects, as batches with their progress and steps; nothing else named',
+          new and {r['project'] for r in new} == {'research', 'evals', 'docs'} and all(r.get('kind') == 'batch' and r.get('status') == 200 for r in new)
+          and {r.get('run') for r in new} == {'consistency check', 'answer grading', 'summaries'} and all(r.get('run_total') and ' of ' in (r.get('step') or '') for r in new),
+          (len(new), sorted({r['project'] for r in new}), new[:1]))
+        t('the demo says what it did: answers, no errors', all(v['done'] > 0 and v['errors'] == 0 for v in out.values()), {k: (v['done'], v['errors']) for k, v in out.items()})
+        text = demo.ledger(__import__('random').Random(1)) + demo.grading(__import__('random').Random(1)) + demo.notes(__import__('random').Random(1))
+        t('its records are made up: stock lines, sums and planning notes', 'balance' in text and ' = ' in text and 'week' in text)
     finally:
         door.shutdown(); up.shutdown()
 
