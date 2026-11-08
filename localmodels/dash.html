@@ -98,6 +98,9 @@ td.sub { padding-left: 28px; color: var(--ink-2); }
 .more { color: var(--muted); font-size: 11.5px; padding: 4px 8px; }
 .bar-thin { height: 4px; border-radius: 2px; background: var(--track); margin-top: 4px; width: 120px; }
 .bar-thin > div { height: 100%; border-radius: 2px; background: var(--s1); }
+.tracks { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 2px 0 4px; }
+.bar-thin.wide { width: 100%; height: 6px; border-radius: 3px; margin: 3px 0 2px; }
+.bar-thin.wide > div { border-radius: 3px; }
 .chart { position: relative; flex: 1 1 auto; min-height: 60px; }
 .tablebox { max-height: 100%; overflow: hidden; }
 #tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
@@ -191,7 +194,20 @@ function full(n) { return Math.round(+n || 0).toLocaleString(); }
 function clock(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}); }
 function clockS(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
 function ago(t) { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? s + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; }
-function left(s) { return s < 90 ? s + ' s left' : s < 5400 ? Math.round(s / 60) + ' min left' : (s / 3600).toFixed(1) + ' h left'; }
+function finishAt(t) {          // a time ahead in local time, with the day when it is not today
+  const d = new Date(t * 1000), now = new Date(), tm = new Date(now); tm.setDate(now.getDate() + 1);
+  if (d.toDateString() === now.toDateString()) return clock(t);
+  if (d.toDateString() === tm.toDateString()) return 'tomorrow ' + clock(t);
+  return d.toLocaleDateString([], {weekday: 'short'}) + ' ' + clock(t);
+}
+function span(s) {               // a stretch of time in the unit that reads best: 40 s, 12 min, 2 h 15 min, 3 d 4 h
+  s = Math.max(0, Math.round(s));
+  if (s < 90) return s + ' s';
+  if (s < 5400) return Math.round(s / 60) + ' min';
+  if (s < 172800) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + ' h' + (m ? ` ${m} min` : ''); }
+  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600); return d + ' d' + (h ? ` ${h} h` : '');
+}
+function left(s) { return span(s) + ' left'; }
 function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
 function ticks(max, n = 4) { const s = niceMax(max / n); const out = []; for (let v = 0; v <= max + 1e-9; v += s) out.push(+v.toFixed(6)); return out; }
 function short(model) { return String(model || '?').replace(/^[^/]+\//, ''); }
@@ -438,7 +454,10 @@ function renderNow() {
   const fams = S.lmstudio.families, busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
   $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} at once`));
   const answering = S.users.filter(u => u.answering).map(u => u.project);
-  $('k-ans-f').textContent = answering.length ? [...new Set(answering)].join(', ') : 'nothing answering';
+  const fin = u => (u.batch && u.batch.finish) || (u.job && u.job.finish);
+  const ends = S.users.filter(fin);
+  $('k-ans-f').textContent = ends.length ? `${ends[0].project}: ${ends[0].batch && ends[0].batch.finish ? 'batch' : 'job'} done about ${finishAt(fin(ends[0]))}`
+    : answering.length ? [...new Set(answering)].join(', ') : 'nothing answering';
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
   $('k-wait-f').textContent = waiting ? `${q.people || 0} for a person, ${q.others || 0} batch and other · people first` : `last 7 days: ${S.waits7.waits} waits over 2 s, ${S.waits7.minutes} min in all`;
@@ -521,10 +540,29 @@ function renderModels() {
   legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat([{name: 'free', color: 'var(--track)'}]));
 }
 
+function track(word, name, p, why) {  // one labelled bar: Batch or Job, done of total, time left, finish in local time
+  const fin = p.finish || (p.left != null ? Date.now() / 1000 + p.left : null);
+  const when = p.left != null ? (p.left > 0 ? `${left(p.left)} · done about ${finishAt(fin)}` : 'finishing')
+    : p.done < p.total ? 'estimating after the first one' : 'done';
+  return el('div', {class: 'track', title: [name, why, p.started ? 'started ' + clock(p.started) : ''].filter(Boolean).join(' · ')},
+    el('div', {}, el('b', {}, word), name ? el('span', {class: 'muted'}, ' ' + name) : ''),
+    el('div', {class: 'bar-thin wide'}, el('div', {style: `width:${p.pct || 0}%`})),
+    el('div', {class: 'ink2'}, `${p.done} of ${p.total} · ${when}`));
+}
+
+function progress(u) {             // the batch (the whole run) and the job (the phase it is on now), each with its own bar
+  const b = u.batch && u.batch.total ? u.batch : null, j = u.job && u.job.total ? u.job : null;
+  if (!b && !j) return u.step ? el('div', {class: 'muted'}, el('b', {}, 'Step'), ' ' + u.step) : null;
+  const why = b && (b.basis === 'the last run' ? 'estimate from the last run of this name' : b.basis ? "estimate from this run's pace" : '');
+  return el('div', {class: 'tracks'},
+    b ? track('Batch', b.name, b, why) : el('div', {class: 'muted track', title: 'the script can say its whole size with X-Run, X-Run-Total and X-Run-Done (GUIDE.md)'}, el('b', {}, 'Batch'), ' size not said'),
+    j ? track('Job', j.name, j) : u.step ? el('div', {class: 'muted track'}, el('b', {}, 'Job'), ' ' + u.step) : '');
+}
+
 function renderUsers() {
   const box = $('users'), us = S.users;
   if (!us.length) { box.replaceChildren(el('div', {class: 'empty'}, 'Nothing is using a local model right now.')); return; }
-  const head = ['project', 'what', 'now', 'model', 'running', 'Claude session', 'progress or step'].map(h => el('th', {}, h));
+  const head = ['project', 'what', 'now', 'model', 'running', 'Claude session'].map(h => el('th', {}, h));
   const rows = [];
   for (const u of us) {
     const b = u.batch || {};
@@ -533,23 +571,18 @@ function renderUsers() {
     else if (u.direct) now = el('span', {class: 'badge'}, `${u.direct} connected`);
     else now = el('span', {class: 'muted'}, 'between requests');
     const flag = u.direct && u.via !== 'hub' ? el('div', {}, el('span', {class: 'badge warn'}, 'straight to LM Studio, not through the hub')) : '';
-    const label = b.kind === 'phase' ? b.name : [b.name, b.phase].filter(Boolean).join(' · ');
-    const when = b.left ? `~${left(b.left)}` : b.total && b.done < b.total ? 'estimating after the first one' : '';
-    const why = b.basis === 'the last run' ? 'from the last run of this name' : b.basis === 'this run' || b.basis === 'this run so far' ? 'from this run\'s pace' : '';
-    const prog = b.total ? el('div', {title: [label, why, b.started ? 'started ' + clock(b.started) : ''].filter(Boolean).join(' · ')},
-        label ? el('div', {class: 'muted'}, label) : '',
-        `${b.done} of ${b.total} done` + (when ? ` · ${when}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${b.pct || 0}%`})))
-      : el('span', {class: 'muted', title: u.step || ''}, u.step || '–');
+    const prog = progress(u);
     rows.push(el('tr', {},
       el('td', {}, el('span', {class: 'dot', style: `background:${color(u.project)}`}), u.project),
       el('td', {}, kindWords(u.kind), u.app ? el('div', {class: 'muted'}, u.app) : ''),
       el('td', {}, now, flag),
       el('td', {}, (u.models || []).map(short).join(', ') || '–'),
-      el('td', {class: 'num', title: (b.started ? 'this run started ' : 'using a model since ') + clock(u.since)}, ago(u.since)),
+      el('td', {class: 'num', title: ((u.batch || u.job || {}).started ? 'this run started ' : 'using a model since ') + clock(u.since)}, ago(u.since)),
       el('td', {title: u.title || ''}, u.title || (u.session ? 'a Claude session' : el('span', {class: 'muted'}, '–'))),
-      el('td', {}, prog)));
+    ));
+    if (prog) rows.push(el('tr', {}, el('td', {class: 'sub', colspan: head.length}, prog)));
     for (const j of (b.now || []).slice(0, 8)) {
-      rows.push(el('tr', {}, el('td', {class: 'sub', colspan: 4}, `agent ${j.job}` + (j.step ? ` · ${j.step}` : '')), el('td', {class: 'num ink2'}, ago(j.since)), el('td', {}),
+      rows.push(el('tr', {}, el('td', {class: 'sub', colspan: 4}, `agent ${j.job}` + (j.step ? ` · ${j.step}` : '')), el('td', {class: 'num ink2'}, ago(j.since)),
         el('td', {}, j.pct != null ? el('div', {class: 'ink2'}, `${j.pct}%` + (j.left ? ` · ~${left(j.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${j.pct}%`}))) : el('span', {class: 'muted'}, 'starting'))));
     }
   }

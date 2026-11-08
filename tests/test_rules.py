@@ -310,6 +310,18 @@ def test_runs():
     t('its time left comes from the speed measured in this run: 61 units at 30 s each, about 30 min', r.get('left') and 1650 <= r['left'] <= 2000, r.get('left'))
     t("it starts when the run's first request began, not when the model was loaded", abs(r.get('started', 0) - (now - 1200 + 30 - 60)) < 1, r.get('started'))
     t('the phase it is in now comes from the step', r.get('phase') == 'extract', r.get('phase'))
+    t('the finish time is now plus the time left (the dash shows it in local time)', r.get('finish') == now + r.get('left', -1), (r.get('finish'), r.get('left')))
+    t('a run that names itself is the whole batch; a phase from step words is only that phase', r.get('scope') == 'whole run', r.get('scope'))
+
+    # the batch and the job inside it: 150 units in all, the 100-item extract phase done, now 10 of 50 checks done
+    two = [rec(now - 4000 + 30 * k, run='report', run_total=150, run_done=k, step=f'extract {k + 1} of 100') for k in range(100)] + \
+          [rec(now - 600 + 60 * k, run='report', run_total=150, run_done=100 + k, step=f'check {k + 1} of 50') for k in range(10)]
+    r = runs.progress(two, now=now)[('proj', 'report')]
+    j = r.get('job') or {}
+    t('a batch carries the job it is on now: its name, done and size', (j.get('name'), j.get('done'), j.get('total')) == ('check', 10, 50), j)
+    t('the job has its own bar, time left and finish, from its own pace (40 checks at ~60 s, about 40 min)',
+      j.get('pct') == 20 and j.get('left') and 2000 <= j['left'] <= 3000 and j.get('finish') == now + j['left'], j)
+    t("the batch still runs to its own end: its time left is at least the job's",r.get('left') and r['left'] >= j['left'], (r.get('left'), j.get('left')))
 
     # twice as fast lately: the estimate follows the recent speed, not the run's average
     fast = [rec(now - 3600 + 60 * k + 60, run='r2', run_total=200, run_done=k) for k in range(40)] + \
@@ -324,8 +336,12 @@ def test_runs():
     r = runs.progress(before + begun, now=now, history=hist)[('proj', 'nightly')]
     t("a new run of the same name: a fresh start, not the old one's count", (r.get('done'), r.get('total')) == (0, 60), r)
     t('before its first unit is done, the estimate comes from the last run of that name on this Mac (60 x 10 s)', r.get('left') and 500 <= r['left'] <= 700 and r.get('basis') == 'the last run', r)
+    again = [rec(now - 400 + 5 * k, seconds=5, run='nightly', run_total=60, run_done=k) for k in range(60)] + \
+            [rec(now - 50 + 5 * k, seconds=5, run='nightly', run_total=60, run_done=k) for k in range(4)]
+    r = runs.progress(again, now=now)[('proj', 'nightly')]
+    t('the same run started again two minutes after it ended: its count drops back, so it is a new run (3 done, not 59)', r['done'] == 3, r['done'])
     r = runs.progress(begun, now=now, history={})[('proj', 'nightly')]
-    t('no earlier run and nothing done yet: no made-up number, it says it is estimating', r.get('left') is None and r.get('basis') == 'estimating after the first one', r)
+    t('no earlier run and nothing done yet: no made-up number, it says it is estimating', r.get('left') is None and r.get('finish') is None and r.get('basis') == 'estimating after the first one', r)
 
     # the same work on a slower Mac: the estimate is that Mac's own, nothing assumed
     slow = [rec(now - 1200 + 120 * k + 120, run='report', run_total=100, run_done=k) for k in range(10)]
@@ -341,6 +357,7 @@ def test_runs():
     r = runs.progress(ph, now=now).get(('proj', 'extract files'), {})
     t('a phase from the step words alone: items answered count as done, a failed one does not', (r.get('done'), r.get('total'), r.get('kind')) == (24, 360, 'phase'), r)
     t('and it too gets a time left, from its own pace', r.get('left') and r['left'] > 0, r.get('left'))
+    t('a phase says its estimate covers that phase only', r.get('scope') == 'this phase' and r.get('finish') == now + r['left'], (r.get('scope'), r.get('finish')))
     inf = [dict(project='proj', since=now - 3, run='report', run_total=100, run_done=41, step='extract 42 of 100')]
     r = runs.progress(rows, inflight=inf, now=now)[('proj', 'report')]
     t('a request still in flight moves the count on at once', r['done'] == 41, r['done'])
