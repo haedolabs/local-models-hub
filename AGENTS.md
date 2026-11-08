@@ -6,12 +6,13 @@ A door on `localhost:1235` in front of LM Studio, shared by every project and ev
 - `localmodels/gateway.py` — the door: names each request, takes a slot, passes it to LM Studio, logs one line, holds and resends across a crash.
 - `localmodels/llmshare.py` — the sharing rules: slot locks, leases, the swap lock, the model listing, the readers of the shared state.
 - `localmodels/models.py`, `crashes.py`, `recycle.py` — the keeper: copies kept loaded, crashed models loaded again, copies recycled before the crash band.
+- `localmodels/peers.py` — other Macs' hubs as more copies of a family: the shared token, a peer's report, the front's link (looks, backoff, free slots, model fingerprints), the network checks.
 - `localmodels/agent.py` — local agents: the tool loop, read-only file tools, JSON answers, retries.
 - `localmodels/mcp_server.py` — the MCP tools and the detached job runner.
 - `localmodels/whois.py`, `sessions.py` — who is behind a connection; every Claude Code session on the Mac.
 - `localmodels/web.py`, `dash.html`, `dash.py` — the dashboard and the terminal dash.
 - `localmodels/cli.py`, `bin/localmodels` — the command.
-- `tests/` — sandbox tests with a fake LM Studio; `tools/` — measurements.
+- `tests/` — sandbox tests with a fake LM Studio (two doors for peers); `tools/` — measurements.
 
 ## Working on it
 - After any change: `localmodels check` (it runs the sandbox tests against the installed door), then `localmodels install` (launchd runs a copy of the code; the dash says *runs older code* until then). A new rule gets a sandbox test first.

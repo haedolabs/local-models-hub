@@ -7,6 +7,7 @@ The instructions for any project live in GUIDE.md at the root of this repo; the 
   models      the models LM Studio holds, kept the way the settings say (models.json), recycled, and swaps
   crashes     when LM Studio's engine crashes: notice it, record it, load the model again
   recycle     a copy recycled before the amount of work at which the engine has crashed
+  peers       other Macs' hubs as more copies of a family, over the Thunderbolt Bridge
   whois       which project, Claude session and program is behind a connection
   sessions    every Claude Code session on this Mac, by project
   agent       local agents: one well-defined job on the loaded model, with tools that only read

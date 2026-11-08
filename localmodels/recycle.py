@@ -34,6 +34,19 @@ from . import crashes, llmshare
 DEFAULT = dict(tokens=800_000, soft=560_000, before_batch=0.5, requests=0)
 DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try again after; between two recycles of a family; a fresh-start request lasts
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
+_held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
+
+
+def held_back():
+    """The families whose recycle waits because a lone copy might not load again, with why: {family: words}."""
+    return dict(_held)
+
+
+def guardrail_off():
+    """Whether LM Studio's model-loading guardrail is Off on this Mac (its settings.json): then it does not refuse the
+    hub's loads, so a lone copy unloaded for a recycle can be loaded again."""
+    from . import peers
+    return peers.guardrail_mode() == 'off'
 
 
 def thresholds(f):
@@ -116,6 +129,7 @@ def plan(rows, busy=None):
     if r.get('job') or time.time() < (r.get('retry_after') or 0): return None
     seen, down, have = st.get('seen') or {}, st.get('down') or {}, {x['id']: x for x in rows}
     best = None
+    _held.clear()
     for base, f in (llmshare.settings().get('families') or {}).items():
         th = thresholds(f)
         if not th or base in down: continue
@@ -133,6 +147,11 @@ def plan(rows, busy=None):
             elif fresh and s >= th['before_batch']: why, rank = f"a batch is starting and it has {c['tokens']:,} tokens processed since it was loaded, past {int(th['before_batch'] * 100)}% of its band of {th['tokens']:,}", 2 + s
             elif idle and c['tokens'] >= th['soft']: why, rank = f"it is idle and has {c['tokens']:,} tokens processed since it was loaded, past the soft limit of {th['soft']:,}", 1 + s
             else: continue
+            if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
+                _held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
+                               "the instance manager here, guardrail not Off); set LM Studio's model-loading guardrail to Off, or load it once "
+                               'through the instance manager (crash recovery, or `localmodels use` after an unload)')
+                continue
             if best is None or rank > best[0]: best = (rank, i, base, c, round(s, 2), why)
     if not best: return None
     _, copy, base, c, s, why = best

@@ -316,6 +316,37 @@ def loaded(base, ids, ok, seconds, words=''):
                 d['why'] = 'the last load failed: ' + str(words)[-120:]
 
 
+def load_ok(base):
+    """A load of this family by the hub worked on this Mac: it can load it again (recycle.plan relies on it for a lone copy)."""
+    with _state() as st:
+        e = st.setdefault('loads', {}).setdefault(base, {})
+        e['ok'] = time.time()
+
+
+def load_refused(base, words, cond):
+    """LM Studio refused to load this family for the hub (its loading guardrail): the words for a person, and what it was
+    refused under (cond: models.conditions(), the guardrail settings and the GPU's limit), so the keeper does not try
+    again until one of them changes."""
+    with _state() as st:
+        e = st.setdefault('loads', {}).setdefault(base, {})
+        e.update(refused=time.time(), words=str(words)[:400], cond=list(cond))
+        _record(dict(event='load refused', family=base, words=str(words)[:200]))
+
+
+def load_blocked(base, cond):
+    """Words when the hub's last load of this family was refused and nothing has changed since (cond, as load_refused
+    took it), else None: then a load would be refused again, so the keeper does not try."""
+    e = (_read().get('loads') or {}).get(base) or {}
+    if not e.get('refused') or (e.get('ok') or 0) > e['refused'] or list(cond) != e.get('cond'): return None
+    return e.get('words') or 'load refused by LM Studio'
+
+
+def reload_proven(base):
+    """Whether the hub has loaded this family on this Mac since its last refusal (so an unload for a recycle can be undone)."""
+    e = (_read().get('loads') or {}).get(base) or {}
+    return bool(e.get('ok')) and (e.get('refused') or 0) < e['ok']
+
+
 def loaded_now(ids):
     """The hub loaded these copies this moment (a swap, a kept copy, a recycle): their counts start again."""
     with _state() as st:

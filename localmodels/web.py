@@ -14,7 +14,7 @@ runs while nobody looks, except the memory sample.
 """
 import collections, json, os, re, threading, time
 
-from . import HOME, NAME, VERSION, crashes, dash, llmshare, maint, names, recycle, sessions
+from . import HOME, NAME, VERSION, crashes, dash, llmshare, maint, names, peers, recycle, sessions
 from . import names as names_mod          # colors() takes a parameter called names
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
@@ -119,7 +119,14 @@ def _snapshot():
     out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
     except Exception: out['maintenance'] = None
-    out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'straight to LM Studio'])
+    try:                                          # this Mac's peers (each one's state, the link, the families it serves) and this Mac as a peer
+        out['peers'] = peers.view()
+        for p in out['peers']:
+            for f in (p.get('families') or {}).values(): f['holders'] = {names.project(k): v for k, v in (f.get('holders') or {}).items()}
+        out['link'] = dict(me=peers.me(), serving=peers.serving(), listening=peers.LISTEN.get('words'), problems=peers.problems())
+    except Exception as e: out['peers'], out['link'] = [], dict(problems=[f'could not read the peers: {type(e).__name__}: {e}'])
+    out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'straight to LM Studio']
+                           + [k for p in out['peers'] for f in (p.get('families') or {}).values() for k in f['holders']])
     return out
 
 

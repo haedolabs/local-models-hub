@@ -182,8 +182,8 @@ def users(shown=True):
             r = rows[pid] = dict(pid=pid, project=project, app=None, session=None, host_session=None, kind=None, models=[], since=time.time(),
                                  answering=0, waiting=0, direct=0, via=None, step=None, batch=None, lease=False)
         return r
-    for d in llmshare.leases():
-        r = row(d.get('pid'), d.get('project'))
+    for d in llmshare.leases():                      # a front's requests over the link: one row per front and project
+        r = row(('link', d['from'], d.get('project')) if d.get('from') else d.get('pid'), d.get('project'))
         r['project'] = r['project'] or d.get('project')
         if d.get('via') != 'hub' or not r['kind']:                # a run's own lease says what it is; the hub's only that it is
             r['kind'] = d.get('kind') if d.get('via') != 'hub' or d.get('kind') != 'other' else (r['kind'] or 'other')
@@ -195,7 +195,7 @@ def users(shown=True):
         if d.get('log_dir'): r['batch'] = batch(d['log_dir'])
         elif d.get('total'): r['batch'] = dict(name='', done=d.get('done', 0), total=d['total'], pct=int(100 * d.get('done', 0) / max(1, d['total'])), left=None, now=[])
     for f in llmshare.inflight():
-        r = row(f.get('pid') or ('hub', f.get('project')), f.get('project'))
+        r = row(('link', f['from'], f.get('project')) if f.get('from') else f.get('pid') or ('hub', f.get('project')), f.get('project'))
         r['via'] = 'hub'
         r['answering' if f.get('state') == 'answering' else 'waiting'] += 1
         if f.get('model') and f['model'] not in r['models']: r['models'].append(f['model'])
@@ -282,9 +282,10 @@ def snapshot():
     for title, fn in PROVIDERS:
         try: extra[title] = fn()
         except Exception as e: extra[title] = [dict(kind='note', what=f'could not read: {e}', since=time.time())]
+    from . import peers
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
                 last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
-                maintenance=maint.view())
+                maintenance=maint.view(), peers=peers.view())
 
 
 def crash_view():
@@ -375,6 +376,12 @@ def show(s, w=80, h=24):
             continue
         L.append(f"  {k(f['id'], 'B')} · {len(f['copies'])} copies · {f['busy']} of {f['at_once']} busy · holds {f['size']:.1f} GB")
         L.append('    ' + '   '.join(f"copy {i} {word(m)} · {m['busy']} of {m['parallel']} busy" for i, m in enumerate(f['copies'], 1)))
+    for p in s.get('peers') or []:                 # each peer: its instances are replicas of a family, after the local ones
+        if p.get('state') != 'up': L.append('  ' + k((p.get('words') or p['name'])[:w - 4], 'r' if p.get('state') in ('down', 'refused') else 'y')); continue
+        for fid, f in (p.get('families') or {}).items():
+            if not f.get('match'): L.append('  ' + k(f"peer {p['name']}: {fid} excluded ({f.get('why')})"[:w - 4], 'y')); continue
+            L.append(f"  {k(fid, 'B')} @ peer {k(p['name'], 'B')} · {f.get('busy')}/{f.get('slots')} slots busy · {f.get('here')} from this gateway"
+                     + (f" · {p['rtt_ms']:.0f} ms RTT" if p.get('rtt_ms') is not None else ''))
     if not lm['models']: L.append('  ' + k('no model loaded', 'd'))
     cr = s.get('crashes') or {}
     for d in cr.get('down') or []: L.append('  ' + k('! ' + d['words'], 'r' if d['state'] == 'left down' else 'y', 'B'))

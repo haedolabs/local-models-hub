@@ -28,7 +28,8 @@ INSTRUCTIONS = (
 _o = lambda props, req=(): {'type': 'object', 'properties': props, 'required': list(req)}
 TOOLS = [
     {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each copy\'s work since it was loaded against its '
-     'recycle band), the hub, every program using a model by project and Claude session (batches with their progress), crashes and recycles, and the last hour by project.',
+     'recycle band), the hub, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every program using a model by '
+     'project and Claude session (batches with their progress), crashes and recycles, and the last hour by project.',
      'inputSchema': _o({})},
     {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (where to send requests, "
      "leases, swaps, local agents, logs). section=... reads one part; no section: the Now card and the section list.",
@@ -59,6 +60,11 @@ TOOLS = [
 
 
 # ---------------------------------------------------------------- the tools
+def _peers_up():
+    from . import peers
+    return any(p.get('state') == 'up' for p in peers.view())
+
+
 def status():
     from . import recycle
     s = dict(time=time.strftime('%H:%M:%S'), door=dash.door(), lmstudio=dash.lmstudio(), users=dash.users(),
@@ -66,7 +72,7 @@ def status():
     lm = s['lmstudio']
     out = dict(ok=True, hub=('open' if s['door']['up'] else 'closed') + f" on {llmshare.HUB}", dashboard=f'{llmshare.HUB}/',
                lmstudio=f"server {lm['server']}; " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded'),
-               at_once=llmshare.at_once() if lm['families'] else 0, using_now=[],
+               at_once=llmshare.at_once() if lm['families'] or _peers_up() else 0, using_now=[],
                claude_sessions=dict(working=sum(c['working'] for c in s['claude']), idle=sum(not c['working'] for c in s['claude'])),
                last_hour={p: f"{v['requests']} requests, {v['tokens']:,} tokens" for p, v in s['last_hour'].items()})
     try:
@@ -79,6 +85,9 @@ def status():
     mt = maint.view()
     if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
     if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error() + ' (the last good settings stand)'
+    from . import cli
+    lines = cli.peer_lines(s['door']['up'])
+    if lines: out['peers'] = [x.strip() for x in lines]          # at_once counts the peers' free slots for this Mac too
     cr = dash.crash_view()
     if cr['down'] or cr['last']:
         out['crashes'] = [f"down after a crash now: {d['words']}" for d in cr['down']] + ([f"last crash: {cr['last']}"] if cr['last'] else [])
