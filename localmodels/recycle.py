@@ -27,7 +27,7 @@ State: keeper.json, under "recycle" (the job in progress, each family's last rec
 crash state and under the same lock (crashes._state). The count starts at the copy's load as the hub saw it
 (crashes.loaded_now); a reload made outside the hub within one 20-s look is invisible, so the dash shows each count's start.
 """
-import json, os, time
+import time
 
 from . import crashes, llmshare
 
@@ -46,9 +46,7 @@ def guardrail_off():
     """Whether LM Studio's model-loading guardrail is Off on this Mac (its settings.json): then it does not refuse the
     hub's loads, so a lone copy unloaded for a recycle can be loaded again."""
     from . import peers
-    try: g = json.load(open(os.path.join(peers.LMSTUDIO_HOME, 'settings.json'))).get('modelLoadingGuardrails') or {}
-    except (OSError, ValueError, AttributeError): return False
-    return isinstance(g, dict) and str(g.get('mode') or '').lower() == 'off'
+    return peers.guardrail_mode() == 'off'
 
 
 def thresholds(f):

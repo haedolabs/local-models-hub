@@ -220,6 +220,10 @@ def test_keeper(box):
     w = models.gpu_words(dict(limit_gb=40.0, set=True, total_gb=48.0, boot=False), 37.75)
     t('raised by hand but not at boot: said, since it resets at the next restart', w and 'resets' in w and 'localmodels peer gpu-limit' in w, w)
     t('raised at boot by the hub\'s LaunchDaemon: nothing to say', models.gpu_words(dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True), 37.75) is None)
+    w = models.guardrail_words(dict(limit_gb=40.0, total_gb=48.0), 35.2, 'relaxed')
+    t("a model that nearly fills what the GPU may hold, with LM Studio's guardrail on: said before any load is refused", w and 'Off' in w, w)
+    t('...not with the guardrail Off, and not for a model with room to spare', models.guardrail_words(dict(limit_gb=40.0, total_gb=48.0), 35.2, 'off') is None
+      and models.guardrail_words(dict(limit_gb=96.0, total_gb=128.0), 35.2, 'high') is None)
 
     print("a dedicated Mac: a family loaded when the door starts (load_at_start), once, after the GPU's limit, with three tries")
     real = models._lms, L.settings, L.loaded, L.read_ok, L.busy_slots, L.api_models, models.free_gb, models.ensure_server, L.SWAP_LOCK, models.conditions, models.gpu, models.downloaded, models.LOADER, models.server_up
@@ -344,6 +348,115 @@ def test_commands(box):
           not os.path.exists(agent) and launched and launched[0][0] == 'bootout' and 'com.local-models.load-at-login' in launched[0][1], (w, launched))
         models.LOADER, cli._launchctl = was_loader, real_launchctl
     finally: llmshare.MODELS, peers.TOKEN_FILE = was
+
+
+def fake_lmstudio(root, catalog=True):
+    """An ~/.lmstudio as LM Studio keeps a catalog model: its definition folder (manifest.json names its weights
+    repositories), one downloaded weights folder, its two records in .internal/model-data.json (a superjson Map), and its
+    default load settings. Another model's records stand before it, one with an undefined field."""
+    defn = os.path.join(root, 'hub', 'models', 'test', 'family'); os.makedirs(defn)
+    open(os.path.join(defn, 'model.yaml'), 'w').write('model: test/family\n')
+    json.dump(dict(type='model', name='family', dependencies=[dict(type='model', purpose='baseModel', sources=[
+        dict(type='huggingface', user='test-community', repo='Family-MLX-4bit'), dict(type='huggingface', user='test-community', repo='Family-MLX-8bit')])]),
+        open(os.path.join(defn, 'manifest.json'), 'w'))
+    w = os.path.join(root, 'models', 'test-community', 'Family-MLX-8bit'); os.makedirs(w)
+    open(os.path.join(w, 'model-00001-of-00001.safetensors'), 'wb').write(b'\0' * 4096); open(os.path.join(w, 'config.json'), 'w').write('{}')
+    json.dump(dict(downloadsFolder=os.path.join(root, 'models')), open(os.path.join(root, 'settings.json'), 'w'))
+    os.makedirs(os.path.join(root, '.internal', 'user-concrete-model-default-config', 'test'))
+    json.dump(dict(preset='', load=dict(fields=[dict(key='llm.load.contextLength', value=65536)])),
+              open(os.path.join(root, '.internal', 'user-concrete-model-default-config', 'test', 'family.json'), 'w'))
+    entries = [['other/model', dict(source=dict(type='huggingface', repo='model', file=None), transitive=True)]]
+    if catalog:
+        entries += [['test/family', dict(source=dict(type='hub', url='https://lmstudio.ai/models/test/family', name='family'),
+                                         uiIdentifier='test/family', transitive=False, lastLoadedTimestamp=1)],
+                    ['test-community/Family-MLX-8bit', dict(source=dict(type='huggingface', repo='Family-MLX-8bit', file=None), transitive=True)]]
+    ann = {'0.1.source.file': ['undefined']}
+    if catalog: ann['2.1.source.file'] = ['undefined']
+    json.dump(dict(json=entries, meta=dict(values=['map', ann])), open(os.path.join(root, '.internal', 'model-data.json'), 'w'))
+    os.makedirs(os.path.join(root, 'bin'))
+    lms = os.path.join(root, 'bin', 'lms'); open(lms, 'w').write('#!/bin/sh\necho "LM Studio is not running" >&2\n'); os.chmod(lms, 0o755)
+
+
+def test_copy_model(box):
+    print("localmodels peer copy-model: a model the same on a peer as here (its definition, weights, records, default settings)")
+    import contextlib, io
+    from localmodels import cli
+    here, there = os.path.join(box, 'cm-here', '.lmstudio'), os.path.join(box, 'cm-there')
+    fake_lmstudio(here)
+    os.makedirs(os.path.join(there, '.lmstudio', '.internal'))
+    open(os.path.join(there, '.lmstudio', 'settings.json'), 'w').write('{"downloadsFolder": "' + os.path.join(there, '.lmstudio', 'models') + '"}')
+    json.dump(dict(json=[['x/y', dict(source=dict(type='hub', name='y'), transitive=False)],
+                         ['z/w', dict(source=dict(type='huggingface', repo='w', file=None), transitive=True)]],
+                   meta=dict(values=['map', {'1.1.source.file': ['undefined']}])), open(os.path.join(there, '.lmstudio', '.internal', 'model-data.json'), 'w'))
+    rbin = os.path.join(box, 'cm-bin'); os.makedirs(rbin)
+    os.makedirs(os.path.join(there, '.lmstudio', 'bin'))
+    lms_there = os.path.join(there, '.lmstudio', 'bin', 'lms')
+    running = {'v': False}
+
+    def set_running(v):
+        running['v'] = v
+        open(lms_there, 'w').write('#!/bin/sh\necho "' + ('LM Studio v0.4.28+2 is running (PID: 42)' if v else 'LM Studio is not running') + '" >&2\n')
+        os.chmod(lms_there, 0o755)
+        open(os.path.join(rbin, 'pgrep'), 'w').write('#!/bin/sh\nexit 1\n'); os.chmod(os.path.join(rbin, 'pgrep'), 0o755)
+    set_running(False)
+    was = peers.LMSTUDIO_HOME, peers.remote, peers.send, llmshare.settings
+    peers.LMSTUDIO_HOME = here
+    sent = []
+
+    def remote(target, script, data=None, timeout=60):    # the peer, played by a folder: its HOME, its own pgrep
+        r = subprocess.run(['/bin/sh', '-c', script], input=data, capture_output=True, env=dict(os.environ, HOME=there, PATH=rbin + ':/usr/bin:/bin'), timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).decode('utf-8', 'replace')
+
+    def send(src, target, dest):
+        sent.append((src, dest)); os.makedirs(dest, exist_ok=True)
+        r = subprocess.run(['rsync', '-a', src.rstrip('/') + '/', dest.rstrip('/') + '/'], capture_output=True)
+        return r.returncode, (r.stdout + r.stderr).decode()
+    peers.remote, peers.send = remote, send
+    llmshare.settings = lambda: dict(families={F: dict(key=F, copies=1, context=65536, parallel=4, variant='test/family@8bit')})
+
+    def run(*a):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): code = cli.peer_cmd(list(a))
+        return code, out.getvalue()
+    try:
+        plan = peers.copy_plan(F, 'test/family@8bit')
+        t('the plan finds its definition folder, the downloaded weights of its variant, its two records and its default settings',
+          plan['weights_key'] == 'test-community/Family-MLX-8bit' and plan['definition'].endswith('test/family') and [r[0] for r in plan['records']] == [F, 'test-community/Family-MLX-8bit']
+          and plan['records'][1][2] == {'1.source.file': ['undefined']} and plan['config'].endswith('family.json') and plan['bytes'] >= 4096, plan)
+        doc = json.load(open(os.path.join(there, '.lmstudio', '.internal', 'model-data.json')))
+        merged = peers.merge_records(doc, plan['records'])
+        keys = [e[0] for e in merged['json']]
+        t("the merge keeps the peer's own records and their undefined fields, and adds the two with theirs at their new place",
+          keys == ['x/y', 'z/w', F, 'test-community/Family-MLX-8bit'] and merged['meta']['values'][1] == {'1.1.source.file': ['undefined'], '3.1.source.file': ['undefined']}
+          and 'lastLoadedTimestamp' not in merged['json'][2][1], merged)
+        again = peers.merge_records(merged, plan['records'])
+        t('merging twice changes nothing (no second entry)', again == merged, [e[0] for e in again['json']])
+        t('merging into a peer with no model-data.json yet', [e[0] for e in peers.merge_records(None, plan['records'])['json']] == [F, 'test-community/Family-MLX-8bit'])
+        bare = os.path.join(box, 'cm-bare', '.lmstudio'); fake_lmstudio(bare, catalog=False)
+        peers.LMSTUDIO_HOME = bare
+        try: peers.copy_plan(F, 'test/family@8bit'); said = None
+        except ValueError as e: said = str(e)
+        peers.LMSTUDIO_HOME = here
+        t("a model LM Studio holds no records of here: not planned (its records are copied as LM Studio wrote them), and said", said and 'load' in said, said)
+
+        set_running(True)
+        code, out = run('copy-model', F, 'someone@peer')
+        t("LM Studio running on the peer: refused, nothing copied, and the words say to quit it there first", code == 1 and not sent and 'quit' in out.lower(), out[-300:])
+        set_running(False)
+        code, out = run('copy-model', F, 'someone@peer', '--dry')
+        t('--dry: the plan in words, nothing copied', code == 0 and not sent and 'would copy' in out and 'Family-MLX-8bit' in out, out[-400:])
+        code, out = run('copy-model', F, 'someone@peer')
+        got = json.load(open(os.path.join(there, '.lmstudio', '.internal', 'model-data.json')))
+        t('copied: the definition, the weights, the two records (the old file kept as a backup) and the default settings',
+          code == 0 and os.path.exists(os.path.join(there, '.lmstudio', 'hub', 'models', 'test', 'family', 'model.yaml'))
+          and os.path.exists(os.path.join(there, '.lmstudio', 'models', 'test-community', 'Family-MLX-8bit', 'model-00001-of-00001.safetensors'))
+          and [e[0] for e in got['json']][-2:] == [F, 'test-community/Family-MLX-8bit']
+          and any(f.startswith('model-data.json.bak') for f in os.listdir(os.path.join(there, '.lmstudio', '.internal')))
+          and os.path.exists(os.path.join(there, '.lmstudio', '.internal', 'user-concrete-model-default-config', 'test', 'family.json')), out[-500:])
+        code, out = run('copy-model', F, 'someone@peer')
+        got2 = json.load(open(os.path.join(there, '.lmstudio', '.internal', 'model-data.json')))
+        t('run again: the same records, once each', code == 0 and [e[0] for e in got2['json']] == [e[0] for e in got['json']], [e[0] for e in got2['json']])
+    finally: peers.LMSTUDIO_HOME, peers.remote, peers.send, llmshare.settings = was
 
 
 def test_link_rules(box):
@@ -586,6 +699,7 @@ def main():
         test_units(box)
         test_keeper(box)
         test_commands(box)
+        test_copy_model(box)
         test_link_rules(box)
         test_two_doors(box)
     finally: shutil.rmtree(box, ignore_errors=True)

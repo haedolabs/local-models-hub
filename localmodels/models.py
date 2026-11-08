@@ -82,6 +82,16 @@ def gpu_plist(total_gb=None):
     return dict(Label='com.local-models.gpu-limit', ProgramArguments=['/usr/sbin/sysctl', f'iogpu.wired_limit_mb={mb}'], RunAtLoad=True)
 
 
+def guardrail_words(g, size_gb, mode):
+    """Words when LM Studio's guardrail is on and the model nearly fills what the GPU may hold, before any load is refused:
+    then only "Off" lets `lms load` through (measured on a 48 GB Mac: refused at every context under Relaxed, Custom
+    42 GB and with alwaysAllowLoadAnyway). Else None."""
+    if mode == 'off' or not g or not size_gb or not g.get('limit_gb') or size_gb <= 0.75 * g['limit_gb']: return None
+    return ("LM Studio's model-loading guardrail is on, and this model nearly fills what the GPU may hold: it will refuse the "
+            "hub's loads (at start and after a crash). Set LM Studio's Settings → Model loading guardrails to Off; the hub "
+            "checks free memory itself before every load")
+
+
 def gpu_words(g, size_gb):
     """Words when a model of size_gb does not fit in what the GPU may hold (with room for its context), or fits only
     because the limit was raised by hand and will reset at the next restart; else None."""
