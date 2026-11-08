@@ -145,7 +145,13 @@ def loaded(fresh=False, force=False):
         if now - _ps['tried'] < LISTING_LEAST and not force: return _ps['rows']
         _ps['tried'] = now
         rows, ok = _lms_ps()
-        if ok: _ps.update(at=now, rows=rows, ok=True, good_at=now)
+        if ok:
+            listed = {r['id'] for r in rows}
+            gone = [r for r in _ps['rows'] if r['id'] not in listed]
+            if gone:                                         # under load `lms ps` can leave an instance out: LM Studio's own
+                there = api_models()                         # server decides, so a partial listing never takes slots away
+                rows = rows + [dict(r) for r in gone if there is not None and r['id'] in there]
+            _ps.update(at=now, rows=rows, ok=True, good_at=now)
         else: _ps.update(at=now, ok=False)
         return _ps['rows']
     finally: _ps_lock.release()

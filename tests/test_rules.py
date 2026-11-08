@@ -19,6 +19,7 @@ def t(name, good, note=''):
 
 def sandbox(box):
     for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
+    llmshare.api_models = lambda timeout=3: None              # no real LM Studio in the sandbox (a test that needs a listing sets one)
     from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
     llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')   # (the repo's defaults apply)
     _peers.STATE, _peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
@@ -134,6 +135,18 @@ def test_listing(box):
     rows = L.loaded(fresh=True, force=True)
     t('JSON: every instance listed whatever its status, with its slots', [r['id'] for r in rows] == [B, C2] and rows[0]['state'] == 'PROCESSINGPROMPT' and rows[0]['parallel'] == 4
       and L.read_ok() and L.copies(B) == [B, C2] and L.at_once(B) == 8, rows)
+    real_api = L.api_models
+    try:
+        open(data, 'w').write(json.dumps(js[:1]))                      # a partial listing under load: only the first instance
+        L.api_models = lambda timeout=3: {B: 65536, C2: 65536}           # ...while LM Studio's server still holds both
+        part = L.loaded(fresh=True, force=True)
+        t('a partial lms ps never takes slots away: an instance LM Studio still lists keeps its place', [r['id'] for r in part] == [B, C2], part)
+        L.api_models = lambda timeout=3: {B: 65536}                      # the server agrees it is gone: it goes at once
+        gone = L.loaded(fresh=True, force=True)
+        t('an instance the server no longer lists drops at once', [r['id'] for r in gone] == [B], gone)
+        open(data, 'w').write(json.dumps(js))
+        L.loaded(fresh=True, force=True)
+    finally: L.api_models = real_api
     open(data, 'w').write('IDENTIFIER   MODEL   STATUS   SIZE   CONTEXT   PARALLEL   LOAD CONFIG   DEVICE   TTL\n'
                           f'{B}   {B}   PROCESSINGPROMPT   37.75 GB   65536   4   LM Studio   Local\n{C2}   {B}   IDLE   37.75 GB   65536   4   LM Studio   Local\n')
     rows = L.loaded(fresh=True, force=True)
