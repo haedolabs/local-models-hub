@@ -8,7 +8,7 @@ Standard-library Python, no dependencies. macOS on Apple silicon (it leans on la
 
 ## What it does
 
-- **A door on `localhost:1235`** with LM Studio's own API (OpenAI-style `/v1/...`, plus `/api/v0/models`). Point any client at it instead of 1234; nothing else changes. Streaming passes through.
+- **A door on `localhost:1235`** with every API LM Studio serves: OpenAI's (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`), Anthropic's (`/v1/messages`) and LM Studio's own (`/api/v1/...`, `/api/v0/...`). Point any client at it instead of 1234; nothing else changes. Streaming passes through, and each API's answers are counted and its errors shaped the way its own clients read them.
 - **Turns.** All programs together never send a model more requests than it answers at once (its *Max Concurrent Predictions*); the rest wait their turn instead of timing out. A person's chat gets the next free slot ahead of a batch's queue. A program that says how long it will wait (`X-Timeout`) gets `503` with `Retry-After` before that runs out.
 - **Names.** Every request is named by the project (from the program's folder) and, when Claude Code started the program, by the Claude Code session — read from process facts, so nothing has to report itself. Optional headers `X-Project`, `X-Kind` (batch, chat, ask, eval, test) and `X-Step` say more.
 - **Copies.** A model can be loaded several times (`qwen/qwen3.6-35b-a3b` and `qwen/qwen3.6-35b-a3b:2`); the door treats the copies as one model, fills the first copy's slots before the second's, and the keeper keeps the copies loaded whenever the first one is.

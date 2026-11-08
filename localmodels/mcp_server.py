@@ -17,7 +17,7 @@ AGENTS = os.path.expanduser('~/Library/Logs/LocalModels/agents')
 GUIDE = os.path.join(HOME, 'GUIDE.md')
 INSTRUCTIONS = (
     "Local models on this Mac (LM Studio) are shared by every project and Claude Code session through the local-models hub "
-    "(the full rules: the guide tool). To use a local model, send OpenAI-style requests to http://localhost:1235/v1 (the hub), "
+    "(the full rules: the guide tool). To use a local model, send OpenAI-style requests to http://localhost:1235/v1 or Anthropic-style ones to http://localhost:1235 (the hub), "
     "never straight to LM Studio's port 1234: the hub takes turns for everyone, names your project and session itself, and "
     "logs who used what (never the content). Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
     "X-Step (what the request is for). The status tool says which models are loaded and how many answers at once they give: "
