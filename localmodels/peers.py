@@ -31,7 +31,7 @@ address; route_of() says which interface the route to a peer takes. macOS's Loca
 LaunchAgent's connections to the local network with "no route to host" and no prompt: reach_words() says where to turn it
 on. LM Link (LM Studio's own linking) is not used: llmshare leaves its rows (deviceIdentifier set) out of the listing.
 """
-import collections, errno, hashlib, hmac, ipaddress, json, os, re, secrets, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
+import collections, errno, hashlib, hmac, ipaddress, json, os, re, secrets, shlex, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
 
 from . import VERSION, llmshare, maint
 
@@ -314,6 +314,112 @@ def match(mine, theirs, pinned=None):
     return True, None
 
 
+def lmstudio_settings():
+    """LM Studio's own settings on this Mac (~/.lmstudio/settings.json), or {}."""
+    try: d = json.load(open(os.path.join(LMSTUDIO_HOME, 'settings.json')))
+    except (OSError, ValueError): return {}
+    return d if isinstance(d, dict) else {}
+
+
+def guardrail_mode():
+    """LM Studio's model-loading guardrail on this Mac: 'off', 'relaxed', 'high', 'custom'... ('' when unknown). Only
+    'off' lets `lms load` through for a model that nearly fills the GPU (alwaysAllowLoadAnyway does not reach the CLI)."""
+    g = lmstudio_settings().get('modelLoadingGuardrails')
+    return str(g.get('mode') or '').lower() if isinstance(g, dict) else ''
+
+
+# ---------------------------------------------------------------- copying a model to a peer
+def _records(doc):
+    """LM Studio's model-data.json (a superjson Map: {"json": [[key, value], ...], "meta": {"values": ["map", {"<i>.1.<path>":
+    ["undefined"]}]}}) -> (entries, {index: {"1.<path>": annotation}}, the rest of meta)."""
+    if not isinstance(doc, dict) or not isinstance(doc.get('json'), list): return [], {}, {}
+    entries = [list(e) for e in doc['json'] if isinstance(e, list) and len(e) == 2]
+    meta = dict(doc.get('meta') or {}) if isinstance(doc.get('meta'), dict) else {}
+    v = meta.pop('values', None)
+    notes = {}
+    for path, a in (v[1].items() if isinstance(v, list) and len(v) == 2 and isinstance(v[1], dict) else ()):
+        i, _, rest = path.partition('.')
+        if i.isdigit(): notes.setdefault(int(i), {})[rest] = a
+    return entries, notes, meta
+
+
+def _doc(entries, notes, meta):
+    flat = {f'{i}.{rest}': a for i, ns in sorted(notes.items()) for rest, a in sorted(ns.items())}
+    return dict(json=entries, meta=dict(meta, values=['map', flat] if flat else ['map']))
+
+
+def copy_plan(key, variant=None):
+    """What makes a catalog model the same on another Mac as here, as LM Studio keeps it: its definition folder
+    (~/.lmstudio/hub/models/<key>/), the downloaded weights folder of its variant, its two records in
+    .internal/model-data.json (the catalog model, transitive false; the weights folder, transitive true, its source.file
+    undefined) and its default load settings (.internal/user-concrete-model-default-config/<key>.json). Copying the
+    definition alone leaves LM Studio listing the model twice. -> {key, definition, weights, weights_key, records:
+    [[key, value, notes]], config, bytes}; ValueError with words when it cannot be planned."""
+    key = str(key or '')
+    if not key or '..' in key.split('/') or key.startswith('/'): raise ValueError(f'{key!r} is not a model key')
+    defn = os.path.join(LMSTUDIO_HOME, 'hub', 'models', *key.split('/'))
+    try: man = json.load(open(os.path.join(defn, 'manifest.json')))
+    except (OSError, ValueError): raise ValueError(f"{key} has no definition here ({defn}/manifest.json): copy-model copies models from LM Studio's catalog")
+    srcs = [(s.get('user'), s.get('repo')) for dep in (man.get('dependencies') or []) if isinstance(dep, dict) for s in (dep.get('sources') or [])
+            if isinstance(s, dict) and s.get('type') == 'huggingface' and s.get('user') and s.get('repo')]
+    downloads = lmstudio_settings().get('downloadsFolder') or os.path.join(LMSTUDIO_HOME, 'models')
+    have = [(u, r) for u, r in srcs if os.path.isdir(os.path.join(downloads, u, r))]
+    quant = str(variant or '').partition('@')[2].lower()
+    pick = [x for x in have if quant and quant in x[1].lower()] or have
+    if len(pick) != 1:
+        raise ValueError(f'{key}: ' + ('none of its weights are downloaded here' if not pick else
+                                       'several of its variants are downloaded here (' + ', '.join(f'{u}/{r}' for u, r in pick) + '): name the variant in the settings'))
+    u, r = pick[0]
+    wkey, weights = f'{u}/{r}', os.path.join(downloads, u, r)
+    try: doc = json.load(open(os.path.join(LMSTUDIO_HOME, '.internal', 'model-data.json')))
+    except (OSError, ValueError): doc = None
+    entries, notes, _ = _records(doc)
+    recs = []
+    for k in (key, wkey):                                 # LM Studio's own records, as it wrote them here
+        i = next((i for i, e in enumerate(entries) if str(e[0]).lower() == k.lower()), None)
+        if i is None or not isinstance(entries[i][1], dict):
+            raise ValueError(f"{k} has no record in LM Studio's model-data.json here: load {key} in LM Studio once, then copy it")
+        recs.append([entries[i][0], entries[i][1], notes.get(i, {})])
+    cfg = os.path.join(LMSTUDIO_HOME, '.internal', 'user-concrete-model-default-config', *key.split('/')) + '.json'
+    size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(weights) for f in fs)
+    return dict(key=key, definition=defn, weights=weights, weights_key=wkey, records=recs, config=cfg if os.path.exists(cfg) else None, bytes=size)
+
+
+def merge_records(doc, records):
+    """A peer's model-data.json with these records in it: one already there keeps its place and its own fields, with this
+    Mac's source and transitive; a new one is added at the end, without this Mac's load times; each record's undefined
+    fields are marked at its own place, and the peer's other records and marks are kept as they are."""
+    entries, notes, meta = _records(doc)
+    for k, value, ann in records:
+        i = next((i for i, e in enumerate(entries) if str(e[0]).lower() == str(k).lower()), None)
+        if i is None:
+            i = len(entries)
+            entries.append([k, {f: v for f, v in value.items() if f not in ('lastLoadedTimestamp', 'lastAttemptedToLoadTimestamp')}])
+        else: entries[i][1] = dict(entries[i][1] if isinstance(entries[i][1], dict) else {}, source=value.get('source'), transitive=value.get('transitive'))
+        notes[i] = {rest: a for rest, a in (notes.get(i) or {}).items() if not rest.startswith('1.source.')}
+        notes[i].update(ann)
+        if not notes[i]: notes.pop(i)
+    return _doc(entries, notes, meta)
+
+
+def remote(target, script, data=None, timeout=60):
+    """Run a shell script on a peer over SSH (its key, no password prompt). -> (exit code, what it printed, both streams:
+    `lms` prints its status lines on standard error)."""
+    try:
+        r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', target, script], input=data, capture_output=True, timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).decode('utf-8', 'replace')
+    except (OSError, subprocess.SubprocessError) as e: return 255, str(e)
+
+
+def send(src, target, dest):
+    """Copy a folder to a peer over SSH (rsync: files already there with the same size and time are skipped). -> (code, words)."""
+    try:
+        r = subprocess.run(['rsync', '-a', '-e', 'ssh -o BatchMode=yes', src.rstrip('/') + '/', f'{target}:' + shlex.quote(dest.rstrip('/') + '/')],
+                           capture_output=True, timeout=6 * 3600)
+        return r.returncode, (r.stdout + r.stderr).decode('utf-8', 'replace')
+    except (OSError, subprocess.SubprocessError) as e: return 255, str(e)
+
+
 # ---------------------------------------------------------------- the peer's side: what it tells a front
 def capacity_for(fam, front):
     """How many requests a front may have in flight on a peer for one family: its slots, less those busy with other work
@@ -354,6 +460,9 @@ def report(front=None):
         if w: keeper['warnings'].append(f'{base}: {w}')
         b = crashes.load_blocked(base, models.conditions())
         if b: keeper['warnings'].append(f'{base}: {b}')
+        elif size:
+            w = models.guardrail_words(keeper['gpu'], size / 2**30, guardrail_mode())
+            if w: keeper['warnings'].append(f'{base}: {w}')
     for base, w in recycle.held_back().items(): keeper['warnings'].append(f'{base}: {w}')
     return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},

@@ -28,6 +28,8 @@
   localmodels peer token         make the shared token if there is none, and say how to copy it to the other Mac
   localmodels peer gpu-limit     the boot job that lets the GPU hold all but 8 GB (com.local-models.gpu-limit): written
                                  here, with the sudo lines a person runs to install it; an installed one is checked
+  localmodels peer copy-model <model> <user@peer> [--dry]   make a model the same on a peer as here, as LM Studio keeps
+                                 it (definition, weights, its records, default settings), over SSH, LM Studio closed there
   localmodels peer test [name]   the door looks at its peers now, and this terminal looks too (to tell macOS blocking the
                                  door from a link that is down)
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
@@ -48,7 +50,7 @@
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
                                  the version stamped, committed, tagged and pushed (--dry: the checks only)
 """
-import glob, json, os, plistlib, re, shutil, subprocess, sys, time, urllib.request
+import glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
 
 from . import HOME, NAME, VERSION, llmshare
 
@@ -221,6 +223,8 @@ def peer_lines(door_up=True):
         d = door_link() if door_up else None
         out.append('  this Mac serves as a peer: ' + ((d or {}).get('listening') or ('the door is closed' if not door_up else
                                                                                    'not listening yet (the door runs older code until localmodels install?)')))
+        try: out += [f'  THIS MAC AS A PEER: {wn}' for wn in (peers.report().get('keeper') or {}).get('warnings') or []]
+        except Exception as e: out.append(f'  (could not read this Mac as a peer: {type(e).__name__}: {e})')
     return out
 
 
@@ -267,6 +271,72 @@ def retire_loader(dry=False):
     try: os.remove(models.LOADER)
     except OSError as e: return f'could not remove {models.LOADER} ({e}): the login loader may still run beside the keeper'
     return f"the login loader ({LOADER_LABEL}) is retired: the keeper loads {', '.join(fams)} when the door starts (its script and log stay)"
+
+
+PEER_CHECK = r"""printf 'home=%s\n' "$HOME"
+if [ -d "$HOME/.lmstudio" ]; then echo lmstudio=yes; else echo lmstudio=no; fi
+s=$("$HOME/.lmstudio/bin/lms" daemon status 2>&1)
+if printf '%s' "$s" | grep -q "is running" && ! printf '%s' "$s" | grep -q "not running"; then echo running=its daemon; fi
+if pgrep -x "LM Studio" >/dev/null 2>&1; then echo running=its window; fi
+d=$(sed -n 's/.*"downloadsFolder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.lmstudio/settings.json" 2>/dev/null | head -1)
+printf 'downloads=%s\n' "$d"
+"""
+
+
+def copy_model_cmd(w, dry=False):
+    """localmodels peer copy-model <model> <user@peer> [--dry]: the model the same on a peer as here, as LM Studio keeps
+    it (peers.copy_plan), with LM Studio closed there (it reads these files when it starts and writes them as it runs)."""
+    from . import peers
+    w = [x for x in w if not x.startswith('--')]
+    if len(w) != 3: print('localmodels peer copy-model <model> <user@peer> [--dry]   (LM Studio closed on the peer)'); return 2
+    want, target = w[1], w[2]
+    fam = (llmshare.settings().get('families') or {}).get(want) or {}
+    key = fam.get('key') or want
+    variant = fam.get('variant') or next((r.get('variant') for r in llmshare.loaded() if llmshare.family(r['id']) == want and r.get('variant')), None)
+    try: plan = peers.copy_plan(key, variant)
+    except ValueError as e: print(e); return 1
+    code, out = peers.remote(target, PEER_CHECK)
+    info = {}
+    for line in out.split('\n'):
+        k, eq, v = line.partition('=')
+        if eq and k in ('home', 'lmstudio', 'running', 'downloads'): info.setdefault(k, []).append(v.strip())
+    if code != 0 or not info.get('home'):
+        print(f"could not reach {target} over SSH ({out.strip()[-200:] or code}): this Mac's key must let it in without a password"); return 1
+    if info.get('running'):
+        print(f"LM Studio is running on {target} ({' and '.join(info['running'])}): quit it there first (its window, and its daemon: "
+              'lms daemon down), then run this again. It reads these files when it starts and writes them as it runs.'); return 1
+    if (info.get('lmstudio') or ['no'])[0] != 'yes':
+        print(f'LM Studio has not run on {target} yet (no ~/.lmstudio): open it there once, quit it, then run this again'); return 1
+    home = info['home'][0]
+    downloads = (info.get('downloads') or [''])[0] or home + '/.lmstudio/models'
+    dest = dict(definition=f"{home}/.lmstudio/hub/models/{key}", weights=f"{downloads}/{plan['weights_key']}",
+                data=f'{home}/.lmstudio/.internal/model-data.json', config=f'{home}/.lmstudio/.internal/user-concrete-model-default-config/{key}.json')
+    print(f"{'would copy' if dry else 'copying'} {key} to {target}, as LM Studio keeps it here:")
+    print(f"  its definition: {plan['definition']}/ -> {dest['definition']}/")
+    print(f"  its weights ({plan['bytes'] / 2**30:.1f} GiB, {plan['weights_key']}): {plan['weights']}/ -> {dest['weights']}/")
+    print(f"  its two records in model-data.json ({', '.join(r[0] for r in plan['records'])}), the peer's file kept as a backup")
+    if plan['config']: print(f"  its default load settings: {plan['config']} -> {dest['config']}")
+    if dry: print('--dry: nothing copied'); return 0
+    q = shlex.quote
+    for what in ('definition', 'weights'):
+        code, out = peers.send(plan[what], target, dest[what])
+        if code != 0: print(f'  the {what} did not copy ({out.strip()[-200:]}): nothing else changed on {target}'); return 1
+        print(f'  {what}: copied')
+    code, out = peers.remote(target, f'cat {q(dest["data"])} 2>/dev/null; true')
+    try: doc = json.loads(out) if out.strip() else None
+    except ValueError:
+        print(f"  its model-data.json does not read as JSON: left as it is (the definition and weights are there; LM Studio may list the model twice)"); return 1
+    merged = json.dumps(peers.merge_records(doc, plan['records'])).encode()
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    code, out = peers.remote(target, f'set -e; mkdir -p {q(os.path.dirname(dest["data"]))}; if [ -f {q(dest["data"])} ]; then cp {q(dest["data"])} '
+                                     f'{q(dest["data"] + ".bak-" + stamp)}; fi; cat > {q(dest["data"] + ".tmp")}; mv {q(dest["data"] + ".tmp")} {q(dest["data"])}', merged)
+    if code != 0: print(f'  the records did not write ({out.strip()[-200:]})'); return 1
+    print(f'  records: in model-data.json (the old one kept as model-data.json.bak-{stamp})')
+    if plan['config']:
+        code, out = peers.remote(target, f'mkdir -p {q(os.path.dirname(dest["config"]))} && cat > {q(dest["config"])}', open(plan['config'], 'rb').read())
+        print('  default load settings: ' + ('copied' if code == 0 else f'did not copy ({out.strip()[-160:]})'))
+    print(f"done. On {target}, `lms ls` lists {key} once when LM Studio starts again; `lms ps --json` names {variant or 'its variant'} once it is loaded")
+    return 0
 
 
 def gpu_limit_cmd():
@@ -353,6 +423,7 @@ def peer_cmd(a):
         print('  the door listens there within 5 s, only for requests with the token; `localmodels peer` says whether it does')
         return 0
     if verb == 'gpu-limit' and len(w) == 1: return gpu_limit_cmd()
+    if verb == 'copy-model': return copy_model_cmd(w, '--dry' in a)
     if verb == 'token' and len(w) == 1:
         print(token_words())
         print(f'copy it to another Mac: {token_copy()}')
@@ -381,7 +452,7 @@ def peer_cmd(a):
             bad += p['state'] != 'up'
         if d.get('serving'): print(f"this Mac serves as a peer: {d.get('listening') or 'not listening yet'}")
         return 1 if bad else 0
-    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit]')
+    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model <model> <user@peer>]')
     return 2
 
 
