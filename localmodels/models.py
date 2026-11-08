@@ -13,10 +13,64 @@ all than one copy of eight (GUIDE.md, "Where to send requests"). So:
            other model has the room; swapping back brings both.
 Every load and unload holds llmshare's swap lock, so the keeper and a swap never interleave. LM Studio's server is
 started only when it is down: `lms server start` on a running server restarts it and cuts every request in flight.
-"""
-import json, re, subprocess, time, urllib.error, urllib.request
 
-from . import crashes, llmshare, maint, recycle
+When LM Studio refuses a load (its model-loading guardrail: "insufficient system resources"; the GUI's "Load anyway" has
+no equivalent in its CLI or API), the keeper says so in words a person can act on, records what it was refused under
+(conditions(): LM Studio's settings file and the GPU's memory limit), and does not try again until one of them changes or
+a person loads the model; a lone copy the hub has not loaded on this Mac is never unloaded for a recycle (recycle.plan),
+since the load that should follow might be refused: make before break. gpu() and gpu_words() say when a model is
+bigger than the memory macOS lets the GPU hold (iogpu.wired_limit_mb, which resets at every restart).
+"""
+import json, os, re, subprocess, time, urllib.error, urllib.request
+
+from . import crashes, llmshare, maint, peers, recycle
+
+GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resource guardrail', re.I)
+_gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
+
+
+def refused(out):
+    """Plain words when LM Studio's output says its loading guardrail stopped a load, else None."""
+    if not GUARDRAIL.search(str(out or '')): return None
+    return ("LM Studio's model-loading guardrail refused to load it for the hub. A person can load it in LM Studio's window "
+            "with Load anyway, or set LM Studio's Settings → Model loading guardrails to Off (the hub checks free memory "
+            "itself before every load); the hub does not try again until that setting or the GPU's memory limit changes")
+
+
+def conditions():
+    """What a refused load depends on: (when LM Studio's settings file last changed, iogpu.wired_limit_mb). Read at most
+    every 5 s (a peer's report asks for it every 2 s)."""
+    if time.time() - _cond['at'] < 5: return _cond['v']
+    try: m = round(os.path.getmtime(os.path.join(peers.LMSTUDIO_HOME, 'settings.json')), 1)
+    except OSError: m = 0
+    try: mb = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError): mb = 0
+    _cond.update(at=time.time(), v=(m, mb))
+    return (m, mb)
+
+
+def gpu():
+    """How much memory this Mac lets the GPU hold: {limit_gb, set (by iogpu.wired_limit_mb), total_gb} (read once a minute).
+    Unset, macOS lets it hold about three quarters of memory on a Mac of 36 GB or more, two thirds below."""
+    if time.time() - _gpu['at'] < 60 and _gpu['v']: return _gpu['v']
+    total = mem_gb()
+    try: mb = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError): mb = 0
+    v = dict(limit_gb=round(mb / 1024 if mb else total * (0.75 if total >= 36 else 2 / 3), 1), set=bool(mb), total_gb=round(total, 1))
+    _gpu.update(at=time.time(), v=v)
+    return v
+
+
+def gpu_words(g, size_gb):
+    """Words when a model of size_gb does not fit in what the GPU may hold (with room for its context), else None."""
+    if not g or not size_gb or not g.get('limit_gb') or size_gb + 1.5 <= g['limit_gb']: return None
+    room = int(g.get('total_gb', 0)) - 8                     # what the GPU may hold with 8 GB left to macOS and the apps
+    if size_gb + 1.5 > room:
+        return f"the model needs {size_gb:.1f} GB plus its context, more than this Mac can give the GPU and still run ({room} GB): a smaller quantization fits"
+    mb = room * 1024
+    return (f"this Mac lets the GPU hold about {g['limit_gb']:.0f} GB and the model needs {size_gb:.1f} GB plus its context: "
+            f"run sudo sysctl iogpu.wired_limit_mb={mb} on it, then quit and open LM Studio again (the setting resets at "
+            "every restart: GUIDE.md, Peers, says how to make it stay)")
 
 
 def _lms(*args, timeout=900):
@@ -113,9 +167,11 @@ def ensure_server(why='after a load'):
 
 
 def load(key, ident, context, parallel):
+    """Load one copy with lms; -> (ok, LM Studio's words). What came of it is kept (crashes.load_ok, load_refused)."""
     if not (_ok_id(key) and _ok_id(ident)): return False, f'refused: {key!r} / {ident!r} is not a model id'
     ok, out = _lms('load', key, '--identifier', ident, '-c', str(int(context)), '--parallel', str(int(parallel)), '-y')
-    if ok: crashes.loaded_now([ident])
+    if ok: crashes.loaded_now([ident]); crashes.load_ok(llmshare.family(ident))
+    elif refused(out): crashes.load_refused(llmshare.family(ident), refused(out), conditions())
     return ok, out
 
 
@@ -169,11 +225,13 @@ def keep():
         for base, f, c in todo:
             ids = {r['id']: r for r in llmshare.loaded(fresh=True)}
             if base not in ids or c in ids: continue        # it changed meanwhile
+            blocked = crashes.load_blocked(base, conditions())
+            if blocked: did.append(f'{c} is not loaded: {blocked}'); break
             first, free = ids[base], free_gb()
             if free < gb(first['size']) + room:
                 did.append(f"{c} waits for room: {free:.0f} GB free, a copy needs {gb(first['size']) + room:.0f} with headroom"); break
             ok, out = load(f.get('key') or first['key'], c, f.get('context') or first['context'], f.get('parallel') or first['parallel'])
-            did.append(f'{c} loaded' if ok else f'{c} could not load: {out[-200:]}')
+            did.append(f'{c} loaded' if ok else f'{c} could not load: {refused(out) or out[-200:]}')
         if job and ready: did += _recycle(job, fams)
     llmshare.loaded(fresh=True)
     return did
@@ -205,6 +263,8 @@ def end_maintenance():
 def _again(job, room):
     """Load a crashed model again, every copy it should have, the way it was loaded (under the swap lock). -> words."""
     base, did, t0, tried = job['base'], [], time.time(), False
+    blocked = crashes.load_blocked(base, conditions())
+    if blocked: return [f'{base} crashed and is not loaded again: {blocked}']     # it would be refused again: nothing has changed
     for c in job['ids']:
         if c in {r['id'] for r in llmshare.loaded(fresh=True)}: continue
         need, free = (gb(job['size']) + room if job['size'] else 0), free_gb()
@@ -214,8 +274,8 @@ def _again(job, room):
         if not tried: crashes.trying(base); tried = True
         ok, out = load(job['key'], c, job['context'] or 32768, job['parallel'] or 4)
         if not ok:
-            crashes.loaded(base, [c], False, time.time() - t0, out)
-            did.append(f'{c} crashed and could not be loaded again: {out[-200:]}'); return did
+            crashes.loaded(base, [c], False, time.time() - t0, refused(out) or out)
+            did.append(f'{c} crashed and could not be loaded again: {refused(out) or out[-200:]}'); return did
     if not tried: return did                               # someone else loaded it meanwhile: the next look records it
     ensure_server()                                        # LM Studio may turn its server off when a model changes
     crashes.loaded(base, job['ids'], True, time.time() - t0)
@@ -231,8 +291,8 @@ def _recycle(job, fams):
     unload(copy)
     ok, out = load(f.get('key') or base, copy, f.get('context') or 32768, f.get('parallel') or 4)
     ensure_server()
-    recycle.done(copy, ok, time.time() - t0, '' if ok else out)
-    return [f"{copy} recycled in {time.time() - t0:.0f} s: {job['why']}" if ok else f'{copy} could not be loaded back after its recycle: {out[-200:]}']
+    recycle.done(copy, ok, time.time() - t0, '' if ok else refused(out) or out)
+    return [f"{copy} recycled in {time.time() - t0:.0f} s: {job['why']}" if ok else f'{copy} could not be loaded back after its recycle: {refused(out) or out[-200:]}']
 
 
 def plan(ident, context=None):

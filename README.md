@@ -32,6 +32,16 @@ Runs in the gateway process every 20 s, and within seconds of a failed request.
 ### Batch progress
 A client declares a run with three request headers (`X-Run`, `X-Run-Total`, `X-Run-Done`); the dashboard shows the run (*batch*) and the phase it is in (*job*, parsed from `X-Step: <phase> N of M`), each with a progress bar, remaining time and a local-time ETA. Remaining time is measured throughput over the last 15 minutes or 20 units, whichever spans further back; before the third unit completes it is seeded from the previous run of the same name. There are no assumed constants, so estimates are per machine. A client that sends only `X-Step: <phase> N of M` gets the job bar.
 
+### Peers (other Macs)
+Every Mac runs its own hub; the one the clients use (the front) lists other Macs in `peers`, and a Mac that lends its instances lists the address it serves on in `serve`. Over a Thunderbolt Bridge link with fixed addresses:
+- **Replicas across Macs.** The front polls each peer's `GET /hub/peer` every 2 s (families loaded, slots, busy, how many of those are this front's, fingerprints, maintenance, the keeper's warnings). A peer's instances of a family count as one more replica, with capacity `slots − (busy − this front's)`: admission takes local slots first, then the peers', in the same priority queue, and never puts more in flight on a peer than that capacity. `at_once` includes it.
+- **Model identity.** A family matches across Macs only when the family id, the loaded variant (`lms ps --json` `selectedVariant`), the size in bytes, the format and a digest of the model's definition (`~/.lmstudio/hub/models/<key>/model.yaml`, `manifest.json`) all match; `families.<id>.variant` pins the variant to accept when this Mac has no fingerprint of its own yet.
+- **Attribution.** `X-Project`, `X-Session`, `X-Kind`, `X-Step`, `X-Run`, `X-Run-Total` and `X-Run-Done` are forwarded, with `X-Hub-From`; the peer logs and leases under the front's project, and the front logs the request as copy `<family> on <peer>`, so no peer's tokens count against a local recycle band.
+- **Failure.** A peer that refuses the connection, is in maintenance, rejects the token or has no slot within 5 s (`X-Timeout: 5` to the peer) answers before any byte reaches the client, and the request is requeued locally. Polling backs off from 2 s to 60 s on a peer that does not answer; a rejected token is not retried until the token or the settings change (or 5 min). Connections to peers use TCP keepalive (a dead link is detected in about 25 s).
+- **The link listener.** With `serve` set, the gateway also listens on that address, bound to its interface (`IP_BOUND_IF`), and accepts only requests with the shared token (`X-Hub-Token`, constant-time compare), no `Origin`, and only generation endpoints, the model listing, `/hub/peer` and `/hub/health`. It is reconciled with the settings every 5 s (no restart).
+- **Per Mac.** Maintenance, recycling, crash recovery and the keeper stay local to each Mac. A request received over the link is served locally only. The keeper recognises LM Studio's loading-guardrail refusal, does not retry until the guardrail setting or `iogpu.wired_limit_mb` changes, and does not recycle a single-instance family before it has loaded it on that Mac once; it reports a model larger than the GPU's wired limit.
+- **LM Link** is not used; `lms ps` rows from LM Link devices (`deviceIdentifier` set) are excluded from the local listing.
+
 ### Maintenance windows
 `localmodels maintenance in 15m | at HH:MM | now | after-batches [for 30m] [reason]`.
 - **Announced:** every response carries `X-Hub-Maintenance` (phase, ISO 8601 start and end, reason), and `/hub/health`, the dashboard, the `status` tool and a Claude Code hook (`SessionStart` and `UserPromptSubmit`, about 50 ms, silent unless a window is set) all report it.
@@ -45,8 +55,8 @@ A client declares a run with three request headers (`X-Run`, `X-Run-Total`, `X-R
   - Claude Code sessions;
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory;
   - crash and recycle history.
-- **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history` and `/hub/recent`.
-- **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `maintenance`, `name`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
+- **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/peer` (this Mac's report as a peer) and `/hub/link` (this Mac's view of its peers; `POST` polls them now).
+- **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `maintenance`, `name`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
 
 ## Install
 
@@ -128,8 +138,14 @@ Then point clients at `http://localhost:1235/v1` (any API key), or `http://local
 | `recycle.soft` | soft threshold: past it, an idle instance is reloaded |
 | `recycle.before_batch` | the fraction of the band past which an instance is recycled when a batch requests fresh instances |
 | `"recycle": false` | disables recycling for the family |
+| `families.<id>.variant` | optional: the variant (`<key>@<quantization>`) a peer's instances must have, when this Mac has not loaded the family itself |
 | `batch_at_once` | the client concurrency a batch should use (reported by the `status` tool) |
 | `headroom_gb` | free memory kept when loading an instance |
+| `name` | this Mac's name as its peers show it (default: the short host name) |
+| `peers.<name>.url` | a peer's gateway, `http://<address>:1235` (the front's side; `localmodels peer add <name> <address>`) |
+| `serve.address`, `serve.port` | this Mac as a peer: the address (and port, default the gateway's) its link listener binds (`localmodels peer serve <address>`) |
+
+The shared token for peers lives in `~/Library/Application Support/LocalModels/peer-token` (mode 0600), the same file on every Mac of the set, never in `models.json`; `localmodels peer token` creates it and prints an `ssh` command that copies it without displaying it. GUIDE.md, *Peers*, has the setup steps (fixed Thunderbolt Bridge addresses, the GPU wired limit, LM Studio's loading guardrail, macOS's Local Network permission).
 
 The file is re-read when its modification time changes. A file that fails to parse leaves the last valid configuration in force and is reported on the status line and the dashboard.
 
@@ -175,13 +191,14 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/recycle.py` | recycle policy: tokens since load against the band, draining, fresh starts |
 | `localmodels/runs.py` | batch and job progress, throughput and ETA from the request log |
 | `localmodels/maint.py` | maintenance windows: state, header, notice |
+| `localmodels/peers.py` | peers: the shared token, the peer's report, the front's link (polling, backoff, capacity, model fingerprints), network checks (`ifconfig`, `route`, `networksetup`) |
 | `localmodels/agent.py` | local agents: the tool loop, sandboxed read-only file tools, structured output, retries |
 | `localmodels/mcp_server.py` | the MCP server (stdio) and the detached job runner |
 | `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code sessions |
 | `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints; the terminal UI |
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
 | `hooks/hooks.json` | the plugin's maintenance hook |
-| `tests/` | sandbox tests against a fake LM Studio on an ephemeral port (no model is ever loaded or unloaded); run by `localmodels check` and `publish` |
+| `tests/` | sandbox tests against a fake LM Studio on an ephemeral port (no model is ever loaded or unloaded), and two gateways with a fake LM Studio each for peers; run by `localmodels check` and `publish` |
 | `tools/` | `thinkbench.py` (thinking on versus off), `loadbench.py` (long prompts and long structured completions, one instance versus two) |
 
 ## Data, privacy and trust model
@@ -191,10 +208,11 @@ The file is re-read when its modification time changes. A file that fails to par
 - for the dashboard, Claude Code's session files and the first lines of its transcripts (working directory and title only);
 - LM Studio's server logs, for crash detection.
 
-**Writes** (in `~/Library/Application Support/LocalModels/`): `requests.jsonl` and `waits.jsonl` (rotated at 20 MB), `crashes.jsonl`, `keeper.json`, `maintenance.json`, and the `leases/`, `slots/` and `inflight/` directories. These hold metadata and token counts, never a prompt or a completion. The local agents' job logs under `~/Library/Logs/LocalModels/agents/` are the only place content is stored, as each project's own record; `localmodels prune` deletes old ones.
+**Writes** (in `~/Library/Application Support/LocalModels/`): `requests.jsonl` and `waits.jsonl` (rotated at 20 MB), `crashes.jsonl`, `keeper.json`, `maintenance.json`, `link.json` (the front's view of its peers), `peer-token`, and the `leases/`, `slots/` and `inflight/` directories. These hold metadata and token counts, never a prompt or a completion. The local agents' job logs under `~/Library/Logs/LocalModels/agents/` are the only place content is stored, as each project's own record; `localmodels prune` deletes old ones.
 
 **Trust boundary:**
 - **Loopback only.** A request must carry a loopback `Host` header and, if it has an `Origin`, the gateway's own origin. This blocks DNS rebinding and cross-origin requests from web pages.
+- **The link listener (peers).** Only with `serve` set: one address, bound to its interface; every request must carry the shared token and no `Origin`, and only generation endpoints, the model listing and the peer report are served. The token and the requests cross the Thunderbolt cable as plain HTTP: the link assumes a direct cable between trusted Macs, not a shared network. Forwarded attribution headers are trusted from a peer that holds the token.
 - **Every local process is trusted.** `X-Project` and `X-Session` are not authenticated, and the dashboard shows project names and session titles to any local client. That suits a single-user Mac; a multi-user host would need authentication in front of `/hub/*`.
 
 Tested on macOS 26 (Apple silicon) with LM Studio 0.4 (`lms ps --json`) and Python 3.12–3.14; the code targets Python 3.9.
@@ -205,6 +223,7 @@ Tested on macOS 26 (Apple silicon) with LM Studio 0.4 (`lms ps --json`) and Pyth
 - **Client-run batches depend on the client process.** A batch run by a project's own script lives only as long as that script; the hub shows that it stopped but cannot resume it. The hub's own `batch` runner cannot yet resume a killed batch either.
 - **`lms ps` takes tens of seconds under heavy load;** the keeper keeps the last valid listing rather than act on a partial one.
 - **Attribution costs one shared `lsof` call per second;** at hundreds of requests a minute it is the first thing to cache harder.
+- **Peers:** this Mac's maintenance refuses requests even when a peer could serve them; the local agents (`ask`, `batch`) need the model loaded on this Mac; a peer's link has one shared token for the whole set of Macs; a LaunchAgent's connections to the local network need macOS's Local Network permission, which only a person can grant (`localmodels peer test` tells it from a link that is down).
 - **macOS only.** A Linux port would replace `whois.py`, the memory accounting and the LaunchAgent with `/proc` and a systemd unit.
 
 ## Client contract
