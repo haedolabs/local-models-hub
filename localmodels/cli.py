@@ -222,7 +222,7 @@ def peer_lines(door_up=True):
     from . import peers
     out, seen = [], set()
     for p in peers.view():
-        seen.add(p['name']); out.append('  peer ' + p['words'])
+        seen.add(p['name']); out.append('  ' + p['words'])                      # (the words begin 'peer <name>: ...')
     for name in peers.configured():
         if name not in seen: out.append(f"  peer {name}: not polled yet" + ('' if door_up else ' (gateway not running)'))
     for w in peers.problems(): out.append(f'  peer settings error: {w}')

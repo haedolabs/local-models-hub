@@ -1,6 +1,14 @@
-# Local Models Hub
+# <img src="docs/icon.png" alt="" width="32" height="32"> Local Models Hub
 
 Reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/dashboard-light.png">
+  <img alt="The dashboard during a synthetic workload: all 12 slots in use and 2 requests queued, across two replicas on this Mac and one on a peer Mac; tiles, slot modules in each project's color, time series of concurrency, throughput, requests and memory, and tables of clients, Claude Code sessions and recent requests" src="docs/dashboard-light.png">
+</picture>
+
+The dashboard at 1512 × 900 during `localmodels demo --minutes 60`: three synthetic batches keep all 12 slots busy, 8 on two replicas on the front Mac (M5 Max) and 4 on a peer (MacBook Pro M4 Pro, over Thunderbolt Bridge), with 2 more requests in the gateway's admission queue. Taken in screenshot mode (`localmodels present on`): every project other than the demo's and the hub's own shows as "other", and no session title shows. Full size: [dark](docs/dashboard-dark.png), [light](docs/dashboard-light.png); at 1728 × 1117: [dark](docs/dashboard-large-dark.png), [light](docs/dashboard-large-light.png).
 
 LM Studio serves an OpenAI- and Anthropic-compatible API on `localhost:1234` with no admission control across clients. Under concurrent use (batch scripts, local agents, several Claude Code sessions) four things fail silently: requests beyond an instance's *Max Concurrent Predictions* queue inside the engine until client timeouts fire; one client's load, unload or just-in-time load evicts a model another client is mid-run on; a Metal engine crash (`[metal::malloc] Resource limit exceeded`) unloads the model, fails in-flight requests with a bare `400`, and nothing reloads it; and there is no per-client attribution of load. The hub puts a gateway on `localhost:1235` that adds admission control, replica management, crash recovery, attribution and observability. Clients change only their base URL.
 
@@ -23,7 +31,7 @@ Standard-library Python 3.9+, no third-party dependencies. macOS on Apple silico
 Runs in the gateway process every 20 s, and within seconds of a failed request.
 - **Replica count.** Whenever a family's first instance is loaded, the instance manager loads the missing instances with the family's context length and parallelism (memory permitting, with `headroom_gb` kept free). It never loads a family from nothing and never unloads for idleness.
 - **Crash recovery.** It tails LM Studio's server logs (`~/.lmstudio/server-logs`) for engine failures and confirms them against `lms ps` and the REST model listing (two reads 20 s apart). The crashed instances are reloaded with their original settings, at most 3 times per instance per hour; after that the family is left down for a person to reload (`localmodels use <model>`), and is retried hourly. Each crash is recorded with the tokens the instance had processed since load.
-- **Pre-emptive recycling.** The measured Metal resource-limit crashes occurred after 931k to 1.18M tokens processed by one instance. Before configurable thresholds (default: a soft threshold at 560k, where it reloads when idle, and a hard one at 800k, where it drains), each instance is drained (no new requests routed to it, in-flight ones finish), unloaded and reloaded with the family's settings, one instance at a time, so the family stays available throughout: the worker-recycling pattern (compare gunicorn's `max_requests`). A batch can request fresh instances at start (`POST /hub/recycle`; instances past `before_batch` of their threshold go first). An instance loaded with other settings than its family's (from LM Studio's window or a just-in-time load) is recycled the same way.
+- **Pre-emptive recycling.** The measured Metal resource-limit crashes came after 931k to 1.18M tokens processed by one instance with short completions, and near 205k tokens written with long ones. Before configurable thresholds (default: 300k tokens processed or 150k written since load, whichever comes first, where it drains; 73% of that, where it reloads when idle), each instance is drained (no new requests routed to it, in-flight ones finish), unloaded and reloaded with the family's settings, one instance at a time, so the family stays available throughout: the worker-recycling pattern (compare gunicorn's `max_requests`). A batch can request fresh instances at start (`POST /hub/recycle`; instances past `before_batch` of their threshold go first). An instance loaded with other settings than its family's (from LM Studio's window or a just-in-time load) is recycled the same way.
 
 ### Local agents
 - **`ask` and `batch`:** a tool-calling loop on the loaded model, with read-only file tools (`read`, `list`, `grep`) confined to a project root by realpath checks. Answers are structured output: strict `response_format: json_schema` first, falling back to plain JSON, validated against the job's schema. Thinking is disabled for the schema step. Failures from the model being down (`503`, a refused connection) are retried for up to an hour, and an empty structured answer is retried once.
@@ -58,8 +66,42 @@ Every host runs its own hub; the one the clients use (the front) lists peer gate
   - memory as one pool across this Mac and its peers, with a per-host breakdown;
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory (stacked by host);
   - crashes and recycles marked on the time series (the full record: `localmodels crashes`).
-- **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/peer` (this Mac's report as a peer) and `/hub/link` (this Mac's view of its peers; `POST` polls them now).
-- **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `maintenance`, `name`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
+- **Screenshot mode and a demo workload.** `localmodels present on [for 2h] [show a,b]` shows the named projects (by default the demo's and the hub's own) by name and every other project as "other" on every screen until it ends: no script names, batch names, Claude Code session titles or error details. `localmodels demo [--minutes 60]` runs three generic projects' batches over records it makes up (no file is read), with enough requests at once to fill every slot, this Mac's and its peers', plus two waiting. The pictures here were made with both.
+- **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/errors`, `/hub/peer` (this Mac's report as a peer) and `/hub/link` (this Mac's view of its peers; `POST` polls them now).
+- **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `errors`, `maintenance`, `name`, `present`, `demo`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
+
+<img src="docs/tiles-dark.png" alt="Dashboard tiles: 12 of 12 slots active; 2 queued; 275 tokens/s; 2,992 requests in the last hour from 3 projects; memory 149 of 176 GB (m5max 106 of 128, m4pro 43 of 48); SoC load GPU 100%, CPU 21%, m4pro GPU 99%, CPU 10%; 1 Claude Code session working">
+
+**Tiles:** requests in flight against every slot the gateway can use (local and peer), the admission queue, throughput, requests in the last hour, memory as one pool across both Macs, GPU and CPU load per Mac, and Claude Code sessions.
+
+<img src="docs/models-dark.png" width="719" alt="Loaded models card: qwen/qwen3.6-35b-a3b, two replicas with 4 slots each and 4 slots on the peer m4pro, all in use and colored by project; replica 1 at 75% and replica 2 at 93% of 150K tokens written; the peer at 41 ms round-trip time via Thunderbolt Bridge">
+
+**Loaded models:** one module per slot, in the color of the project using it. Each local replica's bar is its progress to the recycle threshold, by tokens processed or written since load, whichever is further along (here written: 75% and 93% of 150K). The peer's row gives its free slots for this gateway, its requests in flight from it and the link's round-trip time.
+
+<img src="docs/concurrency-dark.png" alt="Concurrent requests by project over an hour: research, evals and docs fill 12 slots, with dips to 8 at recycles, this Mac's marked by dotted lines, while the queued line rises from 2 to 6">
+
+**Concurrent requests, by project,** over the demo hour: 12 in flight, 2 waiting. Dotted lines mark this Mac's recycles (the unmarked dip at 1:23 PM is the peer recycling its own instance): while a replica drains and reloads, 8 run and the rest wait in the gateway's queue (the light line). All 3,127 requests of the hour returned 200, 898 of them served by the peer.
+
+<img src="docs/clients-dark.png" width="714" alt="Clients card: the docs batch, 2 active and 1 queued for 59 minutes, with batch and job progress bars at 1271 of 1305, 2 min left, done about 01:36 PM">
+
+**Clients:** each process with a request in flight or a lease, with its batch progress (`X-Run`, `X-Run-Total`, `X-Run-Done`) and its job's (`X-Step: <job> N of M`), each with the remaining time and a finish time measured from the run's own throughput.
+
+`localmodels` prints the same state in a terminal, during the same run:
+
+```text
+gateway: listening on http://localhost:1235
+LM Studio: server up · qwen/qwen3.6-35b-a3b: 2 replicas, 8 slots (generating, 8 active, 70.3 GB)
+  peer m4pro: reachable, 38.9 ms RTT via Thunderbolt Bridge (bridge0) · qwen/qwen3.6-35b-a3b: 1 instance, 0/4 slots free for this gateway (3 busy, 4 from this gateway)
+  tokens since load: qwen3.6-35b-a3b:2 203k (91% of recycle threshold) · qwen3.6-35b-a3b 160k (73% of recycle threshold)
+crashes in the last 24 hours: 5 · the last: 08 Nov 06:30 qwen/qwen3.6-35b-a3b, replica 2: RuntimeError: [metal::malloc] Resource limit (499000) exceeded. · reloaded by the instance manager after 13 s (localmodels crashes)
+clients:
+  docs: batch on qwen3.6-35b-a3b · 2 active, 1 queued · started 12:36 · batch summaries: 1256 of 1304, 2 min left, done about 13:36 · job notes: 1256 of 1304, 2 min left, done about 13:36 · a Claude session
+  research: batch on qwen3.6-35b-a3b · 5 active, 1 queued · started 12:36 · batch consistency check: 782 of 812, 2 min left, done about 13:36 · job records: 782 of 812, 2 min left, done about 13:36 · a Claude session
+  evals: batch on qwen3.6-35b-a3b · 5 active · started 12:36 · batch answer grading: 960 of 997, 2 min left, done about 13:36 · job answers: 960 of 997, 2 min left, done about 13:36 · a Claude session
+Claude Code sessions: 1 active (local-models), 2 idle in the last 3 hours
+last hour via the gateway: evals 960 requests, 585,280 tokens; docs 1256 requests, 393,769 tokens; research 782 requests, 720,990 tokens
+last 7 days: 2123 queue waits > 2 s (302.3 min total), 1 swap refused
+```
 
 ## Install
 
@@ -138,7 +180,8 @@ Then point clients at `http://localhost:1235/v1` (any API key), or `http://local
 | `context` | context length per instance, in tokens |
 | `parallel` | max concurrent predictions per instance (its slot count) |
 | `recycle.tokens` | hard threshold: tokens processed (prompt and completion) since load at which an instance is drained and reloaded |
-| `recycle.soft` | soft threshold: past it, an idle instance is reloaded |
+| `recycle.written` | hard threshold on tokens written (completions) since load; an instance is recycled at whichever threshold it reaches first (`0`: tokens processed only) |
+| `recycle.soft` | soft threshold, in tokens processed: past it, an idle instance is reloaded (as a share of `recycle.tokens`, it applies to the written count too) |
 | `recycle.before_batch` | the fraction of the threshold past which an instance is recycled when a batch requests fresh instances |
 | `"recycle": false` | disables recycling for the family |
 | `families.<id>.variant` | optional: the variant (`<key>@<quantization>`) a peer's instances must have, when this Mac has not loaded the family itself |
@@ -195,11 +238,15 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/recycle.py` | recycle policy: tokens since load against the recycle threshold, draining, fresh starts |
 | `localmodels/runs.py` | batch and job progress, throughput and ETA from the request log |
 | `localmodels/maint.py` | maintenance windows: state, header, notice |
+| `localmodels/errors.py` | the error recorder: every caught exception in the gateway's endpoints, its background loops and the dashboard's rendering, at most once a minute per place (`localmodels errors`, `/hub/errors`) |
+| `localmodels/names.py` | display names (`names.json`) and screenshot mode (`present.json`), applied when a screen reads the records |
+| `localmodels/demo.py` | the synthetic workload of `localmodels demo` |
 | `localmodels/peers.py` | peers: the shared token, the peer's report, the front's link (polling, backoff, capacity, model fingerprints), network checks (`ifconfig`, `route`, `networksetup`) |
 | `localmodels/agent.py` | local agents: the tool loop, sandboxed read-only file tools, structured output, retries |
 | `localmodels/mcp_server.py` | the MCP server (stdio) and the detached job runner |
 | `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code sessions |
 | `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints; the terminal UI |
+| `localmodels/icon.py` | the icon as PNG, drawn from the dashboard's theme tokens (`/favicon.png`, `/apple-touch-icon.png`) |
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
 | `hooks/hooks.json` | the plugin's maintenance hook |
 | `tests/` | sandbox tests against a fake LM Studio on an ephemeral port (no model is ever loaded or unloaded), and two gateways with a fake LM Studio each for peers; run by `localmodels check` and `publish` |
@@ -212,7 +259,7 @@ The file is re-read when its modification time changes. A file that fails to par
 - for the dashboard, Claude Code's session files and the first lines of its transcripts (working directory and title only);
 - LM Studio's server logs, for crash detection.
 
-**Writes** (in `~/Library/Application Support/LocalModels/`): `requests.jsonl` and `waits.jsonl` (rotated at 20 MB), `crashes.jsonl`, `keeper.json`, `maintenance.json`, `link.json` (the front's view of its peers), `peer-token`, and the `leases/`, `slots/` and `inflight/` directories. These hold metadata and token counts, never a prompt or a completion. The local agents' job logs under `~/Library/Logs/LocalModels/agents/` are the only place content is stored, as each project's own record; `localmodels prune` deletes old ones.
+**Writes** (in `~/Library/Application Support/LocalModels/`): `requests.jsonl` and `waits.jsonl` (rotated at 20 MB), `crashes.jsonl`, `keeper.json`, `maintenance.json`, `link.json` (the front's view of its peers), `peer-token`, `errors.jsonl` (exception types, messages and code locations; rolled over at 1 MB), `names.json` and `present.json` (display names and screenshot mode), and the `leases/`, `slots/` and `inflight/` directories. These hold metadata and token counts, never a prompt or a completion. The local agents' job logs under `~/Library/Logs/LocalModels/agents/` are the only place content is stored, as each project's own record; `localmodels prune` deletes old ones.
 
 **Trust boundary:**
 - **Loopback only.** A request must carry a loopback `Host` header and, if it has an `Origin`, the gateway's own origin. This blocks DNS rebinding and cross-origin requests from web pages.
@@ -223,7 +270,7 @@ Tested on macOS 26 (Apple silicon) with LM Studio 0.4 (`lms ps --json`) and Pyth
 
 ## Known limitations
 
-- **The recycle thresholds rest on few data points:** three measured crashes and one instance that survived 1.35M tokens. `localmodels crashes` reports each instance's tokens at crash time, and hold-and-retry still covers a crash below the threshold.
+- **The recycle thresholds rest on few data points,** all from one model: no single per-instance count separates every crash from every survivor (one instance survived 286k tokens written), but with long completions the crashes cluster within 8% of 205k tokens written. `localmodels crashes` reports each instance's tokens at crash time, and hold-and-retry still covers a crash below the threshold.
 - **Client-run batches depend on the client process.** A batch run by a project's own script lives only as long as that script; the hub shows that it stopped but cannot resume it. The hub's own `batch` runner cannot yet resume a killed batch either.
 - **`lms ps` takes tens of seconds under heavy load;** the instance manager keeps the last valid listing rather than act on a partial one.
 - **Attribution costs one shared `lsof` call per second;** at hundreds of requests a minute it is the first thing to cache harder.
