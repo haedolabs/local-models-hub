@@ -8,6 +8,9 @@ if sys.argv[1:2] == ['notice']:            # the Claude Code hook, before every 
         from localmodels import maint  # noqa: E402
         sys.exit(maint.notice_main())
     except Exception: sys.exit(0)
+if sys.argv[1:2] == ['gateway'] and '--worker' not in sys.argv[2:]:   # the supervisor imports nothing else from the package
+    from localmodels import supervisor  # noqa: E402
+    if supervisor.wanted(sys.argv[2:]): sys.exit(supervisor.main(sys.argv[2:]))
 from localmodels.cli import main  # noqa: E402
 
 sys.exit(main(sys.argv[1:]))

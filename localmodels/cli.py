@@ -1246,6 +1246,9 @@ def main(argv):
     if verb == 'uninstall': return uninstall()
     if verb in ('start', 'stop', 'restart'): return door(verb)
     if verb == 'gateway':
+        if '--worker' in a:                                  # a worker, started by the supervisor (worker.py)
+            from . import worker
+            return worker.main(a)
         from . import gateway
         return gateway.main(a)
     if verb == 'mcp':

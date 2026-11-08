@@ -68,6 +68,7 @@ _n, _lock, _live = itertools.count(1), threading.Lock(), {}
 _marks = {}                  # this process's inflight marks: path -> record (beats() touches each, and writes again one an older reader removed)
 _start = {'at': 0.0, 'since': time.time()}
 _conns = {'n': 0, 'lock': threading.Lock()}   # connections this process accepted and has not finished: a drain ends at 0
+_internal = {'n': 0}         # internal errors (a 500 the gateway gave): a release on probation goes back after three
 GENERATION = os.environ.get('LOCALMODELS_GEN') or None     # this worker's generation under the supervisor (None: a gateway on its own)
 REQUEST_LINE_TIMEOUT = 30    # seconds a connection may take to send its request line (an idle preconnect is closed; a request never)
 SELF = {'role': None, 'release': None, 'listeners': {}}    # what this worker is, for /hub/health (worker.py fills it)
@@ -159,6 +160,22 @@ def beats():
                     _live.pop(path, None)
                     try: os.remove(path)
                     except OSError: pass
+
+
+def rekey(old, new):
+    """A new supervisor adopted this worker: the hub leases held under the old supervisor's pid move to the new one's
+    (the new file written, the old one removed), so no lease names a process that is gone."""
+    with _lock:
+        for path, e in list(_live.items()):
+            if e['rec'].get('pid') != old: continue
+            npath = llmshare.hub_lease_path(e['rec'].get('project'), new, e['rec'].get('from'))
+            if not npath: continue
+            e['rec'] = dict(e['rec'], pid=new)
+            _live[npath] = _live.pop(path)
+            try: llmshare._write(npath, e['rec'])
+            except OSError as ex: errors.record('hub lease: re-key', ex)
+            try: os.remove(path)
+            except OSError: pass
 
 
 def own_kind(pid):
@@ -348,7 +365,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         try: self._any(method)
         except (BrokenPipeError, ConnectionResetError): pass
         except Exception as e:                               # never a bare reset: the client gets an answer, the error record the reason
-            errors.record(f"{method} {self.path.split('?')[0]}", e)
+            errors.record(f"{method} {self.path.split('?')[0]}", e); _internal['n'] += 1
             if not self._sent: self._send(500, dict(error=f'internal gateway error: {type(e).__name__}: {e}'))
 
     def _any(self, method):
@@ -698,7 +715,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                               trace=str(j.get('stack') or '')[:800], source='dashboard')
                 return self._send(200, dict(ok=True))
         except Exception as e:
-            errors.record(f'{method} {route}', e)
+            errors.record(f'{method} {route}', e); _internal['n'] += 1
             return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
@@ -740,57 +757,108 @@ class LinkServer6(LinkServer):
 
 def link_server(address, port):
     """A listener on this address only, bound to the interface that holds it (IP_BOUND_IF), so a packet for it that
-    arrives on another interface is not answered. -> the server, not yet serving."""
+    arrives on another interface is not answered: bind and listen back to back (HTTPServer.server_bind would look up the
+    host's name in between), non-blocking like every listener the gateways share. -> the server, not yet serving."""
     six = ':' in address
     srv = (LinkServer6 if six else LinkServer)((address, port), Door, bind_and_activate=False)
-    srv.iface = peers.interface_of(address)
-    if srv.iface:
-        try:
-            idx = socket.if_nametoindex(srv.iface)
-            if six: srv.socket.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
-            else: srv.socket.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
-        except OSError: pass
-    try: srv.server_bind(); srv.server_activate()
+    try:
+        srv.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.iface = peers.interface_of(address)
+        if srv.iface:
+            try:
+                idx = socket.if_nametoindex(srv.iface)
+                if six: srv.socket.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
+                else: srv.socket.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+            except OSError as e: errors.record('link listener: bind to its interface', e)
+        srv.socket.bind((address, port))
+        srv.socket.listen(srv.request_queue_size)
+        srv.socket.setblocking(False)
     except OSError: srv.server_close(); raise
+    srv.server_address = srv.socket.getsockname()
+    srv.server_name, srv.server_port = address, port
     host = f'[{address}]' if six else address
     srv.hosts = frozenset({f'{host}:{port}'.lower()})
     return srv
 
 
-def listen_link():
-    """While the settings say this Mac serves as a peer ("serve": {"address": ...}), the door also listens there (checked
-    every 5 s, so a change needs no restart; an address not on this Mac yet, the Thunderbolt Bridge still coming up, is
-    tried again). The words say what it does, for the status line."""
-    cur, srv, said = None, None, None
+def link_words(e, address, port):
+    """Why a link listener could not be bound, by errno."""
+    import errno as _errno
+    if e.errno == _errno.EADDRINUSE: why = 'address in use by another process'
+    elif e.errno == _errno.EADDRNOTAVAIL: why = 'address not configured on any interface (assign the Thunderbolt Bridge static address)'
+    else: why = e.strerror or str(e)
+    return f'link listener not bound to {address}:{port}: {why}'
+
+
+def retire(srv):
+    """Stop serving a link listener that is no longer wanted without resetting what waits in its backlog: stop its serve
+    loop, answer every connection already queued, then close this process's copy."""
+    srv.shutdown()
     while True:
+        try: conn, addr = srv.socket.accept()
+        except OSError: break                                # BlockingIOError: the backlog is empty
+        try: conn.setblocking(True)
+        except OSError: conn.close(); continue
+        with _conns['lock']: _conns['n'] += 1
+        srv.process_request(conn, addr)
+    srv.server_close()
+
+
+def listen_link(stop=None, adopted=None, hold=None, drop=None):
+    """The link-listener role's loop, in one gateway on this Mac: while the settings say this Mac serves as a peer
+    ("serve": {"address": ...}), it listens there (checked every 5 s, so a change needs no restart; an address not on this
+    Mac yet, the Thunderbolt Bridge still coming up, is tried again). adopted: {key: server} the supervisor passed down
+    (served as they are); hold(key, srv) and drop(key) tell the supervisor of a listener bound or retired here. The words
+    go to run/link-listener.json, which every gateway reads. stop: it returns, closing nothing (the next holder adopts)."""
+    cur, said, owned = None, None, dict(adopted or {})     # key -> server: 'link:<address>:<port>'
+    served = set()
+    while stop is None or not stop.is_set():
         try:
             want = peers.serving()
-            key = (want['address'], want['port']) if want else None
-            if key != cur:
-                if srv:
-                    srv.shutdown(); srv.server_close(); srv = None
-                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {cur[0]}:{cur[1]} stopped", flush=True)
-                cur, peers.LISTEN['words'] = None, None
-                if want:
-                    problem = peers.token_problem()
-                    if problem: words = f'link listener not started: {problem}'
-                    else:
-                        try:
-                            srv = link_server(want['address'], want['port'])
-                            threading.Thread(target=srv.serve_forever, daemon=True).start()
-                            cur = key
-                            port_name = peers.ports().get(srv.iface) if srv.iface else None
-                            words = (f"listening on {want['address']}:{want['port']} for peers (token required)"
-                                     + (f", interface {srv.iface}" + (f' ({port_name})' if port_name else '') if srv.iface else '')
-                                     + ('' if not srv.iface or peers.bridge(srv.iface, {srv.iface: port_name}) or peers.loopback(want['address'])
-                                        else '; warning: not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
-                        except OSError as e:
-                            words = f"link listener not bound to {want['address']}:{want['port']} ({e.strerror or e}): address not configured on any interface (assign the Thunderbolt Bridge static address)"
-                    peers.LISTEN['words'] = words
-                    if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
-                else: said = None
+            key = f"link:{want['address']}:{want['port']}" if want else None
+            for k in [k for k in owned if k != key]:           # no longer wanted: retired, its backlog answered
+                if drop: drop(k)
+                srv = owned.pop(k)
+                if k in served: retire(srv); served.discard(k)
+                else: srv.server_close()
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {k[5:]} stopped", flush=True)
+            if key and key != cur:
+                problem = peers.token_problem()
+                if problem: words = f'link listener not started: {problem}'
+                else:
+                    try:
+                        srv = owned.get(key)
+                        if srv is None:
+                            srv = owned[key] = link_server(want['address'], want['port'])
+                            if hold: hold(key, srv)
+                        if key not in served:
+                            threading.Thread(target=srv.serve_forever, kwargs=dict(poll_interval=0.5), daemon=True, name=f'serve {key}').start(); served.add(key)
+                        cur = key
+                        port_name = peers.ports().get(srv.iface) if srv.iface else None
+                        words = (f"listening on {want['address']}:{want['port']} for peers (token required)"
+                                 + (f", interface {srv.iface}" + (f' ({port_name})' if port_name else '') if srv.iface else '')
+                                 + ('' if not srv.iface or peers.bridge(srv.iface, {srv.iface: port_name}) or peers.loopback(want['address'])
+                                    else '; warning: not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
+                    except OSError as e: words = link_words(e, want['address'], want['port'])
+                _listen_words(key, words)
+                if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
+            elif not key and cur is not None or not key and said:
+                cur, said = None, None; _listen_words(None, None)
         except Exception as e: errors.record('link listener', e)
-        time.sleep(5)
+        if stop is None: time.sleep(5)
+        elif stop.wait(5): break
+    peers.LISTEN['words'] = None
+    for k in served:                                        # stop serving here; the copies stay with the supervisor
+        try: owned[k].shutdown(); owned[k].server_close()
+        except Exception as e: errors.record('link listener: hand over', e)
+
+
+def _listen_words(key, words):
+    peers.LISTEN['words'] = words
+    try:
+        os.makedirs(llmshare.RUN, mode=0o700, exist_ok=True)
+        llmshare._write(os.path.join(llmshare.RUN, 'link-listener.json'), dict(key=key, words=words, pid=os.getpid(), at=round(time.time(), 1)))
+    except OSError as e: errors.record('link listener: words', e)
 
 
 def awake(caf, idle_since):
@@ -809,12 +877,17 @@ def awake(caf, idle_since):
     return caf, idle_since
 
 
-def keeper():
-    """Keep a family's copies loaded whenever its first copy is, load a crashed model again and recycle copies due
-    (models.keep): at the start, every 20 s, and at once when a request through the door fails (crashes.nudge)."""
+def keeper(stop=None):
+    """The instance-manager role's loop, in one gateway on this Mac: keep a family's copies loaded whenever its first copy
+    is, load a crashed model again and recycle copies due (models.keep), at once, every 20 s, and when a request through
+    any gateway fails (crashes.nudge). Keep-awake is make-before-break: this holder starts its own caffeinate first, and
+    never ends one when it gives the role up (that one ends with its process). stop: it returns between two passes, never
+    inside one (a pass may hold the swap lock through a load)."""
     from . import models
     last, caf, idle_since = None, None, time.time()
-    while True:
+    try: caf, idle_since = awake(caf, idle_since)
+    except Exception as e: errors.record('keep-awake (caffeinate)', e)
+    while stop is None or not stop.is_set():
         try:
             did = models.keep()
             if did and did != last: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'; '.join(did)}", flush=True)
@@ -822,8 +895,8 @@ def keeper():
         except Exception as e: errors.record('instance manager', e)
         try: caf, idle_since = awake(caf, idle_since)
         except Exception as e: errors.record('keep-awake (caffeinate)', e)
-        if crashes.WAKE.wait(20):
-            crashes.WAKE.clear(); time.sleep(1)            # a request just failed: give LM Studio a moment to log why
+        if crashes.wait_nudge(20, stop) and not (stop is not None and stop.is_set()):
+            time.sleep(1)                                # a request just failed: give LM Studio a moment to log why
 
 
 def main(argv=()):
