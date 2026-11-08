@@ -208,7 +208,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
 
-  <footer><span id="mac"></span><span id="events"></span><span id="foot"></span><span id="about"></span></footer>
+  <footer><span id="about"></span></footer>
 </div>
 <div id="tip"></div>
 <script>
@@ -252,7 +252,6 @@ function span(s) {               // a stretch of time in the unit that reads bes
 function left(s) { return span(s) + ' left'; }
 function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
 function ticks(max, n = 4) { const s = niceMax(max / n); const out = []; for (let v = 0; v <= max + 1e-9; v += s) out.push(+v.toFixed(6)); return out; }
-function short(model) { return String(model || '?').replace(/^[^/]+\//, ''); }
 function kindWords(k) { return k || 'other'; }
 function merge(c) { if (c) Object.assign(COLORS, c); }
 function rowsThatFit(box, rowPx = 25, headPx = 26) { return Math.max(2, Math.floor((box.clientHeight - headPx - 4) / rowPx)); }
@@ -325,7 +324,6 @@ function tableView(box, head, rows) {
 function projectsIn(obj) { return Object.keys(obj || {}).sort((a, b) => (COLORS[a] || 99) - (COLORS[b] || 99) || a.localeCompare(b)); }
 function crashList() { return (S && S.crashes && S.crashes.recent) || []; }
 function recycleList() { return (S && S.recycle && S.recycle.recent) || []; }
-function day(t) { return new Date(t * 1000).toLocaleDateString([], {day: 'numeric', month: 'short'}); }
 // a crash or a recycle on a time chart: a dashed rule at its minute, labeled, under the crosshair's hover layer
 function markEvents(f, t0, t1) {
   for (const c of crashList().filter(c => c.at >= t0 && c.at <= t1)) {
@@ -544,7 +542,7 @@ function renderNow() {
   const work = S.claude.filter(c => c.working);
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
-  renderModels(); renderUsers(); renderClaude(); renderMac(); renderAlerts(); renderEvents(); fitModels();
+  renderModels(); renderUsers(); renderClaude(); renderAbout(); renderAlerts(); fitModels();
 }
 
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
@@ -561,7 +559,7 @@ function fitModels() {   // any number of models: rows grow to fill the card (ne
   const right = () => {     // one right column for every row (state, recycle %), as wide as its widest label: modules and bars end together
     box.style.setProperty('--right', 'auto');
     const w = Math.max(0, ...[...box.querySelectorAll('.st, .band-end')].filter(e => e.offsetParent).map(e => e.scrollWidth));
-    box.style.setProperty('--right', w ? Math.ceil(w) + 'px' : 'auto');
+    box.style.setProperty('--right', w ? Math.ceil(w) + 2 + 'px' : 'auto');        // + 2: scrollWidth rounds a fractional text width down
   };
   box.classList.remove('tight', 'compact', 'dense', 'cols'); box.style.setProperty('--gap', '0px'); box.style.setProperty('--lead', '0px'); set(1); right();
   for (const fold of ['tight', 'compact', 'dense', 'cols']) { if (!over()) break; box.classList.add(fold); right(); }   // bands, rows, meta, then two columns
@@ -599,15 +597,6 @@ function renderAlerts() {
   for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peer settings: '), w)));
   if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file unreadable: '), S.settings_error, ' Last valid settings in effect.')));
   $('alerts').replaceChildren(...out);
-}
-
-function renderEvents() {
-  const cs = crashList(), rs = recycleList().filter(r => r.event === 'recycled');
-  const bits = [el('b', {}, 'Last 7 days: ')];
-  bits.push(cs.length ? `${cs.length} crash${cs.length === 1 ? '' : 'es'} (last ${day(cs[0].at)} ${clock(cs[0].at)}, ${cs[0].which}: ${cs[0].then}; ${cs.reduce((s, c) => s + (c.failed || 0), 0)} requests failed)` : 'no crashes');
-  bits.push(' · ' + (rs.length ? `${rs.length} recycle${rs.length === 1 ? '' : 's'} before the threshold (last ${day(rs[0].at)} ${clock(rs[0].at)}: ${short(rs[0].model)} after ${compact(rs[0].tokens)} tokens, back in ${Math.round(rs[0].seconds || 0)} s)` : 'no recycles'));
-  bits.push(' · ', el('span', {class: 'muted'}, 'localmodels crashes for the list'));
-  $('events').replaceChildren(...bits);
 }
 
 function chip(id, ok, yes, no) {
@@ -778,11 +767,7 @@ function renderRecent() {
   tableIn(box, head, rows, 'localmodels log for the day');
 }
 
-function renderMac() {
-  const m = S.mac, top = (S.top || []).slice(0, 3);
-  $('mac').replaceChildren(el('b', {}, 'The Mac: '), `load ${m.load && m.load[0] ? m.load[0] : '?'} · ${Math.round(m.free)} GB free on disk · busiest: `
-    + top.map(t => `${t.name} ${Math.round(t.cpu)}% / ${t.mem.toFixed(1)} GB`).join(', ') + ` · swaps refused in 7 days: ${S.waits7.refused}`);
-  $('foot').textContent = 'Metadata only (projects, timestamps, token counts); no prompt or completion content. CLI: localmodels, localmodels dash.';
+function renderAbout() {                // the one footer line: version, license, credit, source
   const ab = S.about;                // the version this door runs, its license and its source, from the hub's own files
   if (ab) {
     const link = (href, text) => el('a', {href, target: '_blank', rel: 'noopener noreferrer'}, text);

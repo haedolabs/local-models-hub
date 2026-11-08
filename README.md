@@ -57,7 +57,7 @@ Every host runs its own hub; the one the clients use (the front) lists peer gate
   - Claude Code sessions;
   - memory as one pool across this Mac and its peers, with a per-host breakdown;
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory (stacked by host);
-  - crash and recycle history.
+  - crashes and recycles marked on the time series (the full record: `localmodels crashes`).
 - **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/peer` (this Mac's report as a peer) and `/hub/link` (this Mac's view of its peers; `POST` polls them now).
 - **CLI:** `localmodels` (status), `dash` (live TUI), `log`, `crashes`, `maintenance`, `name`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `install`, `uninstall` and `publish`.
 
