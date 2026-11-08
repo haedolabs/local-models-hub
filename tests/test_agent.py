@@ -50,6 +50,9 @@ def main():
 
 def run(box):
     for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
+    from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
+    llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')   # (the repo's defaults apply)
+    _peers.STATE, _peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
     llmshare.hub_post = lambda *a, **k: None                   # never the real door from a test
     agent.context_of = lambda m: 32768
     agent.RETRY_WAITS = (1, 1, 1)

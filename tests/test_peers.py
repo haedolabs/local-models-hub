@@ -570,6 +570,9 @@ def test_two_doors(box):
         t("this Mac's look at the peer: up, the family matched, its 2 slots counted", v.get('state') == 'up' and fam.get('match') and fam.get('slots') == 2, v)
         t('LM Link\'s row on the peer (another Mac\'s model) is not taken for a copy there', 'test/other' not in (v.get('families') or {}), list((v.get('families') or {})))
         t('the screens read the same look from the shared state (link.json)', os.path.exists(peers.STATE) and peers.view()[0]['name'] == 'peer')
+        mem = v.get('memory') or {}
+        t("the peer reports its memory, and this Mac's look carries it (for the memory pool)",
+          isinstance(mem.get('total'), (int, float)) and mem['total'] > 0 and 0 <= mem.get('used', -1) <= mem['total'] * 1.05, mem)
 
         for r_ in rows: r_['variant'] = 'test/family@4bit'
         L.poll(force=True)
@@ -684,11 +687,34 @@ def test_two_doors(box):
         door.shutdown(); up_a.shutdown(); up_b.shutdown(); log.close()
 
 
+def test_pool(box):
+    print('the memory pool: this Mac and its peers that are up and report memory; the samples, old and new')
+    from localmodels import dash, web
+    m = dict(used=100.0, total=128.0)
+    ps = [dict(name='a', state='up', memory=dict(used=40.0, total=48.0)), dict(name='b', state='down', memory=dict(used=10.0, total=64.0)),
+          dict(name='c', state='up', memory=None), dict(name='d', state='maintenance', memory=dict(used=5.0, total=32.0))]
+    p = dash.pool(m, ps)
+    t('the pool: this Mac first, then the peers up (or in maintenance) that report memory; a down peer and an older peer left out',
+      [h['name'] for h in p['hosts']][1:] == ['a', 'd'] and p['used'] == 145.0 and p['total'] == 208.0, p)
+    t('no peers: one host, this Mac', len(dash.pool(m, [])['hosts']) == 1 and dash.pool(m, [])['total'] == 128.0)
+    t('a memory sample from before peers reported memory still reads', web._mem_row('[1700000000, 101.5]\n') == (1700000000.0, 101.5, None))
+    t('a sample with peers reads with each peer', web._mem_row('[1700000000, 101.5, {"a": [40.2, 48.0]}]') == (1700000000.0, 101.5, {'a': [40.2, 48.0]}))
+    t('a broken line is skipped', web._mem_row('{"oops"') is None and web._mem_row('[1]') is None)
+    now = time.time()
+    web._mem.clear(); web._mem.extend([(now - 120, 100.0, None), (now - 60, 101.0, {'a': [40.0, 48.0]}), (now - 30, 102.0, {'a': [41.0, 48.0]})])
+    M = web.history(60)['memory']
+    t('the chart: each peer as a series (gaps where it was not sampled), and the top line follows the hosts present',
+      M['hosts'] == {'a': [None, 40.0, 41.0]} and M['cap'][1:] == [M['total'] + 48] * 2 and M['cap'][0] == M['total'], M)
+    web._mem.clear()
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-peerstest-')
     try:
         for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
         llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
+        from localmodels import names as _names                          # never this Mac's live settings or names
+        llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')
         crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
         os.makedirs(crashes.LOGS)
         crashes._seen_state.update(at=0.0, st={})
@@ -702,6 +728,7 @@ def main():
         test_copy_model(box)
         test_link_rules(box)
         test_two_doors(box)
+        test_pool(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

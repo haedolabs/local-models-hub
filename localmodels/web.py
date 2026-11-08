@@ -23,7 +23,7 @@ MEMORY = os.path.join(llmshare.SHARED, 'memory.jsonl')  # the memory samples, ke
 SLOTS = 7                                               # categorical slots for projects; the rest share "other"
 _lock, _cache = threading.Lock(), {}
 _locks = collections.defaultdict(threading.Lock)
-_mem = collections.deque(maxlen=24 * 60 * 4)            # (time, GB used) every 15 s: a day
+_mem = collections.deque(maxlen=24 * 60 * 4)            # (time, GB used here, {peer: [used, total]} or None) every 15 s: a day
 
 
 # ---------------------------------------------------------------- colors that follow the project
@@ -125,6 +125,7 @@ def _snapshot():
             for f in (p.get('families') or {}).values(): f['holders'] = {names.project(k): v for k, v in (f.get('holders') or {}).items()}
         out['link'] = dict(me=peers.me(), serving=peers.serving(), listening=peers.LISTEN.get('words'), problems=peers.problems())
     except Exception as e: out['peers'], out['link'] = [], dict(problems=[f'could not read the peers: {type(e).__name__}: {e}'])
+    out['pool'] = dash.pool(out['mac'], out['peers'])                    # memory across this Mac and its peers
     out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'direct to LM Studio']
                            + [k for p in out['peers'] for f in (p.get('families') or {}).values() for k in f['holders']])
     return out
@@ -180,13 +181,17 @@ def _history(minutes):
     for r in rows:
         i = int((r.get('at', 0) - b0) // bar)
         if 0 <= i < nb: req[names.project(r.get('project'))][i] += 1
-    mem = [(t, u) for t, u in list(_mem) if t >= now - minutes * 60]
+    mem = [x for x in list(_mem) if x[0] >= now - minutes * 60]
+    there = sorted({k for x in mem if x[2] for k in x[2]})                     # peers sampled in the window, stacked over this Mac
+    local = round(dash.mac()['total'])
     rnd = lambda xs: [round(x, 2) for x in xs]
     shown = sorted(set(answering) | set(req))
     return dict(start=t0, step=step, n=n, now=now, answering={p: rnd(v) for p, v in answering.items()}, waiting=rnd(waiting),
                 tokens=rnd(tokens), at_once=llmshare.at_once(), live=live,
                 requests=dict(start=b0, step=bar, n=nb, by=dict(req)),
-                memory=dict(t=[round(t) for t, _ in mem], used=[round(u, 1) for _, u in mem], total=round(dash.mac()['total'])),
+                memory=dict(t=[round(x[0]) for x in mem], used=[round(x[1], 1) for x in mem], total=local, name=peers.me(),
+                            hosts={k: [((x[2] or {}).get(k) or [None])[0] for x in mem] for k in there},
+                            cap=[round(local + sum(v[1] for v in (x[2] or {}).values())) for x in mem]),
                 colors=colors(shown))
 
 
@@ -205,24 +210,33 @@ def recent(n=25):
 
 
 # ---------------------------------------------------------------- the memory sample (the door runs it)
+def _mem_row(line):
+    """A line of memory.jsonl -> (time, GB used here, {peer: [used, total]} or None), or None. Lines written before peers
+    report memory hold [time, GB used here]."""
+    try:
+        row = json.loads(line)
+        return float(row[0]), float(row[1]), (row[2] if len(row) > 2 and isinstance(row[2], dict) else None)
+    except (ValueError, TypeError, IndexError, KeyError): return None
+
+
 def sampler():
     """Memory every 15 s: in memory for the chart, and on disk (a day of it) so a restart of the door keeps the picture."""
     day = time.time() - 86400
     try:
         for line in open(MEMORY):
-            try: t, u = json.loads(line)
-            except ValueError: continue
-            if t >= day: _mem.append((t, u))
+            x = _mem_row(line)
+            if x and x[0] >= day: _mem.append(x)
     except OSError: pass
     written = 0
     while True:
         try:
-            t, u = time.time(), dash.mac()['used']
-            _mem.append((t, u))
-            with open(MEMORY, 'a') as f: f.write(json.dumps([round(t), round(u, 1)]) + '\n')
+            t, pl = time.time(), dash.pool()
+            u, o = pl['hosts'][0]['used'], {h['name']: [h['used'], h['total']] for h in pl['hosts'][1:]} or None
+            _mem.append((t, u, o))
+            with open(MEMORY, 'a') as f: f.write(json.dumps([round(t), round(u, 1)] + ([o] if o else [])) + '\n')
             written += 1
             if written % 240 == 0 and os.path.getsize(MEMORY) > 400_000:      # an hour of samples: keep only the last day
-                keep = [json.dumps([round(a), round(b, 1)]) for a, b in list(_mem)]
+                keep = [json.dumps([round(a), round(b, 1)] + ([o] if o else [])) for a, b, o in list(_mem)]
                 tmp = MEMORY + '.tmp'; open(tmp, 'w').write('\n'.join(keep) + '\n'); os.replace(tmp, MEMORY)
         except Exception: pass
         time.sleep(15)

@@ -266,15 +266,34 @@ def top(n=6):
     return sorted(merged.values(), key=lambda r: -r['cpu'])[:n]
 
 
-def mac():
+def memory():
+    """This host's memory in GiB: (used, total), used as Activity Monitor's "Memory Used". A peer reports the same figure."""
     total = every('memsize', 86400, lambda: int(sh(['sysctl', '-n', 'hw.memsize']).strip() or 0))
     vm = sh(['vm_stat']); page = int((re.search(r'page size of (\d+)', vm) or [0, 16384])[1])
     get = lambda kk: int((re.search(rf'{kk}:\s+(\d+)', vm) or [0, 0])[1])
-    used = (get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')) * page   # as Activity Monitor's "Memory Used"
+    used = (get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')) * page
+    return used / 2**30, total / 2**30
+
+
+def mac():
+    used, total = memory()
     load = sh(['sysctl', '-n', 'vm.loadavg']).strip('{} \n').split()[:3]
     try: st = os.statvfs('/System/Volumes/Data'); free = st.f_bavail * st.f_frsize / 1e9
     except OSError: free = 0
-    return dict(used=used / 2**30, total=total / 2**30, load=load, free=free)
+    return dict(used=used, total=total, load=load, free=free)
+
+
+def pool(m=None, ps=None):
+    """Memory across this Mac and its peers that are up and report it: {used, total, hosts: [{name, used, total}]}, this
+    Mac first; one host when there are no peers. m: mac() if already read; ps: peers.view() if already read."""
+    from . import peers
+    used, total = (m['used'], m['total']) if m else memory()
+    hosts = [dict(name=peers.me(), used=round(used, 1), total=round(total, 1))]
+    for p in (peers.view() if ps is None else ps) or []:
+        mm = p.get('memory') if isinstance(p.get('memory'), dict) else {}
+        if p.get('state') in ('up', 'maintenance') and mm.get('total'):
+            hosts.append(dict(name=p.get('name'), used=round(float(mm.get('used') or 0), 1), total=round(float(mm['total']), 1)))
+    return dict(used=round(sum(h['used'] for h in hosts), 1), total=round(sum(h['total'] for h in hosts), 1), hosts=hosts)
 
 
 def snapshot():
@@ -285,7 +304,7 @@ def snapshot():
     from . import peers
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
                 last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
-                maintenance=maint.view(), peers=peers.view())
+                maintenance=maint.view(), peers=peers.view(), pool=pool())
 
 
 def crash_view():
@@ -450,12 +469,12 @@ def show(s, w=80, h=24):
     for title, lines, _ in sections: body += [rule(title)] + lines
     body = [fit(l, w) for l in body][:h - 1]
     body += [''] * (h - 1 - len(body))
-    m = s['mac']
-    share = m['used'] / max(1, m['total'])
+    m, pl = s['mac'], s.get('pool') or dict(used=s['mac']['used'], total=s['mac']['total'], hosts=[s['mac']])
+    share = max(h['used'] / max(1, h['total']) for h in pl['hosts'])           # the fullest host, not the pool's average
     memc = 'r' if share > 0.85 else 'y' if share > 0.65 else 'g'
     busy = sum(r['answering'] + r['direct'] for r in s['users'])
-    status = (f" {s['time']} │ mem {m['used']:.0f}/{m['total']:.0f}G │ load {m['load'][0] if m['load'] else '?'} │ {m['free']:.0f}G free │ "
-              f"hub {'open' if dr['up'] else 'closed'} │ {busy} working ")
+    status = (f" {s['time']} │ mem {pl['used']:.0f}/{pl['total']:.0f}G" + (f" ({len(pl['hosts'])} hosts)" if len(pl['hosts']) > 1 else '')
+              + f" │ load {m['load'][0] if m['load'] else '?'} │ {m['free']:.0f}G free │ gateway {'up' if dr['up'] else 'down'} │ {busy} active ")
     return '\n'.join(body + [k(status[:w].ljust(w), 'R', memc)])
 
 
