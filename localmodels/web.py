@@ -127,6 +127,8 @@ def _snapshot():
     except Exception as e: out['peers'], out['link'] = [], dict(problems=[f'could not read the peers: {type(e).__name__}: {e}']); errors.record('snapshot: peers', e)
     out['pool'] = dash.pool(out['mac'], out['peers'])                    # memory across this Mac and its peers
     out['errors'] = errors.summary(10)                                   # anything the error record holds from the last 10 minutes
+    try: out['soc'] = dash.every('soc', 1.5, dash.soc)                  # the chip at work: per-core CPU load, GPU utilization
+    except Exception as e: out['soc'] = None; errors.record('snapshot: soc', e)
     out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'direct to LM Studio']
                            + [k for p in out['peers'] for f in (p.get('families') or {}).values() for k in f['holders']])
     return out

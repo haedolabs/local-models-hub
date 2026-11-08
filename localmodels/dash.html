@@ -8,32 +8,36 @@
 <style>
 :root {
   color-scheme: light;
-  --plane: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10); --hover: rgba(11,11,11,0.04); --track: #ebeae4;
-  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --plane: #e7eae6; --surface: #f4f6f3; --ink: #1e2823; --ink-2: #4a5a51; --muted: #76847b;
+  --grid: rgba(120,98,52,0.12); --axis: rgba(120,98,52,0.38); --ring: rgba(120,98,52,0.20); --hover: rgba(120,98,52,0.06); --track: #dde3dd;
+  --s1: #a5832e; --s2: #a86c42; --s3: #2f8a7c; --s4: #7c8a83; --s5: #9c8a52; --s6: #4b955a; --s7: #57809f; --s8: #7e7399;
   --p1: #2e7d4f; --p2: #1a9e6e; --p3: #6a8f2a; --p4: #0f6e5c; --p5: #4c9f3c; --p6: #3c5a2e; --p7: #8aa83a;   /* projects: board greens */
-  --other: #a9a8a1; --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --good-text: #006300;
+  --other: #9aa89f; --good: #3f9a62; --warning: #c09a3a; --serious: #c48a5e; --critical: #bf8059; --good-text: #2f7a4c;   /* no red: soft amber and apricot */
+  --gold: #a8863a; --silicon: #2b312e; --silk: rgba(30,40,35,0.38); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%237a6634' stroke-opacity='0.08' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%237a6634' fill-opacity='0.08'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
-    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05); --track: #2c2c2a;
-    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
-    --other: #5f5e59; --good-text: #0ca30c;
+    --plane: #0d1311; --surface: #131b17; --ink: #e2e6dc; --ink-2: #b3bdb2; --muted: #82908a;
+    --grid: rgba(214,180,96,0.09); --axis: rgba(214,180,96,0.30); --ring: rgba(214,180,96,0.17); --hover: rgba(214,180,96,0.06); --track: #1d2924;
+    --s1: #d6b460; --s2: #c88f62; --s3: #66b8a8; --s4: #aab4ae; --s5: #d8c48e; --s6: #7fc58c; --s7: #93b4cf; --s8: #b4a8c8;
     --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
+    --other: #5f7468; --good: #86d39c; --warning: #e6c06c; --serious: #e2ad80; --critical: #e0a07a; --good-text: #93dcab;
+    --gold: #d6b460; --silicon: #1a201d; --silk: rgba(226,230,220,0.45); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%23d6b460' stroke-opacity='0.055' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%23d6b460' fill-opacity='0.055'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
-  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10); --hover: rgba(255,255,255,0.05); --track: #2c2c2a;
-  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
-  --other: #5f5e59; --good-text: #0ca30c;
+  --plane: #0d1311; --surface: #131b17; --ink: #e2e6dc; --ink-2: #b3bdb2; --muted: #82908a;
+  --grid: rgba(214,180,96,0.09); --axis: rgba(214,180,96,0.30); --ring: rgba(214,180,96,0.17); --hover: rgba(214,180,96,0.06); --track: #1d2924;
+  --s1: #d6b460; --s2: #c88f62; --s3: #66b8a8; --s4: #aab4ae; --s5: #d8c48e; --s6: #7fc58c; --s7: #93b4cf; --s8: #b4a8c8;
   --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
+  --other: #5f7468; --good: #86d39c; --warning: #e6c06c; --serious: #e2ad80; --critical: #e0a07a; --good-text: #93dcab;
+  --gold: #d6b460; --silicon: #1a201d; --silk: rgba(226,230,220,0.45); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%23d6b460' stroke-opacity='0.055' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%23d6b460' fill-opacity='0.055'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--plane); color: var(--ink); height: 100%; }
+body { background-image: var(--traces); }   /* copper traces and vias, faint: the page is the board */
 body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
 .wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
 @media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
@@ -42,25 +46,49 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .sub { color: var(--ink-2); margin-left: 10px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
-.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px rgba(134,211,156,0.35); }   /* status LEDs */
 .seg { display: inline-flex; background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 2px; }
 .seg button, .btn { font: inherit; border: 0; background: transparent; color: var(--ink-2); padding: 3px 10px; border-radius: 6px; cursor: pointer; }
 .seg button:hover, .btn:hover { background: var(--hover); }
 .seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--ring); }
 .btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
 #alerts:empty { display: none; }
-.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+.kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
+.soc .socbody { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.soc .socnums { min-width: 0; }
+.pkg { flex: none; width: 60px; height: 60px; padding: 5px; border-radius: 3px;   /* the chip: gold pins on four sides, the die inside */
+  background:
+    repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) top / 100% 3px no-repeat,
+    repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) bottom / 100% 3px no-repeat,
+    repeating-linear-gradient(0deg, var(--gold) 0 2px, transparent 2px 5px) left / 3px 100% no-repeat,
+    repeating-linear-gradient(0deg, var(--gold) 0 2px, transparent 2px 5px) right / 3px 100% no-repeat; }
+.die { width: 100%; height: 100%; border-radius: 3px; background: var(--silicon); padding: 3px; display: flex; flex-direction: column; gap: 3px;
+  box-shadow: inset 0 0 0 1px rgba(214,180,96,0.28); }
+.cores { display: grid; gap: 1.5px; }
+.cores.cpu { grid-template-columns: repeat(6, 1fr); }                 /* each CPU core lit by its own load */
+.cores.gpu { grid-template-columns: repeat(8, 1fr); flex: 1; }        /* the GPU's cores, lit by its utilization */
+.cores i { display: block; aspect-ratio: 1; border-radius: 1px; background: rgba(214,180,96, var(--u, .12)); transition: background-color 1.2s ease; }
+.cores.gpu i { aspect-ratio: auto; background: rgba(102,184,168, var(--u, .12)); }
+.cores.gpu.busy i { animation: breathe 3.6s ease-in-out infinite; }   /* hard at work: a slow, soft glow */
+@keyframes breathe { 50% { filter: brightness(1.16); } }
+@media (prefers-reduced-motion: reduce) { .cores.gpu.busy i { animation: none; } }
 .row { display: grid; gap: 10px; min-height: 0; }
 .row.a { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
 .row.b { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .row.c { grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 4fr); }
-.card { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
-.card h2 { font-size: 13px; font-weight: 600; margin: 0; flex: none; }
+.card { background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
+.card::before { content: ''; position: absolute; inset: 5px; pointer-events: none; opacity: .55;   /* silkscreen corner marks */
+  background:
+    linear-gradient(var(--silk), var(--silk)) left top / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) left top / 1px 9px no-repeat,
+    linear-gradient(var(--silk), var(--silk)) right top / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) right top / 1px 9px no-repeat,
+    linear-gradient(var(--silk), var(--silk)) left bottom / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) left bottom / 1px 9px no-repeat,
+    linear-gradient(var(--silk), var(--silk)) right bottom / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) right bottom / 1px 9px no-repeat; }
+.card h2 { font: 600 13px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; margin: 0; flex: none; }   /* silkscreen */
 .card .hint { color: var(--muted); font-size: 11.5px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }   /* only the body gives way */
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex: none; }
 .card .body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .tile { padding: 8px 12px; }
-.tile .label { color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+.tile .label { color: var(--ink-2); font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; white-space: nowrap; }
 .tile .value { font-size: 22px; font-weight: 600; line-height: 1.15; }
 .tile .value small { font-size: 12px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
 .tile .foot { color: var(--muted); font-size: 11.5px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -105,16 +133,16 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
   background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .34) 0 9%, transparent 9% 12.5%);
 }
 .slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
-  background: repeating-linear-gradient(90deg, #d4a72c 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
+  background: repeating-linear-gradient(90deg, var(--gold) 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
 .slot:not(.on)::after { opacity: .45; }
 .slot.on::before {         /* in use: a soft light runs along the module and its contacts brighten; the phase follows the clock */
   content: ''; position: absolute; top: 0; bottom: 0; left: -45%; width: 45%;      /* (slotEl), so a refresh never restarts it */
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .26), transparent);
-  animation: current 2.8s ease-in-out var(--d, 0s) infinite;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .17), transparent);
+  animation: current 4s ease-in-out var(--d, 0s) infinite;
 }
-.slot.on::after { animation: contacts 2.8s ease-in-out var(--d, 0s) infinite; }
+.slot.on::after { animation: contacts 4s ease-in-out var(--d, 0s) infinite; }
 @keyframes current { 0% { transform: translateX(0); opacity: 0; } 12% { opacity: 1; } 60% { transform: translateX(322%); opacity: 1; } 70%, 100% { transform: translateX(322%); opacity: 0; } }
-@keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.4); } }
+@keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.22); } }
 @media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
 .copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .bandpct { display: none; }
@@ -188,9 +216,10 @@ footer b { color: var(--ink-2); font-weight: 600; }
   <section class="kpis">
     <div class="card tile"><div class="label">Active requests</div><div class="value" id="k-ans">–</div><div class="foot" id="k-ans-f"></div></div>
     <div class="card tile"><div class="label">Queued</div><div class="value" id="k-wait">–</div><div class="foot" id="k-wait-f"></div></div>
-    <div class="card tile"><div class="label">Throughput</div><div class="value" id="k-tok">–</div><div class="foot" id="k-tok-f">tokens/s, last minute, all projects</div></div>
+    <div class="card tile"><div class="label">Throughput</div><div class="value" id="k-tok">–</div><div class="foot" id="k-tok-f">tokens/s, last minute</div></div>
     <div class="card tile"><div class="label">Requests</div><div class="value" id="k-req">–</div><div class="foot" id="k-req-f"></div></div>
     <div class="card tile"><div class="label">Memory used</div><div class="value" id="k-mem">–</div><div class="meter"><div id="k-mem-m" style="width:0"></div></div><div class="foot" id="k-mem-f" style="margin-top:4px"></div></div>
+    <div class="card tile soc" id="soc-tile"><div class="label">SoC load</div><div class="socbody"><div class="pkg"><div class="die"><div class="cores cpu" id="k-soc-cpu"></div><div class="cores gpu" id="k-soc-gpu"></div></div></div><div class="socnums"><div class="value" id="k-soc">–</div><div class="foot" id="k-soc-f"></div></div></div></div>
     <div class="card tile"><div class="label">Claude Code sessions</div><div class="value" id="k-cc">–</div><div class="foot" id="k-cc-f"></div></div>
   </section>
 
@@ -552,7 +581,7 @@ function renderNow() {
     : answering.length ? [...new Set(answering)].join(', ') : 'idle';
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
-  $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${S.waits7.waits} queue waits > 2 s, ${S.waits7.minutes} min total`;
+  $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${S.waits7.waits} waits > 2 s · ${Math.round(S.waits7.minutes)} min`;
   const m = S.mac, P = S.pool || {used: m.used, total: m.total, hosts: [{name: 'this Mac', used: m.used, total: m.total}]};
   const fill = h => h.used / Math.max(1, h.total), share = fill(P), worst = Math.max(...P.hosts.map(fill));   // color: the fullest host
   const hue = v => v > 0.92 ? 'var(--critical)' : v > 0.85 ? 'var(--warning)' : '';
@@ -565,12 +594,12 @@ function renderNow() {
   const work = S.claude.filter(c => c.working);
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
-  guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
+  guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
   guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels);
 }
 
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
-const CURRENT = 2.8;            // seconds: one pass of light along an active module (the CSS animations' duration)
+const CURRENT = 4;            // seconds: one pass of light along an active module (the CSS animations' duration)
 function slotEl(p, j) {        // a slot as a memory module; an active one carries a current whose phase follows the clock, staggered by slot
   return el('span', {class: p ? 'slot on' : 'slot', tabindex: 0,
     style: p ? `--board:${color(p)};--d:${(-((Date.now() / 1000 + j * 0.35) % CURRENT)).toFixed(2)}s` : ''});
@@ -796,6 +825,22 @@ function renderRecent() {
   tableIn(box, head, rows, 'localmodels log for the day');
 }
 
+function renderSoc() {         // the chip at work: each CPU core lit by its own load, the GPU's cores by its utilization
+  const c = S.soc, cpu = $('k-soc-cpu'), gpu = $('k-soc-gpu');
+  const n = (c && c.cpu && c.cpu.length) || 12, g = (c && c.gpu_cores) || 32;
+  if (cpu.children.length !== n) cpu.replaceChildren(...Array.from({length: n}, () => el('i')));
+  if (gpu.children.length !== g) gpu.replaceChildren(...Array.from({length: g}, () => el('i')));
+  const lit = x => (0.15 + 0.85 * Math.max(0, Math.min(100, +x || 0)) / 100).toFixed(2);
+  [...cpu.children].forEach((x, i) => x.style.setProperty('--u', c && c.cpu ? lit(c.cpu[i]) : '.12'));
+  const gp = c && c.gpu_pct != null ? c.gpu_pct : null;
+  [...gpu.children].forEach(x => x.style.setProperty('--u', gp != null ? lit(gp) : '.12'));
+  gpu.classList.toggle('busy', gp != null && gp >= 50);
+  $('k-soc').replaceChildren(gp != null ? `GPU ${gp}%` : '–', el('small', {}, c && c.cpu_pct != null ? `CPU ${c.cpu_pct}%` : ''));
+  const away = (S.peers || []).filter(p => p.soc && p.soc.gpu_pct != null).map(p => `${p.name} GPU ${p.soc.gpu_pct}%`);
+  const f = $('k-soc-f');
+  f.textContent = c ? [(c.name || '').replace(/^Apple /, ''), ...away].filter(Boolean).join(' · ') : 'live after the gateway restarts';
+  $('soc-tile').title = c ? `${c.name}: ${n} CPU cores (each lit by its load), ${g} GPU cores${c.gpu_mem_gb != null ? `, ${c.gpu_mem_gb} GB in use by the GPU` : ''}` : '';
+}
 function renderAbout() {                // the one footer line: version, license, credit, source
   const ab = S.about;                // the version this door runs, its license and its source, from the hub's own files
   if (ab) {

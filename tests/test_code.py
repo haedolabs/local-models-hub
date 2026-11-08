@@ -137,6 +137,21 @@ def test_record(box):
     t('a broken line is skipped; an old one falls outside the window', len(errors.recent(5)) == 3 and len(errors.recent(180)) == 4)
 
 
+def test_name_tool(box):
+    from localmodels import mcp_server, names
+    names.FILE, names._cache['mtime'] = os.path.join(box, 'names.json'), None
+    was = os.environ.get('PWD')
+    os.environ['PWD'] = os.path.join(os.path.expanduser('~'), 'Documents', 'zz-folder-123', 'scripts')
+    try:
+        r = mcp_server.name_project('research', ['lab'], True)
+        t("the name tool: the session's project folder and its former names show as the new name, private",
+          r['ok'] and names.project('zz-folder-123') == 'research' and names.project('lab') == 'research' and names.private('research'), r)
+        t('an empty name is refused, and nothing changes', not mcp_server.name_project('  ')['ok'] and names.project('lab') == 'research')
+    finally:
+        if was is None: os.environ.pop('PWD', None)
+        else: os.environ['PWD'] = was
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-codetest-')
     try:
@@ -151,6 +166,8 @@ def main():
           js_undefined('<script>function a(xs) { return xs.map(short).join(", "); }</script>') == ['short'])
         print('the error record')
         test_record(box)
+        print("a project names itself (the name tool)")
+        test_name_tool(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
