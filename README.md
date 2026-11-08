@@ -1,5 +1,7 @@
 # <img src="docs/icon.png" alt="" width="32" height="32"> Local Models Hub
 
+By [Haedo Labs](https://haedolabs.com).
+
 Reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.
 
 <picture>
@@ -293,4 +295,4 @@ Send every request through the gateway, never to port 1234. Hold a lease for a r
 
 ## License
 
-MIT; see [LICENSE](LICENSE).
+MIT, © 2026 [Haedo Labs](https://haedolabs.com); see [LICENSE](LICENSE).
