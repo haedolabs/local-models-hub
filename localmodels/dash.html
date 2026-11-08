@@ -867,12 +867,12 @@ function renderSoc() {         // the chip at work: each CPU core lit by its own
   $('soc-tile').title = c ? `${c.name}: ${n} CPU cores (each lit by its load), ${g} GPU cores${c.gpu_mem_gb != null ? `, ${c.gpu_mem_gb} GB in use by the GPU` : ''}` : '';
 }
 function renderAbout() {                // the one footer line: version, license, credit, source
-  const ab = S.about;                // the version this door runs, its license and its source, from the hub's own files
+  const ab = S.about;                // the version this gateway runs, its license, the credit and the source, from the hub's own files
   if (ab) {
     const link = (href, text) => el('a', {href, target: '_blank', rel: 'noopener noreferrer'}, text);
     const bits = [el('span', {}, (ab.name || 'Local Models Hub') + ' ', el('b', {}, 'v' + ab.version))];
     if (ab.license) bits.push(ab.source ? link(ab.source.replace(/\/$/, '') + '/blob/main/LICENSE', ab.license) : ab.license);
-    if (ab.copyright) bits.push(ab.copyright);
+    if (ab.copyright) bits.push(ab.copyright_url ? link(ab.copyright_url, ab.copyright) : ab.copyright);
     if (ab.source) bits.push(link(ab.source, 'source'));
     $('about').replaceChildren(...bits.flatMap((b, i) => i ? [' · ', b] : [b]));
   }
