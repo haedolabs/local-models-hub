@@ -673,7 +673,7 @@ function renderAlerts() {
   if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file unreadable: '), S.settings_error, ' Last valid settings in effect.')));
   if (S.errors) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
     el('span', {}, el('b', {}, `${S.errors.count} error${S.errors.count === 1 ? '' : 's'} recorded in the last ${S.errors.minutes} min. `),
-      `Last: ${S.errors.last.where}: ${S.errors.last.error} `, el('span', {class: 'ink2'}, '(details: '), el('code', {}, 'localmodels errors --trace'), el('span', {class: 'ink2'}, ')'))));
+      S.errors.last ? `Last: ${S.errors.last.where}: ${S.errors.last.error} ` : '', el('span', {class: 'ink2'}, '(details: '), el('code', {}, 'localmodels errors --trace'), el('span', {class: 'ink2'}, ')'))));
   for (const [where, words] of Object.entries(failing)) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
     el('span', {}, el('b', {}, `Display error in ${where}: `), words, el('span', {class: 'ink2'}, ' (the rest of the page is current; recorded for localmodels errors)'))));
   $('alerts').replaceChildren(...out);
