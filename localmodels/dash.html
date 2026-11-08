@@ -120,6 +120,9 @@ td.sub { padding-left: 28px; color: var(--ink-2); }
 .alert code, .crash-then code { font-size: 12px; }
 footer { color: var(--muted); font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; justify-content: space-between; }
 footer b { color: var(--ink-2); font-weight: 600; }
+#about { margin-left: auto; text-align: right; white-space: nowrap; }
+#about a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
+#about a:hover { color: var(--ink-2); }
 </style>
 </head>
 <body>
@@ -166,7 +169,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <article class="card"><h2>Last requests</h2><div class="hint">through the hub; never the content</div><div class="body" id="recent"></div></article>
   </section>
 
-  <footer><span id="mac"></span><span id="events"></span><span id="foot"></span></footer>
+  <footer><span id="mac"></span><span id="events"></span><span id="foot"></span><span id="about"></span></footer>
 </div>
 <div id="tip"></div>
 <script>
@@ -633,6 +636,15 @@ function renderMac() {
   $('mac').replaceChildren(el('b', {}, 'The Mac: '), `load ${m.load && m.load[0] ? m.load[0] : '?'} · ${Math.round(m.free)} GB free on disk · busiest: `
     + top.map(t => `${t.name} ${Math.round(t.cpu)}% / ${t.mem.toFixed(1)} GB`).join(', ') + ` · swaps refused in 7 days: ${S.waits7.refused}`);
   $('foot').textContent = 'Names, times and token counts only, never what anyone sent. In a terminal: localmodels, or localmodels dash.';
+  const ab = S.about;                // the version this door runs, its license and its source, from the hub's own files
+  if (ab) {
+    const link = (href, text) => el('a', {href, target: '_blank', rel: 'noopener noreferrer'}, text);
+    const bits = [el('span', {}, 'local-models hub ', el('b', {}, 'v' + ab.version))];
+    if (ab.license) bits.push(ab.source ? link(ab.source.replace(/\/$/, '') + '/blob/main/LICENSE', ab.license) : ab.license);
+    if (ab.copyright) bits.push(ab.copyright);
+    if (ab.source) bits.push(link(ab.source, 'source'));
+    $('about').replaceChildren(...bits.flatMap((b, i) => i ? [' · ', b] : [b]));
+  }
 }
 
 // ---------------------------------------------------------------- fetching, and holding the last picture while it reloads

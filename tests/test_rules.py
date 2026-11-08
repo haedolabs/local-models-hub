@@ -467,6 +467,18 @@ def test_privacy_check(box):
     t('nothing new holds a word: clean (a line that is not a valid pattern is read as plain text)', cli.private_check(repo, words)['status'] == 'clean')
 
 
+def test_about(box):
+    print("the dashboard's corner: the version, the license and the source, read from the hub's own files at run time")
+    from localmodels import VERSION, web
+    home = os.path.join(box, 'about'); os.makedirs(os.path.join(home, '.claude-plugin'))
+    open(os.path.join(home, 'LICENSE'), 'w').write('MIT License\n\nCopyright (c) 2026 Pat Sample\n\nPermission is hereby granted...\n')
+    open(os.path.join(home, '.claude-plugin', 'plugin.json'), 'w').write(json.dumps(dict(name='x', repository='https://example.org/pat/hub')))
+    a = web.about(home)
+    t('version, license, copyright and source, as the files say', a == dict(version=VERSION, license='MIT License', copyright='© 2026 Pat Sample',
+      source='https://example.org/pat/hub'), a)
+    t('with neither file (an old install), the version alone', web.about(os.path.join(box, 'nowhere')) == dict(version=VERSION, license=None, copyright=None, source=None))
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -482,6 +494,7 @@ def main():
         test_runs()
         test_maintenance(box)
         test_privacy_check(box)
+        test_about(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

@@ -308,6 +308,9 @@ def deploy():
     os.makedirs(os.path.join(tmp, 'bin'))
     shutil.copytree(os.path.join(HOME, 'localmodels'), os.path.join(tmp, 'localmodels'), ignore=shutil.ignore_patterns('__pycache__'))
     shutil.copy2(os.path.join(HOME, 'bin', 'localmodels'), os.path.join(tmp, 'bin', 'localmodels'))
+    for rel in ('LICENSE', os.path.join('.claude-plugin', 'plugin.json')):    # the dashboard's corner reads them
+        if os.path.exists(os.path.join(HOME, rel)):
+            os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True); shutil.copy2(os.path.join(HOME, rel), os.path.join(tmp, rel))
     old = INSTALLED + '.old'
     shutil.rmtree(old, ignore_errors=True)
     if os.path.exists(INSTALLED): os.replace(INSTALLED, old)

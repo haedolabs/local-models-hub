@@ -12,9 +12,9 @@
 Readings are gathered when the page asks (cached 2 s, one computation at a time however many pages ask), so nothing
 runs while nobody looks, except the memory sample.
 """
-import collections, json, os, threading, time
+import collections, json, os, re, threading, time
 
-from . import crashes, dash, llmshare, maint, recycle, sessions
+from . import HOME, VERSION, crashes, dash, llmshare, maint, recycle, sessions
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
 COLORS = os.path.join(llmshare.SHARED, 'colors.json')   # project -> color slot, first come, kept while the project is seen
@@ -63,6 +63,23 @@ def _cached(key, seconds, fn):
 
 
 # ---------------------------------------------------------------- now
+def about(home=None):
+    """The dashboard's corner: {version, license, copyright, source}, read from the hub's own LICENSE and plugin
+    manifest (install copies both beside the code), so no name or address is written into the code itself."""
+    home = home or HOME
+    lic = cr = src = None
+    try:
+        lines = [l.strip() for l in open(os.path.join(home, 'LICENSE')) if l.strip()]
+        lic = lines[0] if lines else None
+        cr = next((re.sub(r'^Copyright\s*(\(c\)|©)?\s*', '© ', l, flags=re.I) for l in lines if l.lower().startswith('copyright')), None)
+    except OSError: pass
+    try:
+        m = json.load(open(os.path.join(home, '.claude-plugin', 'plugin.json')))
+        src = m.get('repository') or m.get('homepage')
+    except (OSError, ValueError): pass
+    return dict(version=VERSION, license=lic, copyright=cr, source=src if isinstance(src, str) and src.startswith('https://') else None)
+
+
 def snapshot():
     return _cached('snapshot', 2, _snapshot)
 
@@ -96,6 +113,7 @@ def _snapshot():
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],
                claude=[dict(c, uses=any(u.get('session') == c['id'] for u in users)) for c in cs],
                mac=dash.mac(), top=dash.every('top', 5, dash.top), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
+    out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
     except Exception: out['maintenance'] = None
     out['colors'] = colors([u['project'] for u in users] + [h['project'] for f in fams for c in f['copies'] for h in c['holders'] if h['project'] != 'straight to LM Studio'])
