@@ -86,18 +86,26 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 @media (min-height: 701px) and (min-width: 1101px) { .wrap.peers { grid-template-rows: auto auto auto minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr) auto; } }
 .slots { display: inline-flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); }
 .slot {                    /* a slot as a memory module: the board (gray when free, the project's color when active), its chips, */
-  position: relative;      /* and gold contacts along the bottom edge, broken by the key notch */
+  position: relative; overflow: hidden;      /* and gold contacts along the bottom edge, broken by the key notch */
   width: calc(30px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
-  border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px; background: var(--track);
+  border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px;
+  background: repeating-linear-gradient(90deg, rgba(0, 0, 0, .3) 0 17%, transparent 17% 25%) 50% 28% / 82% 42% no-repeat var(--track);
   -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
           mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
 }
-.slot::before { content: ''; position: absolute; left: 9%; right: 9%; top: 15%; height: 42%;
-  background: repeating-linear-gradient(90deg, rgba(0, 0, 0, .3) 0 17%, transparent 17% 25%); border-radius: 1px; }
+.slot:not(.on) { background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .16) 0 17%, transparent 17% 25%); }
 .slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
   background: repeating-linear-gradient(90deg, #d4a72c 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
-.slot:not([style*="background"])::after { opacity: .45; }
-.slot:not([style*="background"])::before { opacity: .55; }
+.slot:not(.on)::after { opacity: .45; }
+.slot.on::before {         /* in use: a soft light runs along the module and its contacts brighten; the phase follows the clock */
+  content: ''; position: absolute; top: 0; bottom: 0; left: -45%; width: 45%;      /* (slotEl), so a refresh never restarts it */
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .26), transparent);
+  animation: current 2.8s ease-in-out var(--d, 0s) infinite;
+}
+.slot.on::after { animation: contacts 2.8s ease-in-out var(--d, 0s) infinite; }
+@keyframes current { 0% { transform: translateX(0); opacity: 0; } 12% { opacity: 1; } 60% { transform: translateX(322%); opacity: 1; } 70%, 100% { transform: translateX(322%); opacity: 0; } }
+@keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.4); } }
+@media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
 .copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bandpct { display: none; }
 #models-body.tight .band { display: none; }
@@ -535,6 +543,11 @@ function renderNow() {
 }
 
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
+const CURRENT = 2.8;            // seconds: one pass of light along an active module (the CSS animations' duration)
+function slotEl(p, j) {        // a slot as a memory module; an active one carries a current whose phase follows the clock, staggered by slot
+  return el('span', {class: p ? 'slot on' : 'slot', tabindex: 0,
+    style: p ? `background-color:${color(p)};--d:${(-((Date.now() / 1000 + j * 0.35) % CURRENT)).toFixed(2)}s` : ''});
+}
 function fitModels() {   // any number of models: rows grow to fill the card (never cutting a line), else fold bands, then rows, then shrink
   const box = $('models-body'), set = k => box.style.setProperty('--mk', k.toFixed(3));   // layout only: text keeps its size
   const over = () => box.scrollHeight > box.clientHeight + 1 || box.scrollWidth > box.clientWidth + 1;
@@ -609,7 +622,7 @@ function renderModels() {
       for (const h of c.holders) for (let j = 0; j < h.n; j++) { boxes.push(h.project); seen.add(h.project); }
       while (boxes.length < c.busy) boxes.push('direct to LM Studio');
       const slots = el('span', {class: 'slots'}, ...Array.from({length: c.parallel}, (_, j) => {
-        const p = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: p ? `background:${color(p)}` : ''});
+        const p = boxes[j], b = slotEl(p, j);
         const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${c.id} · slot ${j + 1}`,
           [{name: p || 'free', color: p ? color(p) : 'var(--track)', value: p ? 'active' : 'free'}]); };
         b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt);
@@ -646,7 +659,7 @@ function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more
   for (const [proj, n] of Object.entries(f.holders || {})) for (let j = 0; j < n; j++) { boxes.push(proj); seen.add(proj); }
   while (boxes.length < f.busy) boxes.push('direct to LM Studio');
   const slots = el('span', {class: 'slots'}, ...Array.from({length: f.slots || 0}, (_, j) => {
-    const pr = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: pr ? `background:${color(pr)}` : ''});
+    const pr = boxes[j], b = slotEl(pr, j);
     const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${id} @ peer ${p.name} · slot ${j + 1}`,
       [{name: pr || 'free', color: pr ? color(pr) : 'var(--track)', value: pr ? 'active' : 'free'}]); };
     b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt); b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
