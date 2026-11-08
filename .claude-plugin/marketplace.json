@@ -1,6 +1,6 @@
 {
   "name": "local-models-hub",
-  "description": "The local-models hub: one LM Studio on a Mac shared by every project and every Claude Code session, with a door that takes turns, a keeper that reloads and recycles model copies, local read-only agents, and one dashboard.",
+  "description": "local-models hub: reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.",
   "owner": {
     "name": "Haedo Labs"
   },
@@ -8,7 +8,7 @@
     {
       "name": "local-models",
       "source": "./",
-      "description": "Share one LM Studio between every project and Claude Code session on a Mac: turns, names, kept and recycled model copies, crash reloads, local read-only agents, one dashboard. After installing: /local-models:setup",
+      "description": "Mac-wide slot scheduling, pooled replicas, crash recovery and pre-emptive recycling for LM Studio behind an OpenAI/Anthropic-compatible proxy on :1235; read-only local MCP agents; batch ETAs; maintenance windows; live dashboard. After installing: /local-models:setup",
       "category": "development",
       "keywords": [
         "lm-studio",

@@ -1,6 +1,6 @@
 # local-models hub
 
-One LM Studio on a Mac, shared by every project and every Claude Code session on it, without them tripping over each other.
+Reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac.
 
 LM Studio serves local models on `localhost:1234`. The moment two programs use it at once, things go wrong quietly: requests pile up past what the model answers at once and time out, one program reloads a model another is using, the engine crashes in the night and nothing loads the model again, and nobody can see who is using what. The hub is a small door in front of LM Studio that fixes those four things and shows the whole picture.
 
