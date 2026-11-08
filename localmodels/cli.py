@@ -26,6 +26,8 @@
   localmodels peer serve <address> | off  this Mac as a peer: its door also listens on that address (its Thunderbolt
                                  Bridge's), for requests with the shared token
   localmodels peer token         make the shared token if there is none, and say how to copy it to the other Mac
+  localmodels peer gpu-limit     the boot job that lets the GPU hold all but 8 GB (com.local-models.gpu-limit): written
+                                 here, with the sudo lines a person runs to install it; an installed one is checked
   localmodels peer test [name]   the door looks at its peers now, and this terminal looks too (to tell macOS blocking the
                                  door from a link that is down)
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
@@ -249,8 +251,59 @@ def token_words():
             'and it never goes on a screen or in the settings)')
 
 
+LOADER_LABEL = 'com.local-models.load-at-login'
+
+
+def retire_loader(dry=False):
+    """A dedicated peer's login loader from before the hub (com.local-models.load-at-login): retired once a family in the
+    settings is loaded at start by the keeper ("load_at_start": true), so one loader runs, never two; kept otherwise, as
+    the only loader. -> a line in words, or '' when there is none."""
+    from . import models
+    if not os.path.exists(models.LOADER): return ''
+    fams = [b for b, f in (llmshare.settings().get('families') or {}).items() if isinstance(f, dict) and f.get('load_at_start')]
+    if not fams: return f'the login loader ({LOADER_LABEL}) stays: no family in the settings is loaded at start ("load_at_start": true), so it is the only loader'
+    if dry: return f"would retire the login loader ({LOADER_LABEL}): the keeper loads {', '.join(fams)} when the door starts"
+    _launchctl('bootout', f'gui/{os.getuid()}/{LOADER_LABEL}')
+    try: os.remove(models.LOADER)
+    except OSError as e: return f'could not remove {models.LOADER} ({e}): the login loader may still run beside the keeper'
+    return f"the login loader ({LOADER_LABEL}) is retired: the keeper loads {', '.join(fams)} when the door starts (its script and log stay)"
+
+
+def gpu_limit_cmd():
+    """localmodels peer gpu-limit: the boot job for this Mac's GPU limit, written beside the settings with the lines a
+    person runs to install it (an administrator password); one already installed is checked against it."""
+    import plistlib
+    from . import models
+    want = models.gpu_plist()
+    name = os.path.basename(models.GPU_DAEMON)
+    system = '/Library/LaunchDaemons/' + name
+    mb = want['ProgramArguments'][1].split('=', 1)[1]
+    try: cur = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
+    except (OSError, subprocess.SubprocessError, ValueError): cur = 0
+    have = None
+    if os.path.exists(models.GPU_DAEMON):
+        try: have = plistlib.load(open(models.GPU_DAEMON, 'rb'))
+        except (OSError, ValueError, plistlib.InvalidFileException): have = {}
+        if have == want:
+            print(f"installed: {name} sets iogpu.wired_limit_mb={mb} at every boot (all but 8 GB of {models.mem_gb():.0f}); now {cur or 'the default'}")
+            return 0
+        said = ' '.join((have or {}).get('ProgramArguments') or []) or 'something else'
+        print(f'installed, but it runs `{said}`; this Mac\'s rule is iogpu.wired_limit_mb={mb} (all but 8 GB of {models.mem_gb():.0f})')
+    mine = os.path.join(os.path.dirname(llmshare.MODELS), name)
+    os.makedirs(os.path.dirname(mine), exist_ok=True)
+    with open(mine, 'wb') as f: plistlib.dump(want, f)
+    print(f'the boot job is written to {mine}: it sets iogpu.wired_limit_mb={mb} at every boot, before login and LM Studio (now: {cur or "the default"})')
+    print('a person installs it (an administrator password):')
+    if have is not None: print(f'  sudo launchctl bootout system/{want["Label"]}')
+    print(f'  sudo cp "{mine}" /Library/LaunchDaemons/')
+    print(f'  sudo chown root:wheel {system}')
+    print(f'  sudo chmod 644 {system}')
+    print(f'  sudo launchctl bootstrap system {system}')
+    return 1 if have is not None else 0
+
+
 def peer_cmd(a):
-    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name]]."""
+    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit]."""
     from . import peers
     w = [x for x in a if x != 'peer']
     verb = w[0] if w else ''
@@ -299,6 +352,7 @@ def peer_cmd(a):
         print('  ' + token_words())
         print('  the door listens there within 5 s, only for requests with the token; `localmodels peer` says whether it does')
         return 0
+    if verb == 'gpu-limit' and len(w) == 1: return gpu_limit_cmd()
     if verb == 'token' and len(w) == 1:
         print(token_words())
         print(f'copy it to another Mac: {token_copy()}')
@@ -327,7 +381,7 @@ def peer_cmd(a):
             bad += p['state'] != 'up'
         if d.get('serving'): print(f"this Mac serves as a peer: {d.get('listening') or 'not listening yet'}")
         return 1 if bad else 0
-    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name]]')
+    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit]')
     return 2
 
 
@@ -557,6 +611,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         else: print(f"would register the hub's tools for every Claude Code session (claude mcp add --scope user local-models), add one signpost line to {SIGNPOST_FILE}, "
                     f"and add the maintenance hook to {SETTINGS_FILE} (silent unless maintenance is set)")
         print(f"would link the localmodels command into the first writable of {', '.join(BINS)}")
+        if retire_loader(dry=True): print(retire_loader(dry=True))
         print('nothing written (--dry)')
         return 0
     os.makedirs(LOGS, exist_ok=True)
@@ -590,6 +645,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         else: r = _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
     print(f"2. the door starts at login ({PLIST}): {'open on ' + llmshare.HUB if up else 'NOT answering: ' + (r.stderr.strip() or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
+    if up and retire_loader(dry=True): print('   ' + retire_loader())
     if plugin:
         print("3. the hub's tools come with the Claude Code plugin (its .mcp.json): nothing registered here")
         print("4. no signpost line: the plugin's skill carries the rules into every session")

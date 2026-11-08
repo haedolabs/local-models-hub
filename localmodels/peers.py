@@ -373,6 +373,7 @@ class Peer:
         self.inflight = collections.Counter()           # family -> this Mac's requests on the peer now
         self.cap = {}                                   # family -> how many this Mac may have there, from the last look
         self.match = {}                                 # family -> (True, None) or (False, words)
+        self.first = {}                                 # family -> the slots of the peer's first copy (filled before a second copy anywhere)
 
 
 class Link:
@@ -430,8 +431,11 @@ class Link:
             p.state, p.why = ('maintenance', m.get('words') or 'down for maintenance') if m.get('phase') == 'on' else ('up', None)
             fams, conf, front = rep.get('families') or {}, llmshare.settings().get('families') or {}, me()
             p.cap = {b: capacity_for(f, front) for b, f in fams.items() if isinstance(f, dict)}
-            p.match = {}
+            p.match, p.first = {}, {}
             for b, f in fams.items():
+                cs = sorted((c for c in ((f or {}).get('copies') or []) if isinstance(c, dict) and not c.get('down') and not c.get('draining')
+                             and c.get('state') != 'LOADING'), key=lambda c: (c.get('id') != b, len(str(c.get('id'))), str(c.get('id'))))
+                p.first[b] = int(cs[0].get('parallel') or 1) if cs else 0
                 if b not in conf: p.match[b] = (False, "not a family in this Mac's settings"); continue
                 p.match[b] = match(self.mine.get(b), (f or {}).get('fingerprint'), (conf.get(b) or {}).get('variant'))
         if p.state == 'up' and time.time() - p.route_at > ROUTE_EVERY:
@@ -468,6 +472,14 @@ class Link:
             if not p or p.state != 'up' or p.inflight[fam] >= p.cap.get(fam, 0): return False
             p.inflight[fam] += 1
             return True
+
+    def first_free(self, c):
+        """Whether this Mac's requests on a peer's copy still fit in that peer's first copy (a batch fills each Mac's
+        first copy before a second copy on any one Mac)."""
+        fam, name = split(c)
+        with self.lock:
+            p = self.peers.get(name)
+            return bool(p) and p.inflight[fam] < min(p.cap.get(fam, 0), p.first.get(fam, 0))
 
     def give(self, c):
         fam, name = split(c)
