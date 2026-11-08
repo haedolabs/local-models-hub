@@ -74,10 +74,14 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 .fam-name { font-weight: 600; }
 .fam-meta { color: var(--ink-2); font-size: 11.5px; }
 .copy { display: grid; grid-template-columns: 52px auto 1fr; align-items: center; gap: 4px 10px; margin-top: 6px; }
-.copy .nm { color: var(--ink-2); font-size: 11.5px; }
+.copy .nm { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (min-height: 701px) and (min-width: 1101px) { .wrap.peers { grid-template-rows: auto auto auto minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr) auto; } }
 .slots { display: inline-flex; gap: 2px; }
 .slot { width: 18px; height: 18px; border-radius: 4px; background: var(--track); }
 .copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bandpct { display: none; }
+#models-body.tight .band { display: none; }
+#models-body.tight .bandpct { display: inline; }
 .band { grid-column: 2 / -1; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
 .band .bar { flex: 1 1 auto; height: 4px; border-radius: 2px; background: var(--track); position: relative; overflow: hidden; }
 .band .bar > div { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; background: var(--s1); }
@@ -132,7 +136,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">every project and Claude session using LM Studio on this Mac</span></div>
     <div class="chips"><span>Charts: the last</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
+      <span class="chip" id="chip-door"><i></i><span>the door</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
       <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
   </header>
   <div>
@@ -454,6 +458,16 @@ function renderNow() {
   const lmOk = S.lmstudio.server === 'on';
   chip('chip-lm', lmOk, S.lmstudio.listing_ok === false ? `LM Studio's server is on; its model listing is unsure (${Math.round(S.lmstudio.listing_age / 60)} min old)` : "LM Studio's server is on", "LM Studio's server is off");
   if (lmOk && S.lmstudio.listing_ok === false) $('chip-lm').querySelector('i').style.background = 'var(--warning)';
+  const ps = S.peers || [], up = ps.filter(p => p.state === 'up'), serve = S.link && S.link.serving ? (S.link.listening || 'serving as a peer') : '';
+  $('chip-peers').style.display = ps.length || serve ? '' : 'none';
+  document.querySelector('.wrap').classList.toggle('peers', ps.length > 0);
+  if (ps.length || serve) {
+    const said = [ps.length ? (up.length === ps.length ? `${up.length === 1 ? 'peer' : up.length + ' peers'} up: ${up.map(p => p.name).join(', ')}`
+      : ps.filter(p => p.state !== 'up').map(p => `${p.name}: ${p.state === 'down' ? 'no answer' : p.state === 'refused' ? 'refuses the token' : p.state}`).join(' · ')) : '', serve].filter(Boolean).join(' · ');
+    chip('chip-peers', up.length === ps.length && (!serve || /^listening/.test(serve)), said, said);
+    if (up.length < ps.length && ps.every(p => p.state === 'up' || p.state === 'maintenance')) $('chip-peers').querySelector('i').style.background = 'var(--warning)';
+    $('ans-hint').textContent = "the line across the top is how many the loaded copies answer at once, the peers' free slots included; the right edge is now";
+  }
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
   if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
@@ -476,8 +490,11 @@ function renderNow() {
   const work = S.claude.filter(c => c.working);
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
-  renderModels(); renderUsers(); renderClaude(); renderMac(); renderAlerts(); renderEvents();
+  renderModels(); renderUsers(); renderClaude(); renderMac(); renderAlerts(); renderEvents(); fitModels();
 }
+
+// a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
+function fitModels() { const box = $('models-body'); box.classList.remove('tight'); if (box.scrollHeight > box.clientHeight + 1) box.classList.add('tight'); }
 
 // a model down after a crash, a copy being recycled, an unsure listing: said at the top, in words
 function renderAlerts() {
@@ -491,6 +508,15 @@ function renderAlerts() {
                                                               : 'The hub is loading it again; the other copies keep answering, and requests only it could answer wait meanwhile.'))));
   }
   if (S.recycle && S.recycle.words) out.push(el('div', {class: 'alert info', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '↻'), el('span', {}, S.recycle.words)));
+  for (const p of S.peers || []) {
+    const said = [];
+    if (p.state === 'refused') said.push(`${p.name} refuses this Mac's token: ${p.why}`);
+    for (const [id, f] of Object.entries(p.families || {})) if (!f.match && f.why !== "not a family in this Mac's settings") said.push(`${p.name}'s ${id} is not used: ${f.why}`);
+    if (p.state === 'down' && /Local Network/.test(p.why || '')) said.push(`${p.name}: ${p.why}`);
+    for (const w of [p.route_words, p.address_words].concat((p.keeper && p.keeper.warnings) || [])) if (w) said.push(`${p.name}: ${w}`);
+    for (const w of said) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, w)));
+  }
+  for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peers: '), w)));
   if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'The settings file could not be read: '), S.settings_error, ' The last good settings stand.')));
   $('alerts').replaceChildren(...out);
 }
@@ -513,11 +539,14 @@ function renderModels() {
   const box = $('models-body'), fams = S.lmstudio.families;
   const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
     el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.state}`))));
-  if (!fams.length) { box.replaceChildren(...down, down.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.')); $('models-legend').replaceChildren(); return; }
-  const seen = new Set();
+  const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id)));
+  if (!fams.length) { box.replaceChildren(...down, down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
+    legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat(there.length ? [{name: 'free', color: 'var(--track)'}] : [])); return; }
   box.replaceChildren(...down, ...fams.map(f => {
+    const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
     const head = el('div', {}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'},
-      `${f.copies.length > 1 ? f.copies.length + ' copies · ' : ''}${f.at_once} at once · ${f.busy} busy · ${f.size} GB · ${full(f.copies[0].context)} context`));
+      `${f.copies.length > 1 ? f.copies.length + ' copies · ' : ''}${f.at_once} at once · ${f.busy} busy · ${f.size} GB · ${full(f.copies[0].context)} context`
+      + (away.length ? ` · ${more} more on ${away.map(p => p.name).join(', ')}` : '')));
     const rows = f.copies.map((c, k) => {
       const boxes = [];
       for (const h of c.holders) for (let j = 0; j < h.n; j++) { boxes.push(h.project); seen.add(h.project); }
@@ -531,7 +560,8 @@ function renderModels() {
         return b;
       }));
       const state = c.down ? el('span', {class: 'badge down'}, 'down: loading again') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for a recycle' : 'recycling')
-        : el('span', {}, (c.busy ? 'working' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy} of ${c.parallel} busy`);
+        : el('span', {}, (c.busy ? 'working' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy} of ${c.parallel} busy`,
+            el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of its band` : ''));
       const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `copy ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
       if (sv_) {
         const sh = sv_.share == null ? null : Math.min(1, sv_.share);
@@ -542,9 +572,47 @@ function renderModels() {
       }
       return el('div', {class: 'copy'}, ...parts);
     });
-    return el('div', {class: 'fam'}, head, ...rows);
-  }));
+    return el('div', {class: 'fam'}, head, ...rows, ...away.map(p => peerRow(p, f.id, p.families[f.id], seen)));
+  }), ...there);
   legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)})).concat([{name: 'free', color: 'var(--track)'}]));
+}
+
+// this Mac's peers: each family a peer serves for it is one more copy, after this Mac's own (its slots colored by project)
+function linkWords(p) {
+  const bits = [], r = p.route || {};
+  if (p.rtt_ms != null) bits.push(`${p.rtt_ms < 10 ? p.rtt_ms.toFixed(1) : Math.round(p.rtt_ms)} ms`);
+  if (r.interface && r.interface !== 'lo0') bits.push('over ' + (r.port || r.interface));
+  return bits.length ? ' · ' + bits.join(' ') : '';
+}
+function peerState(p) {
+  return p.state === 'maintenance' ? (p.why || 'down for maintenance') : p.state === 'refused' ? "refuses this Mac's token"
+    : p.state === 'down' ? 'no answer: ' + (p.why || '') : p.state === 'new' ? 'not looked at yet' : (p.words || p.state);
+}
+function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more row under the family, its slots colored by project
+  const boxes = [];
+  for (const [proj, n] of Object.entries(f.holders || {})) for (let j = 0; j < n; j++) { boxes.push(proj); seen.add(proj); }
+  while (boxes.length < f.busy) boxes.push('straight to LM Studio');
+  const slots = el('span', {class: 'slots'}, ...Array.from({length: f.slots || 0}, (_, j) => {
+    const pr = boxes[j], b = el('span', {class: 'slot', tabindex: 0, style: pr ? `background:${color(pr)}` : ''});
+    const tipIt = ev => { const r = b.getBoundingClientRect(); showTip(ev.clientX || r.right, ev.clientY || r.top, `${id} on ${p.name} · slot ${j + 1}`,
+      [{name: pr || 'free', color: pr ? color(pr) : 'var(--track)', value: pr ? 'answering' : 'free'}]); };
+    b.addEventListener('pointermove', tipIt); b.addEventListener('focus', tipIt); b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
+    return b;
+  }));
+  return el('div', {class: 'copy', title: p.words || ''}, el('span', {class: 'nm'}, p.name), slots,
+    el('span', {class: 'st'}, `${f.busy} of ${f.slots} busy · ${f.here} from here · ${f.free_here} free for this Mac${linkWords(p)}`));
+}
+function peersOf(id) { return ((S && S.peers) || []).filter(p => p.state === 'up' && p.families && p.families[id] && p.families[id].match); }
+function peerBlocks(seen, local) {      // a family only a peer has (the others' peer copies sit under this Mac's families)
+  const out = [];
+  for (const p of (S && S.peers) || []) {
+    if (p.state !== 'up') continue;                    // the chip says it, and the alerts when a person must act
+    for (const [id, f] of Object.entries(p.families || {})) {
+      if (!f.match || local.has(id)) continue;
+      out.push(el('div', {class: 'fam'}, el('span', {class: 'fam-name'}, id), el('div', {class: 'fam-meta'}, `only on ${p.name} · ${f.slots} at once · ${f.busy} busy`), peerRow(p, id, f, seen)));
+    }
+  }
+  return out;
 }
 
 function track(word, name, p, why) {  // one labelled bar: Batch or Job, done of total, time left, finish in local time
@@ -623,7 +691,7 @@ function renderRecent() {
     el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
     el('td', {}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
     el('td', {title: r.step || ''}, kindWords(r.kind), r.step ? el('div', {class: 'muted'}, r.step) : ''),
-    el('td', {class: 'ink2'}, r.copy && r.copy !== r.model ? 'copy ' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : 'copy 1'),
+    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'on ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? 'copy ' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : 'copy 1'),
     el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
     el('td', {class: 'num'}, (+r.waited || 0) >= 0.1 ? (+r.waited).toFixed(1) : '–'),
     el('td', {class: 'num'}, full(r.out_tokens)),
@@ -687,7 +755,7 @@ $('theme').addEventListener('click', () => {
 try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
 paintIcon();
 try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
-let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { renderCharts(); if (S) { renderUsers(); renderClaude(); } renderRecent(); }, 150); });
+let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { renderCharts(); if (S) { renderUsers(); renderClaude(); fitModels(); } renderRecent(); }, 150); });
 
 tickNow(); tickHistory(); tickRecent();
 setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000);

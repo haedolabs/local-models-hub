@@ -19,6 +19,15 @@
   localmodels name private <project> | public <project> private: screens show only the names set for it
   localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
+  localmodels peer               this Mac's peers (other Macs whose hubs take this door's requests when its slots are full)
+                                 and the link to each; and this Mac as a peer, when it serves as one
+  localmodels peer add <name> <address>   a peer: its Thunderbolt Bridge address (port 1235 unless given)
+  localmodels peer remove <name>
+  localmodels peer serve <address> | off  this Mac as a peer: its door also listens on that address (its Thunderbolt
+                                 Bridge's), for requests with the shared token
+  localmodels peer token         make the shared token if there is none, and say how to copy it to the other Mac
+  localmodels peer test [name]   the door looks at its peers now, and this terminal looks too (to tell macOS blocking the
+                                 door from a link that is down)
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
                                  (--no-think: no thinking: several times faster, for lookups and extraction)
   localmodels batch <jobs.json> [--dir FOLDER] [--parallel N]
@@ -52,7 +61,7 @@ SIGNPOST_FILE = os.path.expanduser('~/.claude/CLAUDE.md')
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {HOME}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never straight to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_door.py', 'test_agent.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_door.py', 'test_agent.py', 'test_peers.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -108,6 +117,7 @@ def status():
     print(f"LM Studio: server {lm['server']} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (the last listing failed: this is the one before)'))
     if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (the last good settings stand)')
+    for line in peer_lines(d['up']): print(line)
     try:
         v = recycle.view(lm['models'])
         if v['copies']:
@@ -183,6 +193,142 @@ def crashes_cmd(days=7, scan=False):
     down = crashes.down()
     print('down now: ' + '; '.join(d['words'] for d in down) if down else 'down now: nothing (every model that crashed is loaded again, or was let go)')
     return 0
+
+
+# ---------------------------------------------------------------- peers: other Macs' hubs
+def door_link(force=False, timeout=8):
+    """The door's look at its peers, and this Mac as a peer (GET /hub/link; force: POST, the door looks now), or None
+    when the door does not answer it (closed, or running code from before peers)."""
+    try:
+        req = urllib.request.Request(llmshare.HUB + '/hub/link', data=b'{}' if force else None, headers={'Content-Type': 'application/json'})
+        d = json.load(urllib.request.urlopen(req, timeout=timeout))
+        return d if isinstance(d, dict) and 'peers' in d else None
+    except (OSError, ValueError): return None
+
+
+def peer_lines(door_up=True):
+    """The status's lines about peers: one a peer, one when this Mac serves as one ([] when neither)."""
+    from . import peers
+    out, seen = [], set()
+    for p in peers.view():
+        seen.add(p['name']); out.append('  peer ' + p['words'])
+    for name in peers.configured():
+        if name not in seen: out.append(f"  peer {name}: the door has not looked at it yet" + ('' if door_up else ' (the door is closed)'))
+    for w in peers.problems(): out.append(f'  PEER SETTINGS: {w}')
+    if peers.serving():
+        d = door_link() if door_up else None
+        out.append('  this Mac serves as a peer: ' + ((d or {}).get('listening') or ('the door is closed' if not door_up else
+                                                                                   'not listening yet (the door runs older code until localmodels install?)')))
+    return out
+
+
+def edit_settings(change):
+    """Change this Mac's settings file (models.json) in place; the door rereads it as it changes. -> words or None."""
+    src = llmshare.MODELS if os.path.exists(llmshare.MODELS) else llmshare.MODELS_DEFAULT
+    try: d = json.load(open(src))
+    except (OSError, ValueError) as e: return f'could not read {src} ({type(e).__name__}: {e}): fix it first'
+    change(d)
+    os.makedirs(os.path.dirname(llmshare.MODELS), exist_ok=True)
+    tmp = llmshare.MODELS + '.tmp'
+    with open(tmp, 'w') as f: json.dump(d, f, indent=1); f.write('\n')
+    os.replace(tmp, llmshare.MODELS)
+    return None
+
+
+def token_copy(peer_ssh='<user>@<the other Mac>'):
+    """The command that copies this Mac's token to another Mac over SSH (the token never shows on a screen)."""
+    from . import peers
+    rel = os.path.relpath(peers.TOKEN_FILE, os.path.expanduser('~'))
+    return f"""ssh {peer_ssh} 'mkdir -p "{os.path.dirname(rel)}" && umask 077 && cat > "{rel}" && chmod 600 "{rel}"' < "{peers.TOKEN_FILE}\""""
+
+
+def token_words():
+    from . import peers
+    made = peers.make_token()
+    return (f"the token is {'made' if made else 'in'} {peers.TOKEN_FILE} (mode 0600; the same file must be on every Mac of the set, "
+            'and it never goes on a screen or in the settings)')
+
+
+def peer_cmd(a):
+    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name]]."""
+    from . import peers
+    w = [x for x in a if x != 'peer']
+    verb = w[0] if w else ''
+    if not verb:
+        print(f'this Mac shows as {peers.me()} to its peers ("name" in the settings changes it)')
+        lines = peer_lines(llmshare.hub_up(fresh=True))
+        if not lines: print('no peers, and this Mac does not serve as one: localmodels peer add <name> <address> (GUIDE.md, Peers)')
+        for line in lines: print(line)
+        if (peers.configured() or peers.serving()) and peers.token_problem(): print(f'  TOKEN: {peers.token_problem()}')
+        return 0
+    if verb == 'add' and len(w) == 3:
+        name, u = w[1], peers.parse_url(w[2])
+        if not peers.NAME.match(name): print(f'{name!r}: a peer name is one plain word (letters, digits, . _ -)'); return 2
+        if not u: print(f'{w[2]!r} is not an address (192.168.213.2, or http://192.168.213.2:1235)'); return 2
+        err = edit_settings(lambda s: s.setdefault('peers', {}).__setitem__(name, dict(url=u[0])))
+        if err: print(err); return 1
+        print(f'{name} is a peer of this door: {u[0]} (in {llmshare.MODELS}; the door looks at it within seconds)')
+        if peers.address_words(u[1]): print(f'  note: {peers.address_words(u[1])}')
+        print('  ' + token_words())
+        print(f'next (GUIDE.md, Peers, has every step and which need a person):')
+        print(f'  1. copy the token to {name}: {token_copy(f"<user>@{u[1]}")}')
+        print(f'  2. on {name}: localmodels peer serve {u[1]}')
+        print('  3. here: localmodels peer test')
+        return 0
+    if verb == 'remove' and len(w) == 2:
+        if w[1] not in peers.configured(): print(f'{w[1]} is not a peer of this door'); return 2
+        err = edit_settings(lambda s: (s.get('peers') or {}).pop(w[1], None) if isinstance(s.get('peers'), dict) else None)
+        if err: print(err); return 1
+        print(f'{w[1]} is no longer a peer: nothing new is sent there (requests on it now finish)'); return 0
+    if verb == 'serve' and len(w) == 2:
+        if w[1] == 'off':
+            err = edit_settings(lambda s: s.pop('serve', None))
+            if err: print(err); return 1
+            print('this Mac no longer serves as a peer: the door stops listening beyond this Mac within 5 s'); return 0
+        addr = w[1].strip('[]')
+        try: peers.ipaddress.ip_address(addr.split('%')[0])
+        except ValueError: print(f'{addr!r} is not an address of this Mac (its Thunderbolt Bridge\'s, e.g. 192.168.213.2)'); return 2
+        err = edit_settings(lambda s: s.__setitem__('serve', dict(address=addr)))
+        if err: print(err); return 1
+        iface = peers.interface_of(addr)
+        port = peers.ports().get(iface) if iface else None
+        print(f'this Mac serves as a peer on {addr}:{llmshare.HUB_PORT}' + (f' ({port or iface})' if iface else ''))
+        if not iface: print('  note: no interface of this Mac holds that address yet: the door listens once one does (GUIDE.md, Peers: the fixed address)')
+        elif not peers.bridge(iface, {iface: port} if port else {}) and not peers.loopback(addr): print(f'  note: {iface} is not the Thunderbolt Bridge')
+        if peers.address_words(addr): print(f'  note: {peers.address_words(addr)}')
+        print('  ' + token_words())
+        print('  the door listens there within 5 s, only for requests with the token; `localmodels peer` says whether it does')
+        return 0
+    if verb == 'token' and len(w) == 1:
+        print(token_words())
+        print(f'copy it to another Mac: {token_copy()}')
+        return 0
+    if verb == 'test' and len(w) <= 2:
+        d = door_link(force=True)
+        if d is None: print("the door does not answer /hub/link: it is closed (localmodels start), or runs older code (localmodels install)"); return 1
+        ps = [p for p in d['peers'] if len(w) == 1 or p['name'] == w[1]]
+        if not ps: print('no such peer' if len(w) == 2 else 'no peers: localmodels peer add <name> <address>'); return 2
+        bad = 0
+        for p in ps:
+            print('the door: ' + p['words'])
+            tok, here = peers.token(), None
+            try:
+                req = urllib.request.Request(p['url'] + '/hub/health', headers={'X-Hub-Token': tok or ''})
+                peers._open(req, timeout=peers.CONNECT).read(); here = 'reached it, and it took the token'
+            except urllib.error.HTTPError as e: here = f"reached it, but it answered {e.code}" + (' (the token)' if e.code in (401, 403) else '')
+            except OSError as e: here = peers.reach_words(e)
+            print(f'  this terminal: {here}')
+            if p['state'] == 'down' and here.startswith('reached'):
+                print("  this terminal reaches it and the door does not: macOS's Local Network permission is blocking the door. "
+                      'System Settings → Privacy & Security → Local Network: turn on python3, then: localmodels peer test')
+            iface, port = peers.route_of(p['host'])
+            print(f"  the route: {port or iface or 'none'}" + (f' ({iface})' if iface and port and iface not in port else '')
+                  + (f" · {peers.route_words(iface, {iface: port} if port else {})}" if peers.route_words(iface, {iface: port} if port else {}) else ''))
+            bad += p['state'] != 'up'
+        if d.get('serving'): print(f"this Mac serves as a peer: {d.get('listening') or 'not listening yet'}")
+        return 1 if bad else 0
+    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name]]')
+    return 2
 
 
 def recycle_cmd(a):
@@ -671,6 +817,13 @@ def check():
         want = llmshare.copy_ids(base, f.get('copies', 1))
         have = [c for c in want if c in ids]
         t(f'{base} has its copies', len(have) == len(want), f'{len(have)} of {len(want)} loaded, {llmshare.at_once(base)} answers at once')
+    from . import peers
+    for p in peers.view():
+        t(f"the peer {p['name']} answers over the link", p['state'] == 'up', p['words'])
+    if peers.serving():
+        dl = door_link()
+        t('the door listens for its peers', bool(dl and (dl.get('listening') or '').startswith('listening')),
+          (dl or {}).get('listening') or 'the door does not say (it runs older code until localmodels install)')
     for name, good, note in run_tests():
         t(f'{name[5:-3]}: the sandbox tests pass', good, note)
     down = crashes.down()
@@ -872,6 +1025,7 @@ def main(argv):
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
     if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)
+    if verb in ('peer', 'peers'): return peer_cmd(a)
     if verb == 'notice':
         from . import maint; return maint.notice_main()
     if verb == 'crashes':
