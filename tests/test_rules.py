@@ -290,6 +290,64 @@ def test_first_settings():
     t('every first settings file reads back as JSON', all(json.loads(json.dumps(models.first_settings(h, m))) for h, m in ((have, 128), (None, 8))))
 
 
+def test_runs():
+    print("runs: a whole run's progress and time left, from what the program says and the speed measured on this Mac")
+    from localmodels import runs
+    now = 1_000_000.0
+
+    def rec(at, seconds=60, status=200, project='proj', **kw):
+        return dict(at=at, seconds=seconds, status=status, project=project, kind='batch', **kw)
+    t('the step words "extract files 8 of 360" read as a phase, its item and its size', runs.parse_step('extract files 8 of 360') == ('extract files', 8, 360)
+      and runs.parse_step('reading chapter 3') is None and runs.parse_step(None) is None)
+    t('the run headers read whole, and nonsense is dropped', runs.from_headers({'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '17'}) == dict(run='report', run_total=420, run_done=17)
+      and runs.from_headers({'X-Run': 'report', 'X-Run-Total': 'lots', 'X-Run-Done': '-3'}) == dict(run='report') and runs.from_headers({}) == {})
+
+    # a run that says its size: 100 units, 1 unit finished every 30 s for the last 20 minutes (40 done)
+    rows = [rec(now - 1200 + 30 * k + 30, run='report', run_total=100, run_done=k, step=f'extract {k + 1} of 100') for k in range(40)]
+    g = runs.progress(rows, now=now)
+    r = g.get(('proj', 'report'), {})
+    t('a run with headers: done and total as the program said, the percent', (r.get('done'), r.get('total'), r.get('pct')) == (39, 100, 39), r)
+    t('its time left comes from the speed measured in this run: 61 units at 30 s each, about 30 min', r.get('left') and 1650 <= r['left'] <= 2000, r.get('left'))
+    t("it starts when the run's first request began, not when the model was loaded", abs(r.get('started', 0) - (now - 1200 + 30 - 60)) < 1, r.get('started'))
+    t('the phase it is in now comes from the step', r.get('phase') == 'extract', r.get('phase'))
+
+    # twice as fast lately: the estimate follows the recent speed, not the run's average
+    fast = [rec(now - 3600 + 60 * k + 60, run='r2', run_total=200, run_done=k) for k in range(40)] + \
+           [rec(now - 1200 + 15 * k + 15, run='r2', run_total=200, run_done=40 + k) for k in range(80)]
+    r = runs.progress(fast, now=now)[('proj', 'r2')]
+    t('after a speed-up the estimate follows the recent speed (81 left at ~15 s, about 20 min, not 40)', 1000 <= r['left'] <= 1500, r['left'])
+
+    # the same run name came earlier today and took 10 s a unit; a new run has just begun
+    before = [rec(now - 7200 + 10 * k + 10, run='nightly', run_total=50, run_done=k) for k in range(50)]
+    hist = runs.history(before)
+    begun = [rec(now - 5, seconds=5, run='nightly', run_total=60, run_done=0)]
+    r = runs.progress(before + begun, now=now, history=hist)[('proj', 'nightly')]
+    t("a new run of the same name: a fresh start, not the old one's count", (r.get('done'), r.get('total')) == (0, 60), r)
+    t('before its first unit is done, the estimate comes from the last run of that name on this Mac (60 x 10 s)', r.get('left') and 500 <= r['left'] <= 700 and r.get('basis') == 'the last run', r)
+    r = runs.progress(begun, now=now, history={})[('proj', 'nightly')]
+    t('no earlier run and nothing done yet: no made-up number, it says it is estimating', r.get('left') is None and r.get('basis') == 'estimating after the first one', r)
+
+    # the same work on a slower Mac: the estimate is that Mac's own, nothing assumed
+    slow = [rec(now - 1200 + 120 * k + 120, run='report', run_total=100, run_done=k) for k in range(10)]
+    r = runs.progress(slow, now=now)[('proj', 'report')]
+    t('a Mac four times slower gets an estimate four times longer, from its own measurements', r['left'] >= 4 * 1650, r['left'])
+
+    # no headers: a step that says "N of M" still gives the phase's progress (8 at once, items finishing out of order)
+    ph = []
+    for k in range(24):
+        n = k + 1
+        ph.append(rec(now - 600 + 25 * k, seconds=200, step=f'extract files {n} of 360'))
+    ph.append(rec(now - 30, seconds=30, status=503, step='extract files 25 of 360'))
+    r = runs.progress(ph, now=now).get(('proj', 'extract files'), {})
+    t('a phase from the step words alone: items answered count as done, a failed one does not', (r.get('done'), r.get('total'), r.get('kind')) == (24, 360, 'phase'), r)
+    t('and it too gets a time left, from its own pace', r.get('left') and r['left'] > 0, r.get('left'))
+    inf = [dict(project='proj', since=now - 3, run='report', run_total=100, run_done=41, step='extract 42 of 100')]
+    r = runs.progress(rows, inflight=inf, now=now)[('proj', 'report')]
+    t('a request still in flight moves the count on at once', r['done'] == 41, r['done'])
+    old = [rec(now - 5 * 3600, run='gone', run_total=10, run_done=3)]
+    t('a run nobody has touched for an hour is not shown as running', ('proj', 'gone') not in runs.progress(old, now=now))
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -302,6 +360,7 @@ def main():
         test_settings(box)
         test_install_dry(box)
         test_first_settings()
+        test_runs()
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1

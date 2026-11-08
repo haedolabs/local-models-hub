@@ -16,7 +16,7 @@ THE MAC        the programs using the most processor and memory; the bar: time, 
 """
 import glob, hashlib, json, os, re, shutil, subprocess, sys, time, urllib.request
 
-from . import HOME, llmshare, sessions, whois
+from . import HOME, llmshare, runs, sessions, whois
 
 COLOR = sys.stdout.isatty() and '--no-color' not in sys.argv
 C = dict(r='31', g='32', y='33', b='34', m='35', c='36', w='37', B='1', d='2', R='7')
@@ -147,6 +147,27 @@ def batch(log_dir):
                 pct=int(100 * len(done) / total) if total else None, now=sorted(now, key=lambda x: x['since']))
 
 
+def live_runs():
+    """The runs going on now (runs.py): from the last 3 hours of requests and those in flight, with each run name's last
+    pace on this Mac (the last 7 days, reread every 10 minutes) for an estimate before the first unit is done."""
+    rows = every('runrows', 5, lambda: llmshare.requests_log(3))
+    hist = every('runhist', 600, lambda: runs.history(llmshare.requests_log(24 * 7)))
+    return runs.progress(rows, llmshare.inflight(), history=hist)
+
+
+def attach_runs(out):
+    """Give each program its run: the one it named (X-Run) before a phase read from its step words, the latest first.
+    The row's 'since' becomes when that run began, not when the program first used a model."""
+    live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
+    for r in out:
+        if r.get('batch'): continue
+        mine = [g for g in live if g['project'] == r['project']]
+        if not mine: continue
+        g = mine[0]
+        r['batch'] = dict(g, now=[])
+        r['since'] = g['started']
+
+
 def users():
     """Every program using a local model now, one row per program: [{pid, project, app, session, title, kind, models,
     since, answering, waiting, direct, via, step, batch}], busiest first."""
@@ -198,6 +219,7 @@ def users():
             out.append(dict(pid=0, project="LM Studio's own chat", app='LM Studio', kind='chat', models=busy, since=_cache['own'][0],
                             answering=1, waiting=0, direct=0, via=None, step=None, batch=None, title=None, session=None, lease=False))
     else: _cache.pop('own', None)
+    attach_runs(out)
     return sorted(out, key=lambda r: (-(r['answering'] + r['direct'] + r['waiting'] > 0), r['since']))
 
 
@@ -323,7 +345,7 @@ def _left(sec):
 def prog(pct, left, since):
     if pct is None: return k(f'{ago(since)} so far', 'd')
     fill = pct // 17
-    return k('█' * fill, 'c') + k('░' * (6 - fill), 'd') + f' {pct:>2}%' + (f' ~{_left(left)}' if left else ' starting' if pct == 0 else ' finishing')
+    return k('█' * fill, 'c') + k('░' * (6 - fill), 'd') + f' {pct:>2}%' + (f' ~{_left(left)}' if left else ' estimating' if pct < 100 else ' finishing')
 
 
 def show(s, w=80, h=24):
@@ -357,7 +379,10 @@ def show(s, w=80, h=24):
             state = k(f"{r['answering']} answering", 'y', 'B') + (k(f" · {r['waiting']} waiting", 'y') if r['waiting'] else '')
         elif r['direct']: state = k(f"{r['direct']} connected", 'y')
         else: state = k('between requests', 'd')
-        if b.get('total'): state = prog(b.get('pct'), b.get('left'), r['since']) + ' ' + f"{b['done']}/{b['total']}"
+        if b.get('total'):
+            state = prog(b.get('pct'), b.get('left'), r['since']) + ' ' + f"{b['done']}/{b['total']}"
+            label = b.get('phase') or (b.get('name') if b.get('kind') == 'phase' else None)
+            if label: state += k(f" · {label[:24]}", 'd')
         who = k('← Claude', 'm', 'B') + (f" · {r['title']}" if r.get('title') else '') if (r.get('session') or r.get('host_session')) else \
             k(f"← {r['app']}", 'd') if r.get('app') else ''
         flag = k(' ⚠ straight to LM Studio', 'r') if r['direct'] and r.get('via') != 'hub' else ''

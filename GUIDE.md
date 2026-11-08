@@ -29,6 +29,17 @@
 - To name it yourself: header `X-Project: <name>`, or put it in the path (`http://localhost:1235/p/<name>/v1`, for apps that only let you set a URL).
 - To say what kind of run it is: header `X-Kind:` `batch`, `chat` (a person is waiting), `ask`, `eval`, `test` or `other`. The dash shows it, and `chat` and `ask` go first when slots are scarce.
 - To say what a request is for: header `X-Step: reading chapter 3` (a few words). The dash shows it next to the request; the local agents send it themselves.
+
+## A batch's progress and time left
+- **A program that runs a batch says so with three headers on each request**, from any language, no library needed. The dash then shows a progress bar and the time left, and `localmodels` says it in a line:
+  - `X-Run: nightly-extract`: a name for the whole run, the same on every request of it.
+  - `X-Run-Total: 420`: the units of work in the whole run, every phase together. It may rise as the program learns more (a phase whose size is known only when the one before ends).
+  - `X-Run-Done: 17`: the units finished so far, as the program counts them.
+- The program counts because only it knows what a unit is: an item may take several requests, a retry, or an agent's back-and-forth. Keep `X-Step` for the phase it is in (`extract files 8 of 360`); the dash shows both.
+- **Without the headers**, a step that reads `<phase> N of M` still shows that phase's progress: items whose request was answered count as done.
+- **The time left is measured on this Mac, never assumed:** the pace of the last 15 minutes or the last 20 units, whichever reaches further back, so it follows a run that speeds up or slows down. Before 3 units are done it uses the last run of the same name; the first time a name runs, it says it is estimating until the pace shows. Keep a run's name the same from one run to the next so the estimate starts right.
+- A pause of 20 minutes between requests starts a new run of the same name. A run with no request for 15 minutes is no longer shown.
+- The hub logs the run's name and the two numbers with each request, nothing else about it.
 - `X-Session` is a free tag for the request log (the measurement tools use it to tell runs apart).
 
 ## Long runs: a lease

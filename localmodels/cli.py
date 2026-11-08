@@ -48,6 +48,11 @@ TESTS = ('test_crashes.py', 'test_rules.py', 'test_door.py', 'test_agent.py')
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
 
 
+def ago_left(s):
+    """Seconds ahead in plain words: 40 s, 12 min, 2.5 h."""
+    return f'{int(s)} s' if s < 90 else f'{round(s / 60)} min' if s < 5400 else f'{s / 3600:.1f} h'
+
+
 def num(a, name, default):
     """An option's number, or the default; a word that is not a number is said, not a traceback."""
     if name not in a: return default
@@ -84,8 +89,8 @@ def status():
         state = (f"{r['answering']} answering" + (f", {r['waiting']} waiting" if r['waiting'] else '')) if r['answering'] or r['waiting'] else \
             f"{r['direct']} connected straight to LM Studio (not through the hub)" if r['direct'] else 'between requests'
         who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
-        print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · since {ago(r['since'])}"
-              + (f" · {b['done']} of {b['total']} done" if b.get('total') else '') + (f" · {r['step']}" if r.get('step') and not b.get('total') else '') + who)
+        print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or {}).get('started') else 'since'} {ago(r['since'])}"
+              + (f" · {b.get('name') + ': ' if b.get('name') else ''}{b['done']} of {b['total']} done" + (f", about {ago_left(b['left'])} left" if b.get('left') else ', estimating the time left' if b.get('done', 0) < b['total'] else '') if b.get('total') else '') + (f" · {r['step']}" if r.get('step') and not b.get('total') else '') + who)
     work = [c for c in cs if c['working']]
     print(f"Claude Code: {len(work)} working" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
           + f", {len(cs) - len(work)} idle in the last 3 hours")
