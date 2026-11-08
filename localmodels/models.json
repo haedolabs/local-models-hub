@@ -10,7 +10,7 @@
     "soft": 560000,
     "before_batch": 0.5
    },
-   "why": "Two copies of 4 answer more in all than one copy of 8 on this hardware; the recycle band comes from measured engine crashes at 931,000 to 1,175,000 tokens processed per copy (GUIDE.md)."
+   "why": "Two replicas of 4 slots give more aggregate throughput than one instance of 8 on this hardware; the recycle thresholds come from measured engine crashes at 931,000 to 1,175,000 tokens processed per instance (GUIDE.md)."
   }
  },
  "batch_at_once": 8,

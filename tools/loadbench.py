@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""loadbench - the loaded model under a document-extraction load, through the door: long prompts, long strict-JSON answers,
-thinking on and off, in both layouts (two copies with 8 at once; one copy with 4 at once).
+"""loadbench - the loaded model under a document-extraction load, through the gateway: long prompts, long strict-JSON answers,
+thinking on and off, in both layouts (two replicas, 8 slots; one instance, 4 slots).
 
   python3 tools/loadbench.py [--n 16] [--max-tokens 10000] [--family qwen/qwen3.6-35b-a3b] [--cells all|two|one]
                              [--smoke] [--anyway]
   python3 tools/loadbench.py --url http://localhost:2234 --model <id> [--at-once 4] [--n 16] [--think both|on|off] [--label name]
-                             one LM Studio straight, not through the door: another Mac's, through an SSH tunnel
+                             one LM Studio directly, bypassing the gateway: another Mac's, through an SSH tunnel
 
 Each request: a system prompt naming 40 quantities to extract, a made-up memo of about 9,000 characters with some 55 of
 them planted (dates and amounts; the generator knows the answers), and a strict JSON schema for the list of items; up to
---max-tokens tokens of answer; the model card's sampling. Four cells, --n requests each: {two copies, 8 at once; one copy,
-4 at once} x {thinking on; thinking off}. The one-copy cell pins every request to the second copy (<family>:2), so nothing
-is unloaded and the first copy idles, which is the same for throughput. Per cell it prints: wall time, completion and
+--max-tokens tokens of answer; the model card's sampling. Four cells, --n requests each: {two replicas, 8 concurrent; one instance,
+4 concurrent} x {thinking on; thinking off}. The one-instance cell pins every request to the second replica (<family>:2), so
+nothing is unloaded and the first replica idles, which is the same for throughput. Per cell it prints: wall time, completion and
 prompt tokens a second in all, seconds a request (median, p90), empty answers, recall of the planted items, invented
-values. It holds a 'test' lease so no swap pulls the copies out from under it, and refuses to start while a batch is using
+values. It holds a 'test' lease so no swap unloads the replicas mid-run, and refuses to start while a batch is using
 the models (--anyway: start regardless). --smoke: two short requests in one cell, to check the tool itself. Report:
 ~/Library/Logs/LocalModels/loadbench-<time>.json. Run it when the model or the engine changes; GUIDE.md keeps what it found.
---url measures one LM Studio straight (another Mac's, say, through `ssh -L 2234:127.0.0.1:1234 <that Mac>`): the same
+--url measures one LM Studio directly (another Mac's, say, through `ssh -L 2234:127.0.0.1:1234 <that Mac>`): the same
 requests and scoring, two cells (one instance, --at-once requests at a time, thinking on and off), no lease and no hub,
-so the numbers compare with the one-copy cells of a run through the door.
+so the numbers compare with the one-instance cells of a run through the gateway.
 """
 import argparse, concurrent.futures as cf, json, os, random, re, statistics, sys, threading, time, urllib.error, urllib.request
 
@@ -103,7 +103,7 @@ def score(items, planted, text):
     return found, invented
 
 
-# ---------------------------------------------------------------- one request, through the door (or --url, straight)
+# ---------------------------------------------------------------- one request, through the gateway (or --url, direct)
 BASE = {'url': llmshare.HUB}
 
 
@@ -171,7 +171,7 @@ def main():
     ap.add_argument('--think', default='both', choices=['both', 'on', 'off'], help='with --url: which thinking cells to run')
     a = ap.parse_args()
     if a.url: return straight(a)
-    if not llmshare.hub_up(fresh=True): sys.exit("the hub's door is closed: localmodels start")
+    if not llmshare.hub_up(fresh=True): sys.exit("gateway down: localmodels start")
     busy = [d for d in llmshare.leases() if d.get('kind') == 'batch']
     if busy and not a.anyway:
         print('a batch is using the models (' + ', '.join(sorted({d.get('project') or '?' for d in busy})) + '): try later, or --anyway'); return 3

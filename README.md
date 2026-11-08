@@ -19,11 +19,11 @@ Standard-library Python 3.9+, no third-party dependencies. macOS on Apple silico
 - **Power.** `caffeinate -i` while any request is in flight, released 10 minutes after the last.
 - **Request log.** One JSONL record per request: project, session, kind, model, instance, endpoint, status, latency, queue wait, token counts, step and run. Never a prompt or a completion.
 
-### Instance manager (the keeper)
+### Instance manager
 Runs in the gateway process every 20 s, and within seconds of a failed request.
-- **Replica count.** Whenever a family's first instance is loaded, the keeper loads the missing instances with the family's context length and parallelism (memory permitting, with `headroom_gb` kept free). It never loads a family from nothing and never unloads for idleness.
+- **Replica count.** Whenever a family's first instance is loaded, the instance manager loads the missing instances with the family's context length and parallelism (memory permitting, with `headroom_gb` kept free). It never loads a family from nothing and never unloads for idleness.
 - **Crash recovery.** It tails LM Studio's server logs (`~/.lmstudio/server-logs`) for engine failures and confirms them against `lms ps` and the REST model listing (two reads 20 s apart). The crashed instances are reloaded with their original settings, at most 3 times per instance per hour; after that the family is left down for a person to reload (`localmodels use <model>`), and is retried hourly. Each crash is recorded with the tokens the instance had processed since load.
-- **Pre-emptive recycling.** The measured Metal resource-limit crashes occurred after 931k to 1.18M tokens processed by one instance. Before a configurable band (default: a soft threshold at 560k, where it reloads when idle, and a hard one at 800k, where it drains), each instance is drained (no new requests routed to it, in-flight ones finish), unloaded and reloaded with the family's settings, one instance at a time, so the family stays available throughout: the worker-recycling pattern (compare gunicorn's `max_requests`). A batch can request fresh instances at start (`POST /hub/recycle`; instances past `before_batch` of their band go first). An instance loaded with other settings than its family's (from LM Studio's window or a just-in-time load) is recycled the same way.
+- **Pre-emptive recycling.** The measured Metal resource-limit crashes occurred after 931k to 1.18M tokens processed by one instance. Before configurable thresholds (default: a soft threshold at 560k, where it reloads when idle, and a hard one at 800k, where it drains), each instance is drained (no new requests routed to it, in-flight ones finish), unloaded and reloaded with the family's settings, one instance at a time, so the family stays available throughout: the worker-recycling pattern (compare gunicorn's `max_requests`). A batch can request fresh instances at start (`POST /hub/recycle`; instances past `before_batch` of their threshold go first). An instance loaded with other settings than its family's (from LM Studio's window or a just-in-time load) is recycled the same way.
 
 ### Local agents
 - **`ask` and `batch`:** a tool-calling loop on the loaded model, with read-only file tools (`read`, `list`, `grep`) confined to a project root by realpath checks. Answers are structured output: strict `response_format: json_schema` first, falling back to plain JSON, validated against the job's schema. Thinking is disabled for the schema step. Failures from the model being down (`503`, a refused connection) are retried for up to an hour, and an empty structured answer is retried once.
@@ -36,7 +36,7 @@ A client declares a run with three request headers (`X-Run`, `X-Run-Total`, `X-R
 Every host runs its own hub; the one the clients use (the front) lists peer gateways in `peers`, and a host that serves replicas sets the address of its link listener in `serve`. Over a Thunderbolt Bridge link with fixed addresses:
 - **Replicas across Macs.** The front polls each peer's `GET /hub/peer` every 2 s (families loaded, slots, busy, how many of those are this front's, fingerprints, maintenance, the instance manager's warnings). A peer's instances of a family count as one more replica, with capacity `slots − (busy − this front's)`, in the same priority queue, never with more in flight on a peer than that capacity; `at_once` includes it. Batch requests fill each Mac's first instance before a second instance on any one Mac (local first instance, peers' first instances, local second instance, the peers' rest); `chat` and `ask` take local instances first. Measured on the extraction load of `tools/loadbench.py`: one M5 Max instance ×4 156.4 tokens/s, two ×8 192.6 (+23%), and a MacBook Pro M4 Pro peer ×4 73.3 on top (≈266, +38%), at the same accuracy (GUIDE.md, *Peers*).
 - **Model identity.** A family matches across Macs only when the family id, the loaded variant (`lms ps --json` `selectedVariant`), the size in bytes, the format and a digest of the model's definition (`~/.lmstudio/hub/models/<key>/model.yaml`, `manifest.json`) all match; `families.<id>.variant` pins the variant to accept when this Mac has no fingerprint of its own yet.
-- **Attribution.** `X-Project`, `X-Session`, `X-Kind`, `X-Step`, `X-Run`, `X-Run-Total` and `X-Run-Done` are forwarded, with `X-Hub-From`; the peer logs and leases under the front's project, and the front logs the request as copy `<family> on <peer>`, so no peer's tokens count against a local recycle band.
+- **Attribution.** `X-Project`, `X-Session`, `X-Kind`, `X-Step`, `X-Run`, `X-Run-Total` and `X-Run-Done` are forwarded, with `X-Hub-From`; the peer logs and leases under the front's project, and the front logs the request with `copy: "<family> on <peer>"`, so no peer's tokens count against a local recycle threshold.
 - **Failure.** A peer that refuses the connection, is in maintenance, rejects the token or has no slot within 5 s (`X-Timeout: 5` to the peer) answers before any byte reaches the client, and the request is requeued locally. Polling backs off from 2 s to 60 s on a peer that does not answer; a rejected token is not retried until the token or the settings change (or 5 min). Connections to peers use TCP keepalive (a dead link is detected in about 25 s).
 - **The link listener.** With `serve` set, the gateway also listens on that address, bound to its interface (`IP_BOUND_IF`), and accepts only requests with the shared token (`X-Hub-Token`, constant-time compare), no `Origin`, and only generation endpoints, the model listing, `/hub/peer` and `/hub/health`. It is reconciled with the settings every 5 s (no restart).
 - **Per host.** Maintenance, recycling, crash recovery and the instance manager stay local to each host. A request received over the link is served locally only. The instance manager recognises LM Studio's loading-guardrail refusal, does not retry until the guardrail setting or `iogpu.wired_limit_mb` changes, and does not recycle a single-instance family before it has loaded it on that Mac once; it reports a model larger than the GPU's wired limit, or one that fits only because the limit was raised by hand. `localmodels peer gpu-limit` writes the boot LaunchDaemon (`com.local-models.gpu-limit`, `sysctl iogpu.wired_limit_mb=<total − 8 GB>` at load) and prints the `sudo` lines that install it.
@@ -47,12 +47,12 @@ Every host runs its own hub; the one the clients use (the front) lists peer gate
 ### Maintenance windows
 `localmodels maintenance in 15m | at HH:MM | now | after-batches [for 30m] [reason]`.
 - **Announced:** every response carries `X-Hub-Maintenance` (phase, ISO 8601 start and end, reason), and `/hub/health`, the dashboard, the `status` tool and a Claude Code hook (`SessionStart` and `UserPromptSubmit`, about 50 ms, silent unless a window is set) all report it.
-- **Active:** new requests get `503` with `Retry-After` set to the window's end (`overloaded_error` on `/v1/messages`). In-flight requests complete, and queued ones are refused when dequeued. The keeper performs no loads, reloads, recycles or server starts.
+- **Active:** new requests get `503` with `Retry-After` set to the window's end (`overloaded_error` on `/v1/messages`). In-flight requests complete, and queued ones are refused when dequeued. The instance manager performs no loads, reloads, recycles or server starts.
 - **`off`:** the engine log written during the window is skipped, so restarts are not recorded as crashes, and the families loaded at the window's start are reloaded.
 
 ### Observability
 - **Dashboard** at `http://localhost:1235`: one page, no build step, fits one screen. It shows:
-  - per-instance slot occupancy by project, and tokens processed against the recycle band;
+  - per-instance slot occupancy by project, and tokens processed against the recycle threshold;
   - active clients with batch and job progress;
   - Claude Code sessions;
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory;
@@ -133,12 +133,12 @@ Then point clients at `http://localhost:1235/v1` (any API key), or `http://local
 | field | meaning |
 |---|---|
 | `families.<id>.key` | the model key `lms load` takes |
-| `copies` | instances kept loaded while the first is loaded |
+| `copies` | replica count: instances kept loaded while the first is loaded |
 | `context` | context length per instance, in tokens |
 | `parallel` | max concurrent predictions per instance (its slot count) |
 | `recycle.tokens` | hard threshold: tokens processed (prompt and completion) since load at which an instance is drained and reloaded |
 | `recycle.soft` | soft threshold: past it, an idle instance is reloaded |
-| `recycle.before_batch` | the fraction of the band past which an instance is recycled when a batch requests fresh instances |
+| `recycle.before_batch` | the fraction of the threshold past which an instance is recycled when a batch requests fresh instances |
 | `"recycle": false` | disables recycling for the family |
 | `families.<id>.variant` | optional: the variant (`<key>@<quantization>`) a peer's instances must have, when this Mac has not loaded the family itself |
 | `families.<id>.load_at_start` | dedicated peer: the instance manager loads the family at gateway start if no instance of it is loaded |
@@ -189,9 +189,9 @@ The file is re-read when its modification time changes. A file that fails to par
 |---|---|
 | `localmodels/gateway.py` | the gateway: attribution, admission, routing, proxying (streaming included), per-API completion and usage parsing, hold-and-retry across crashes, the request log, maintenance refusals |
 | `localmodels/llmshare.py` | shared state: slot locks, leases, the swap lock, the model listing (`lms ps` and REST), settings, readers of the logs |
-| `localmodels/models.py` | the keeper: replica counts, crash reloads, recycles, swaps, restoring after maintenance |
-| `localmodels/crashes.py` | LM Studio log tailing and crash classification; the keeper's state and crash record |
-| `localmodels/recycle.py` | recycle policy: tokens since load against the band, draining, fresh starts |
+| `localmodels/models.py` | the instance manager: replica counts, crash reloads, recycles, swaps, restoring after maintenance |
+| `localmodels/crashes.py` | LM Studio log tailing and crash classification; the instance manager's state and crash record |
+| `localmodels/recycle.py` | recycle policy: tokens since load against the recycle threshold, draining, fresh starts |
 | `localmodels/runs.py` | batch and job progress, throughput and ETA from the request log |
 | `localmodels/maint.py` | maintenance windows: state, header, notice |
 | `localmodels/peers.py` | peers: the shared token, the peer's report, the front's link (polling, backoff, capacity, model fingerprints), network checks (`ifconfig`, `route`, `networksetup`) |
@@ -222,9 +222,9 @@ Tested on macOS 26 (Apple silicon) with LM Studio 0.4 (`lms ps --json`) and Pyth
 
 ## Known limitations
 
-- **The recycle band rests on few data points:** three measured crashes and one instance that survived 1.35M tokens. `localmodels crashes` reports each instance's tokens at crash time, and hold-and-retry still covers a crash below the band.
+- **The recycle thresholds rest on few data points:** three measured crashes and one instance that survived 1.35M tokens. `localmodels crashes` reports each instance's tokens at crash time, and hold-and-retry still covers a crash below the threshold.
 - **Client-run batches depend on the client process.** A batch run by a project's own script lives only as long as that script; the hub shows that it stopped but cannot resume it. The hub's own `batch` runner cannot yet resume a killed batch either.
-- **`lms ps` takes tens of seconds under heavy load;** the keeper keeps the last valid listing rather than act on a partial one.
+- **`lms ps` takes tens of seconds under heavy load;** the instance manager keeps the last valid listing rather than act on a partial one.
 - **Attribution costs one shared `lsof` call per second;** at hundreds of requests a minute it is the first thing to cache harder.
 - **Peers:** this Mac's maintenance refuses requests even when a peer could serve them; the local agents (`ask`, `batch`) need the model loaded on this Mac; a peer's link has one shared token for the whole set of Macs; a LaunchAgent's connections to the local network need macOS's Local Network permission, which only a person can grant (`localmodels peer test` tells it from a link that is down).
 - **macOS only.** A Linux port would replace `whois.py`, the memory accounting and the LaunchAgent with `/proc` and a systemd unit.

@@ -156,7 +156,7 @@ def first_settings(listing, mem):
     default = json.load(open(llmshare.MODELS_DEFAULT))
     base = dict(batch_at_once=default.get('batch_at_once', 8), headroom_gb=8 if mem >= 48 else 4)
     if listing is None:
-        return dict(families={}, **base, why="LM Studio's lms command could not list the downloaded models: the keeper manages nothing until a family is added here")
+        return dict(families={}, **base, why="lms could not list the downloaded models: the instance manager manages no family until one is added here")
     llms = [m for m in listing if m.get('type') == 'llm' and m.get('modelKey') and m.get('sizeBytes')]
     room, need = mem * 0.75, lambda m: m['sizeBytes'] / 2**30 * 1.2
     for key, fam in default.get('families', {}).items():
@@ -172,8 +172,8 @@ def first_settings(listing, mem):
     fam = dict(key=m['modelKey'], copies=copies, context=min(int(m.get('maxContextLength') or 32768), 65536 if mem >= 64 else 32768),
                parallel=parallel, recycle=recycle_band,
                why=f'Fitted at install to {mem:.0f} GB and the models downloaded'
-                   + ('; one copy, since two do not fit.' if measured else '; the recycle band was measured on another model: '
-                      'read `localmodels crashes` after a few long runs and adjust it.'))
+                   + ('; 1 replica, since 2 do not fit in memory.' if measured else '; the recycle thresholds were measured on another model: '
+                      'read `localmodels crashes` after a few long runs and adjust them.'))
     return dict(families={m['modelKey']: fam}, batch_at_once=copies * parallel, headroom_gb=base['headroom_gb'])
 
 
@@ -222,12 +222,12 @@ def keep():
     conf = llmshare.settings()
     fams, room, did = conf.get('families') or {}, float(conf.get('headroom_gb', 8)), []
     try:
-        if maint.tick(llmshare.inflight(), llmshare.requests_log(0.1)): did.append('maintenance starts: the batches are quiet')
-    except Exception as e: did.append(f'the maintenance look stumbled: {type(e).__name__}: {e}')
+        if maint.tick(llmshare.inflight(), llmshare.requests_log(0.1)): did.append('maintenance begins: no batch requests in flight')
+    except Exception as e: did.append(f'maintenance check failed: {type(e).__name__}: {e}')
     if maint.on():                                           # the person is working on LM Studio: note what is loaded, do nothing
         rows = llmshare.loaded(fresh=True)
         if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
-        return did + ['maintenance: the keeper stands down (no loads, reloads, recycles or server starts)']
+        return did + ['maintenance: instance manager paused (no loads, reloads, recycles or server starts)']
     began = time.time()
     rows = llmshare.loaded(fresh=True)
     if not llmshare.read_ok():                              # the listing failed or is unsure: nothing to decide on, except
@@ -240,7 +240,7 @@ def keep():
             time.sleep(1); began = time.time(); rows = llmshare.loaded(fresh=True, force=True)
             if not llmshare.read_ok(): return did
             busy = llmshare.busy_slots(); back = crashes.watch(rows, listed_at=began, busy=busy)
-    except Exception as e: back = []; did.append(f'the crash watch stumbled: {type(e).__name__}: {e}')
+    except Exception as e: back = []; did.append(f'crash watcher failed: {type(e).__name__}: {e}')
     have = {r['id'] for r in rows}
     down = set((crashes._read(fresh=True).get('down') or {}))
     todo = []
@@ -259,7 +259,7 @@ def keep():
     try:
         w = recycle.give_up_if_stuck() or recycle.plan(rows, busy)
         if w: did.append(w)
-    except Exception as e: did.append(f'the recycle plan stumbled: {type(e).__name__}: {e}')
+    except Exception as e: did.append(f'recycle planner failed: {type(e).__name__}: {e}')
     job, ready = recycle.ready(rows, busy)
     if down: job, ready = None, False                        # a family down after a crash: its reload first, no recycle in the same pass
     if not todo and not back and not boot and not (job and ready): return did
@@ -274,7 +274,7 @@ def keep():
             if blocked: did.append(f'{c}: load skipped: {blocked}'); break
             first, free = ids[base], free_gb()
             if free < gb(first['size']) + room:
-                did.append(f"{c} waits for room: {free:.0f} GB free, a copy needs {gb(first['size']) + room:.0f} with headroom"); break
+                did.append(f"{c}: load deferred: {free:.0f} GB free, an instance needs {gb(first['size']) + room:.0f} GB incl. headroom"); break
             ok, out = load(f.get('key') or first['key'], c, f.get('context') or first['context'], f.get('parallel') or first['parallel'])
             did.append(f'{c} loaded' if ok else f'{c}: load failed: {refused(out) or out[-200:]}')
         if job and ready: did += _recycle(job, fams)
@@ -353,12 +353,12 @@ def end_maintenance():
     fams, did = llmshare.settings().get('families') or {}, []
     ensure_server('after maintenance')
     with llmshare.swapping(wait=120) as got:
-        if not got: return [f"maintenance is over, but a swap is under way: load {', '.join(todo)} by hand (localmodels use <model>)"]
+        if not got: return [f"maintenance ended during a model swap: load {', '.join(todo)} manually (localmodels use <model>)"]
         for b in todo:
             f = fams.get(b)
-            if not f: did.append(f'{b} was loaded before but is not in the settings: load it by hand (localmodels use {b})'); continue
+            if not f: did.append(f'{b} was loaded before maintenance but is not in settings: load it manually (localmodels use {b})'); continue
             ok, out = load(f.get('key') or b, b, f.get('context') or 32768, f.get('parallel') or 4)
-            did.append(f'{b} loaded again after maintenance' if ok else f'{b} could not be loaded again: {out[-200:]}')
+            did.append(f'{b} reloaded after maintenance' if ok else f'{b}: reload after maintenance failed: {out[-200:]}')
     llmshare.loaded(fresh=True)
     return did
 
@@ -372,8 +372,8 @@ def _again(job, room):
         if c in {r['id'] for r in llmshare.loaded(fresh=True)}: continue
         need, free = (gb(job['size']) + room if job['size'] else 0), free_gb()
         if free < need:
-            why = f'{free:.0f} GB free, a copy needs {need:.0f} with headroom'
-            crashes.waiting(base, why); did.append(f'{c} crashed and waits for room to load again: {why}'); return did
+            why = f'{free:.0f} GB free, an instance needs {need:.0f} GB incl. headroom'
+            crashes.waiting(base, why); did.append(f'{c} crashed; reload deferred: {why}'); return did
         if not tried: crashes.trying(base); tried = True
         ok, out = load(job['key'], c, job['context'] or 32768, job['parallel'] or 4)
         if not ok:
@@ -382,7 +382,7 @@ def _again(job, room):
     if not tried: return did                               # someone else loaded it meanwhile: the next look records it
     ensure_server()                                        # LM Studio may turn its server off when a model changes
     crashes.loaded(base, job['ids'], True, time.time() - t0)
-    did.append(f"{', '.join(job['ids'])} crashed and {'were' if len(job['ids']) > 1 else 'was'} loaded again ({time.time() - t0:.0f} s)")
+    did.append(f"{', '.join(job['ids'])} crashed; reloaded in {time.time() - t0:.0f} s")
     return did
 
 
@@ -430,4 +430,4 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         llmshare.loaded(fresh=True)
         crashes.swapped(ident)                                 # a person chose: no crashed model is waiting to come back
     n = len(want)
-    return 0, f"{ident} loaded" + (f" as {n} copies, {n * parallel} answers at once" if n > 1 else '')
+    return 0, f"{ident} loaded" + (f" as {n} replicas, {n * parallel} slots" if n > 1 else '')

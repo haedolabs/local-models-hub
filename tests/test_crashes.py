@@ -76,7 +76,7 @@ def run(box):
     t('recorded once per copy', crashes.scan(YEARS) == 2)
     t('a second scan adds nothing', crashes.scan(YEARS) == 0)
     h = crashes.history(YEARS)
-    t('one crash, both copies', len(h) == 1 and h[0]['which'] == 'both copies', h and h[0]['which'])
+    t('one crash, both copies', len(h) == 1 and h[0]['which'] == 'both replicas', h and h[0]['which'])
     t('back at 09:51:50, 12 requests failed', h and h[0]['back'] == at('09:51:50') and h[0]['failed'] == 12, h and crashes.words(h[0]))
 
     print('the keeper')
@@ -107,7 +107,7 @@ def run(box):
       and crashes.down_copies(B) == {B, C2})
     models._again(jobs[0], 8)
     t('both loaded again, and the hold ends', done == [(B, 65536, 4), (C2, 65536, 4)] and not crashes.reloading(B), done)
-    t('the record says the hub did it', crashes.history(1)[0]['then'].startswith('loaded again by the hub'), crashes.history(1)[0]['then'])
+    t('the record says the hub did it', crashes.history(1)[0]['then'].startswith('reloaded by the instance manager'), crashes.history(1)[0]['then'])
     crashes.watch([row(B), row(C2)])
 
     crash([B, C2], 200); jobs = crashes.watch([row(B), row(C2)], listed_at=time.time() - 60)
@@ -145,7 +145,7 @@ def run(box):
     crash([C2], 0); jobs = fresh([row(B)]); done.clear(); models._again(jobs[0], 8); crashes.watch([row(B), row(C2)])
     crash([C2], 0); jobs = fresh([row(B)])
     t('a fourth crash of the same copy within the hour: left down (copy 1 keeps answering: the door routes to it)',
-      jobs == [] and crashes._read(fresh=True)['down'][B]['state'] == 'left down' and 'one copy' in crashes._read(fresh=True)['down'][B]['why'], crashes._read(fresh=True)['down'].get(B, {}).get('why'))
+      jobs == [] and crashes._read(fresh=True)['down'][B]['state'] == 'left down' and 'one instance' in crashes._read(fresh=True)['down'][B]['why'], crashes._read(fresh=True)['down'].get(B, {}).get('why'))
     crashes.swapped(B); crashes.watch([row(B), row(C2)]); hour_passes()
 
     open(log, 'a').write(UNLOAD.replace('2026-11-06 00:27:57', stamp(700)).replace(f'model: {B}', f'model: {C2}').replace(f'[{B}]', f'[{C2}]'))
@@ -194,7 +194,7 @@ def run(box):
         th = threading.Thread(target=lambda: got.update(code=ask(), seconds=time.time() - t0)); th.start()
         time.sleep(2.5)
         marks = llmshare.inflight()
-        t('a request for a model loading again is held', marks and marks[0].get('state') == 'waiting: the model crashed and is loading again', marks)
+        t('a request for a model loading again is held', marks and marks[0].get('state') == 'held: reloading after a crash', marks)
         rows.append(dict(id=M, key=M, state='IDLE', size='1 GB', context=4096, parallel=2)); crashes.loaded(M, [M], True, 2.5)
         th.join(30); time.sleep(0.5)
         last = json.loads(open(llmshare.REQUESTS).read().strip().split('\n')[-1])

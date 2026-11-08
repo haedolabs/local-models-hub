@@ -119,10 +119,10 @@ def words(m, now=None):
     if not m: return ''
     now = now or time.time()
     why = f": {m['why']}" if m.get('why') else ''
-    if m['phase'] == 'waiting': return f"maintenance after the batches finish, for about {_stretch(m['minutes'])}{why}"
-    if m['phase'] == 'announced': return f"maintenance at {_clock(m['start'])} (in {_stretch(max(1, round((m['start'] - now) / 60)))}) for about {_stretch(m['minutes'])}{why}"
-    if now > m['end']: return f"down for maintenance since {_clock(m['start'])}, running over (expected back {_clock(m['end'])}){why}"
-    return f"down for maintenance until about {_clock(m['end'])}{why}"
+    if m['phase'] == 'waiting': return f"maintenance pending: starts once batch traffic drains, est. {_stretch(m['minutes'])}{why}"
+    if m['phase'] == 'announced': return f"maintenance scheduled at {_clock(m['start'])} (in {_stretch(max(1, round((m['start'] - now) / 60)))}), est. {_stretch(m['minutes'])}{why}"
+    if now > m['end']: return f"in maintenance since {_clock(m['start'])}, overrunning (scheduled end {_clock(m['end'])}){why}"
+    return f"in maintenance until ~{_clock(m['end'])}{why}"
 
 
 def header(m, now=None):
@@ -150,8 +150,8 @@ def notice(now=None):
     then = {'waiting': 'Do not start a new local-model batch; one running now may finish.',
             'announced': 'Finish or pause local-model work before it starts; do not start a batch that would run past it.',
             'on': 'Do not send requests to the local models until it is over.'}[m['phase']]
-    return (f"Local models on this Mac (the local-models hub): {words(m, now)}. {then} Requests during maintenance get 503 "
-            f"with Retry-After (the time to wait); a batch should sleep that long and carry on. `localmodels` shows the state.")
+    return (f"Local models on this Mac (local-models hub): {words(m, now)}. {then} Requests during maintenance get 503 "
+            f"with Retry-After (seconds); a batch should sleep that long and resume. `localmodels` shows the state.")
 
 
 def notice_main():
