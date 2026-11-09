@@ -293,6 +293,16 @@ def main():
         t('every name it calls or passes as a callback is defined in the page or by the browser', not missing, ', '.join(missing))
         t('the check catches the kind of slip it is for (a helper removed while still passed as a callback)',
           js_undefined('<script>function a(xs) { return xs.map(short).join(", "); }</script>') == ['short'])
+        print('the inventories kept by hand')
+        import glob
+        from localmodels import cli, mcp_server
+        suites = sorted(os.path.basename(f) for f in glob.glob(os.path.join(ROOT, 'tests', 'test_*.py')))
+        t('every suite in tests/ is one that check and publish run (cli.TESTS)', suites == sorted(cli.TESTS), (suites, cli.TESTS))
+        tools = [x['name'] for x in mcp_server.TOOLS]
+        lists = {f: open(os.path.join(ROOT, f)).read() for f in ('localmodels/mcp_server.py', 'README.md', '.claude-plugin/plugin.json', 'commands/setup.md')}
+        rows = {f: [l for l in text.split('\n') if 'job_status' in l and 'swap_check' in l and 'tools' in l.lower()] for f, text in lists.items()}
+        missing = {f: [n for n in tools if not ls or not all(re.search(rf'\b{n}\b', l) for l in ls)] for f, ls in rows.items()}
+        t('every MCP tool is named where the tools are listed (module docstring, README, plugin manifest, setup command)', not any(missing.values()), missing)
         print('the error record')
         test_record(box)
         test_mcp_stdout(box)

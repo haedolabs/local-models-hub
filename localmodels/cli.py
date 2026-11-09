@@ -1068,7 +1068,9 @@ def run_tests(quiet=False):
     out = []
     for name in TESTS:
         path = os.path.join(HOME, 'tests', name)
-        if not os.path.exists(path): continue
+        if not os.path.exists(path):                          # a listed suite that is gone fails the gate; a copy with no tests/ has none to run
+            if os.path.isdir(os.path.join(HOME, 'tests')): out.append((name, False, 'listed in cli.TESTS but missing from tests/'))
+            continue
         try: p = subprocess.run([PY, path], capture_output=True, text=True, timeout=300)
         except subprocess.SubprocessError as e: out.append((name, False, str(e))); continue
         fails = [l.strip()[5:] for l in p.stdout.split('\n') if l.strip().startswith('FAIL')]
