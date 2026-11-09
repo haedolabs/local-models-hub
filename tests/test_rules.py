@@ -20,8 +20,9 @@ def t(name, good, note=''):
 def sandbox(box):
     for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
     llmshare.api_models = lambda timeout=3: None              # no real LM Studio in the sandbox (a test that needs a listing sets one)
-    from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
+    from localmodels import errors as _errors, names as _names, peers as _peers   # never this Mac's live settings, names, peers or error record
     llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')   # (the repo's defaults apply)
+    _errors.FILE = os.path.join(box, 'errors.jsonl')
     _peers.STATE, _peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
     llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
     crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
@@ -596,6 +597,13 @@ def test_runs():
     t('a request still in flight moves the count on at once', r['done'] == 41, r['done'])
     old = [rec(now - 5 * 3600, run='gone', run_total=10, run_done=3)]
     t('a run nobody has touched for an hour is not shown as running', ('proj', 'gone') not in runs.progress(old, now=now))
+    mixed = [rec(now - 900 + 30 * k, step=f'extract {k + 1} of 9') for k in range(3)] + \
+            [rec(now - 600 + 30 * k, run='extract', run_total=9, run_done=3 + k) for k in range(3)]
+    try: g, h, err = runs.progress(mixed, now=now), runs.history(mixed), None
+    except Exception as e: g, h, err = {}, {}, e
+    r = g.get(('proj', 'extract'), {})
+    t('a phase from step words and a run (X-Run) of the same name are kept apart: no error, and the run is the one shown',
+      err is None and r.get('kind') == 'run' and (r.get('done'), r.get('total')) == (5, 9), repr(err) if err else r)
 
     from localmodels import dash
     real = dash.live_runs
@@ -608,6 +616,14 @@ def test_runs():
     b, j = rows[0]['batch'], rows[0]['job']
     t("a step's own lease counts never hide the named run: the run (X-Run) is the batch, the step's phase the job",
       b['name'] == 'survey' and (b['done'], b['total']) == (153, 842) and (j['name'], j['total']) == ('extract files', 360) and rows[0]['since'] == 100.0, rows[0])
+    from localmodels import errors
+    dash.live_runs = lambda: 1 / 0
+    rows = [dict(project='lab', batch=None, job=None, since=200.0)]
+    try: dash.attach_runs(rows); err = None
+    except Exception as e: err = e
+    finally: dash.live_runs = real
+    t('progress that cannot be read leaves the client rows as they are, and the error is recorded',
+      err is None and rows[0]['since'] == 200.0 and any('run progress' in x['where'] for x in errors.recent(5)), repr(err) if err else errors.recent(5))
 
 def test_maintenance(box):
     print('maintenance: announced, on, the keeper standing down, the models put back after, the notice for every session')

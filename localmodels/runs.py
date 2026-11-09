@@ -47,17 +47,18 @@ def from_headers(h):
 
 
 def _events(rows, inflight=()):
-    """{(project, name): [event]} where an event is one request: start, end (None while in flight), and what it said."""
+    """{(project, name, kind): [event]} where an event is one request: start, end (None while in flight), and what it
+    said. kind is 'run' (X-Run) or 'phase' (step words alone): a run and a phase of the same name are counted apart."""
     out = {}
     for r, live in [(r, False) for r in rows] + [(f, True) for f in inflight]:
         project = r.get('project') or '?'
         start = r.get('since') if live else (r.get('at') or 0) - (r.get('seconds') or 0)
         ev = dict(start=start or 0, end=None if live else r.get('at') or 0, ok=not live and r.get('status') == 200, step=r.get('step'))
         if r.get('run'):
-            out.setdefault((project, r['run']), []).append(dict(ev, kind='run', done=r.get('run_done'), total=r.get('run_total')))
+            out.setdefault((project, r['run'], 'run'), []).append(dict(ev, kind='run', done=r.get('run_done'), total=r.get('run_total')))
         else:
             p = parse_step(r.get('step'))
-            if p: out.setdefault((project, p[0]), []).append(dict(ev, kind='phase', n=p[1], total=p[2]))
+            if p: out.setdefault((project, p[0], 'phase'), []).append(dict(ev, kind='phase', n=p[1], total=p[2]))
     return out
 
 
@@ -135,12 +136,13 @@ def _job(ep, now):
 def progress(rows, inflight=(), now=None, history=None):
     """{(project, name): {name, project, kind ('run' or 'phase'), phase, done, total, pct, left, basis, started}} for each
     run going on now, with finish (now plus left, a time) and scope: kind "run" (the program said it with X-Run) covers the
-    whole run, kind "phase" (read from its step words) only that phase. A run also carries job: the phase it is on now,
-    with its own done, total, pct, left, finish and started (_job)."""
+    whole run, kind "phase" (read from its step words) only that phase; a run going on hides a phase of the same name. A
+    run also carries job: the phase it is on now, with its own done, total, pct, left, finish and started (_job)."""
     import time
     now = now or time.time()
     out = {}
-    for key, evs in _events(rows, inflight).items():
+    for key, evs in sorted(_events(rows, inflight).items(), key=lambda kv: kv[0][2] != 'run'):   # runs first
+        if key[:2] in out: continue
         ep = _episodes(evs)[-1]
         live = any(e['end'] is None for e in ep)
         last = max(e['end'] or e['start'] for e in ep)
@@ -161,7 +163,7 @@ def progress(rows, inflight=(), now=None, history=None):
             elif seed: left, basis = (total - done) * seed, 'the last run'
             elif pace: left, basis = (total - done) * pace, 'this run so far'
         left = int(left) if left is not None else None
-        out[key] = dict(name=key[1], project=key[0], kind=ep[0]['kind'], phase=phase if ep[0]['kind'] == 'run' else None, done=done,
+        out[key[:2]] = dict(name=key[1], project=key[0], kind=ep[0]['kind'], phase=phase if ep[0]['kind'] == 'run' else None, done=done,
                         total=total, pct=min(100, int(100 * done / total)) if total else None, left=left,
                         finish=now + left if left is not None else None, basis=basis if total else None, started=started,
                         scope='whole run' if ep[0]['kind'] == 'run' else 'this phase', job=_job(ep, now) if ep[0]['kind'] == 'run' else None)
