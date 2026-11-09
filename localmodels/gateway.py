@@ -435,27 +435,28 @@ class Door(http.server.BaseHTTPRequestHandler):
         except ValueError: xt = 0
         until = t0 + 0.9 * min(86400.0, max(5.0, xt)) if xt > 0 else None     # the program's own budget: never wait past it
         holder = pid or os.getpid()
-        touch(holder, project, kind, model, who, +1, front)
-        mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{next(_n)}.json')
-        rec = dict(hub_pid=os.getpid(), pid=pid, project=project, session=who.get('session'), host_session=who.get('host_session'),
-                   kind=kind, model=model, app=who.get('app'), since=t0, state='queued', **({'step': step} if step else {}), **run,
-                   **({'via': 'link', 'from': front} if front else {}))
-        try: os.makedirs(llmshare.INFLIGHT, exist_ok=True); llmshare._write(mark, rec)
-        except OSError: pass
         code, usage, waited, chosen, held, note, tries, peer = 0, {}, 0.0, model, 0.0, None, 0, None
-        sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
-        sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
-        need, room = admission.estimate(body, j, admission.window(model), not path.split('?')[0].rstrip('/').endswith('embeddings')), [None]   # its context; why it last waited for room
+        mark, need, room = None, 0, [None]                 # what the finally reads, whatever fails before the request goes out
+        touch(holder, project, kind, model, who, +1, front)
+        try:                                               # from the lease on: the finally always releases it and the marker
+            mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{next(_n)}.json')
+            rec = dict(hub_pid=os.getpid(), pid=pid, project=project, session=who.get('session'), host_session=who.get('host_session'),
+                       kind=kind, model=model, app=who.get('app'), since=t0, state='queued', **({'step': step} if step else {}), **run,
+                       **({'via': 'link', 'from': front} if front else {}))
+            try: os.makedirs(llmshare.INFLIGHT, exist_ok=True); llmshare._write(mark, rec)
+            except OSError: pass
+            sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
+            sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
+            need = admission.estimate(body, j, admission.window(model), not path.split('?')[0].rstrip('/').endswith('embeddings'))   # its context; room[0]: why it last waited for room
 
-        def waiting(unfit):                                # admission: the copies it waits on for room, not for a slot
-            words = admission.why_waiting(unfit, llmshare.load_here(), need) if unfit else None
-            if words: room[0] = words
-            if rec.get('wait_for') != words:
-                if words: rec['wait_for'] = words
-                else: rec.pop('wait_for', None)
-                try: llmshare._write(mark, rec)
-                except OSError: pass
-        try:
+            def waiting(unfit):                            # admission: the copies it waits on for room, not for a slot
+                words = admission.why_waiting(unfit, llmshare.load_here(), need) if unfit else None
+                if words: room[0] = words
+                if rec.get('wait_for') != words:
+                    if words: rec['wait_for'] = words
+                    else: rec.pop('wait_for', None)
+                    try: llmshare._write(mark, rec)
+                    except OSError: pass
             base = llmshare.family(model)
             m = maint.on()
             if m:
@@ -520,7 +521,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             code, _ = self._send(503, dict(error=str(e) + ('; the client X-Timeout budget expired' if until else '')), retry_after=60); note = 'slot wait timed out'
         finally:
             try: os.remove(mark)
-            except OSError: pass
+            except (OSError, TypeError): pass             # TypeError: no marker was made
             touch(holder, project, kind, model, who, -1, front)
             if code >= 400 and code != 499 and note != 'maintenance' and not peers.split(chosen)[1]: crashes.nudge()   # maybe the model crashed: the keeper looks at once
             p, c = _usage(usage)

@@ -332,6 +332,15 @@ def run(box):
         codes = [get(p) for p in ('/hub/errors?minutes=x', '/hub/history?minutes=x', '/hub/recent?n=x')]
         t('a window or a count that is not a number falls back to the default: answered, and nothing recorded as an error',
           codes == [200, 200, 200] and not [r for r in errors.recent(5) if r['where'].startswith('GET /hub/')], (codes, errors.recent(5)[:1]))
+        held = lambda: (len(os.listdir(llmshare.INFLIGHT)) if os.path.isdir(llmshare.INFLIGHT) else 0, sum(e['n'] for e in gateway._live.values()))
+        plan(); time.sleep(0.3)
+        code, r, h = ask(tag='inf', max_tokens=1e999)
+        t('a request whose max_tokens is not finite (1e999) is answered, and leaves no marker or lease count behind', code == 200 and held() == (0, 0), (code, held()))
+        real_est, admission.estimate = admission.estimate, lambda *a, **k: 1 / 0
+        try: code, r, h = ask(tag='broken')
+        finally: admission.estimate = real_est
+        time.sleep(0.3)
+        t('a request that fails before it is sent (its estimate raises) answers 500 and leaves no marker or lease count', code == 500 and held() == (0, 0), (code, held()))
         req = urllib.request.Request(url + '/api/v1/models/Unload', data=json.dumps(dict(instance_id=F2, model='other/x')).encode(), headers={'Content-Type': 'application/json'})
         with llmshare.lease('someone', [F2], 'batch'):
             llmshare._write(os.path.join(llmshare.LEASES, 'someone-1-1.json'), dict(v=2, project='someone', pid=1, models=[F2], kind='batch', since=time.time(), beat=time.time()))
