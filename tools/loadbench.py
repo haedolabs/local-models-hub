@@ -223,6 +223,8 @@ def memory(a):
             free = models.free_gb()
             if free < a.floor: print(f'  stop: {free:.1f} GiB free < {a.floor} GiB'); break
             if engine_of(copy)[0] != pid: print(f'  stop: {copy} was reloaded (a recycle or a crash): its engine changed'); break
+            them = sorted({d.get('project') or '?' for d in llmshare.leases() if d.get('project') != 'local-models'})
+            if them and not a.anyway: print(f"  stop: another run is using the models now ({', '.join(them)})"); break
             idle = rest()
             texts = [memo(seed + k, chars=int(size * CHARS_PER_TOKEN))[0] for k in range(n)]; seed += n
             results, peak, low, gpu_peak, done = [None] * n, idle, free, 0.0, threading.Event()
