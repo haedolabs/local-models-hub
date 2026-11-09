@@ -823,8 +823,8 @@ function renderClaude() {
   const head = ['project', 'now', 'session', ''].map(h => el('th', {}, h));
   const rows = cs.map(c => {
     const bits = [];
-    if (c.subagents && c.subagents.length) bits.push(`${c.subagents.length} subagent${c.subagents.length === 1 ? '' : 's'}`);
-    for (const w of c.workflows || []) if (w.live && w.running.length) bits.push(`workflow ${w.finished} of ${w.agents}`);
+    if (c.subagents) bits.push(`${c.subagents} subagent${c.subagents === 1 ? '' : 's'}`);
+    for (const w of c.workflows || []) if (w.live && w.running) bits.push(`workflow ${w.finished} of ${w.agents}`);
     return el('tr', {},
       el('td', {}, c.project),
       el('td', {}, c.working ? el('span', {class: 'badge live'}, 'working') : el('span', {class: 'muted'}, `idle ${ago(c.last)}`)),
