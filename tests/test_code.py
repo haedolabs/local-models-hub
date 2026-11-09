@@ -177,6 +177,17 @@ def test_record(box):
     open(errors.FILE, 'a').write('not json\n' + json.dumps(dict(at=time.time() - 7200, source='gateway', where='old', error='E')) + '\n')
     t('a broken line is skipped; an old one falls outside the window', len(errors.recent(5)) == 3 and len(errors.recent(180)) == 4)
 
+    class Full:                                              # a stderr on a full disk
+        def write(self, *a): raise OSError(28, 'No space left on device')
+        def flush(self): raise OSError(28, 'No space left on device')
+    was, sys.stderr = sys.stderr, Full()
+    try:
+        try: raise KeyError('y')
+        except KeyError as e: rec, err = errors.record('loop with a full disk', e), None
+    except Exception as e: rec, err = None, e
+    finally: sys.stderr = was
+    t('the recorder never raises, even when its own output fails (a background loop would end in its error handler)', err is None and rec, repr(err) if err else rec)
+
 
 def test_mcp_stdout(box):
     import subprocess
