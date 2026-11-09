@@ -41,8 +41,12 @@ def record(where, exc=None, words=None, trace=None, source='gateway'):
 
 
 def recent(minutes=1440, n=200):
-    """The records of the last minutes, newest first (from the file, so any process can read them)."""
-    out, since = [], time.time() - float(minutes) * 60
+    """The records of the last minutes, newest first (from the file, so any process can read them). A window that is not a
+    number (GET /hub/errors?minutes=...) reads as a day."""
+    try: minutes = float(minutes)
+    except (TypeError, ValueError): minutes = 1440.0
+    if minutes != minutes: minutes = 1440.0                  # NaN
+    out, since = [], time.time() - minutes * 60
     for path in (FILE + '.1', FILE):
         try:
             for line in open(path):
