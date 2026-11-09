@@ -74,9 +74,10 @@ def add_provider(title, fn):
 
 
 # ---------------------------------------------------------------- gather
-def digest(folder):
+def digest(folder, pages=True):
+    """The hub's code in a folder, as 12 hex digits; pages=False leaves out the dashboard page (read per request)."""
     h = hashlib.sha1()
-    for f in sorted(glob.glob(os.path.join(folder, 'localmodels', '*.py')) + glob.glob(os.path.join(folder, 'localmodels', '*.html'))):
+    for f in sorted(glob.glob(os.path.join(folder, 'localmodels', '*.py')) + (glob.glob(os.path.join(folder, 'localmodels', '*.html')) if pages else [])):
         try: h.update(os.path.basename(f).encode()); h.update(open(f, 'rb').read())
         except OSError: pass
     return h.hexdigest()[:12]
@@ -85,7 +86,8 @@ def digest(folder):
 def door():
     """The hub's door: up or not, and whether launchd runs the code that is in this repo now."""
     up = llmshare.hub_up(fresh=True)
-    stale = every('stale', 10, lambda: os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME))
+    runs = (llmshare._hub.get('health') or {}).get('code') if up else None      # the code the gateway loaded, by its own digest
+    stale = every('stale', 10, lambda: bool(runs and runs != digest(HOME, pages=False)) or (os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME)))
     return dict(up=up, port=llmshare.HUB_PORT, stale=bool(stale), write_problem=(llmshare._hub.get('health') or {}).get('write_problem') if up else None)
 
 
