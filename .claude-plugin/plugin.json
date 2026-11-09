@@ -1,7 +1,7 @@
 {
   "name": "local-models",
   "description": "Reverse proxy, instance manager and MCP server for one LM Studio shared by every process and Claude Code session on an Apple-silicon Mac. OpenAI/Anthropic-compatible on localhost:1235 with Mac-wide slot scheduling (interactive before batch), pooled model replicas, crash detection with auto-reload and retry, pre-emptive recycling ahead of Metal resource-limit crashes, per-process attribution, batch ETAs and maintenance windows. MCP tools: status, guide, ask, batch, job_status, swap_check.",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "author": {
     "name": "Haedo Labs",
     "url": "https://haedolabs.com"
