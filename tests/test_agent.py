@@ -105,6 +105,21 @@ def run(box):
     s = Script([dict(content='found'), dict(content='', reasoning_content='{"items": ["in the think block"]}')]); agent.post = s
     r = agent.run_job(dict(label='j', prompt='list', schema=SCHEMA), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t('JSON that landed in reasoning_content is read', r['result'] == {'items': ['in the think block']}, r.get('result'))
+    counted = {'type': 'object', 'properties': {'items': {'type': 'array', 'items': {'type': 'string'}}, 'count': {'type': 'integer'}}, 'required': ['items', 'count']}
+    s = Script([dict(content='found'), dict(content='{"items": [], "count": 0}'), dict(content='{"items": ["a.py"], "count": 1}')]); agent.post = s
+    r = agent.run_job(dict(label='p', prompt='list', schema=counted), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('every list empty beside a number: asked once more, as for an answer that lists nothing', r['result'] == {'items': ['a.py'], 'count': 1} and r['usage']['empty'] == 1,
+      (r.get('result'), r['usage'].get('empty')))
+    s = Script([dict(content='found'), dict(content='{"items": []}'), dict(content='{"items": "a.py line 3"}')]); agent.post = s
+    r = agent.run_job(dict(label='q', prompt='list', schema=SCHEMA), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('a plain answer that does not match the schema (text where a list goes) gives way to the empty one, and is counted',
+      r['result'] == {'items': []} and r['usage'].get('invalid') == 1, (r.get('result'), r['usage'].get('invalid')))
+    s = Script([dict(content='found'), dict(content='[]'), dict(content='Here is the list, as asked:\n["a.py", "b.py"]')]); agent.post = s
+    r = agent.run_job(dict(label='r', prompt='list', schema={'type': 'array', 'items': {'type': 'string'}}), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('a list written after a line of words is read', r['result'] == ['a.py', 'b.py'], r.get('result'))
+    t('the schema check reads nested types, enums and minItems', agent.valid({'a': [{'k': 'x'}]}, {'type': 'object', 'required': ['a'], 'properties': {'a': {'type': 'array', 'minItems': 1,
+      'items': {'type': 'object', 'required': ['k'], 'properties': {'k': {'enum': ['x', 'y']}}}}}}) and not agent.valid({'a': [{'k': 'z'}]}, {'type': 'object', 'properties': {'a': {'type': 'array',
+      'items': {'type': 'object', 'properties': {'k': {'enum': ['x', 'y']}}}}}}) and not agent.valid({'n': True}, {'type': 'object', 'properties': {'n': {'type': 'integer'}}}))
 
     print('the agent engine: a batch')
     t('labels are made distinct', [j['label'] for j in agent.unique_labels([dict(label='a'), dict(label='a'), dict(label='b/c')])] == ['a', 'a-2', 'b-c'])
