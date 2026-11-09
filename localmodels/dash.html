@@ -693,7 +693,8 @@ function renderModels() {
     legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)}))); return; }
   box.replaceChildren(...down, ...fams.map(f => {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
-    const meta = `${f.copies.length > 1 ? f.copies.length + ' replicas · ' : ''}${f.at_once} slots · ${f.busy} active · ${f.size} GB · ${full(f.copies[0].context)} context`
+    const meta = `${f.copies.length > 1 ? f.copies.length + ' replicas · ' : ''}${f.at_once} slots · ${f.busy} active` + (f.waiting_room ? ` · ${f.waiting_room} waiting for context budget` : '')
+      + ` · ${f.size} GB · ${full(f.copies[0].context)} context`
       + (away.length ? ` · +${more} slots on peer ${away.map(p => p.name).join(', ')}` : '');
     const head = el('div', {class: 'fam-head', title: meta}, el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'}, meta));
     const rows = f.copies.map((c, k) => {
@@ -709,7 +710,9 @@ function renderModels() {
         return b;
       }));
       const state = c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
-        : el('span', {}, (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`,
+        : el('span', {title: c.ctx && c.ctx.budget ? `context in flight ${full(c.ctx.load)} of a budget of ${full(c.ctx.budget)} tokens (admission by context size)` : ''},
+            (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`
+            + (c.ctx && c.ctx.budget && c.busy ? ` · ${compact(c.ctx.load)}/${compact(c.ctx.budget)} context` : ''),
             el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of recycle threshold` : ''));
       const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `replica ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
       if (sv_) {
