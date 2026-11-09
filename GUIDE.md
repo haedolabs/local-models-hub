@@ -64,7 +64,7 @@ with llmshare.lease('<project>', [model], 'batch', log_dir=folder) as run:   # l
 - `localmodels name` lists every project as recorded and as displayed, with the batches (`X-Run`), jobs (the phase in `X-Step`) and scripts it has used. Then:
   - `localmodels name project <as seen> <shown>`: the display name of a project on every screen. Several recorded names can display as one, e.g. a folder and the `X-Project` its scripts send.
   - `localmodels name batch <project> <as seen> <shown>`: a display name for one of its batches, jobs or scripts.
-  - `localmodels name private <project>` (and `public`): the screens show only the names set for it, with no Claude Code session titles and no unlabeled scripts, free-text steps or batch names. A count such as `8 of 360` stays.
+  - `localmodels name private <project>` (and `public`): the screens show only the names set for it, with no Claude Code session titles ("a Claude Code session" instead) and no unlabeled scripts, free-text steps or batch names. A count such as `8 of 360` stays.
   - `localmodels name forget <project> [<as seen>]`: drop one label, or the whole entry.
 - A client can still name itself and its batch (`X-Project`, `X-Run`); the operator's names apply on top.
 
