@@ -439,6 +439,37 @@ def test_keep(box):
     with crashes._state() as st: st['down'] = {}
 
 
+def test_swap_away(box):
+    print('a swap to another model: the family it unloads is not read as crashed, and is not loaded back')
+    from localmodels import llmshare as L, models
+    real = L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok
+    O = 'other/model'
+    L.read_ok = lambda: True
+    L.settings = lambda: dict(families={B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False)}, batch_at_once=8, headroom_gb=8)
+    L.SWAP_LOCK = os.path.join(box, 'swap-away.lock'); crashes.MISS = 0.3
+    api = {'ids': {B: 65536, C2: 65536}}
+    L.api_models = lambda timeout=3: dict(api['ids'])
+    L.loaded = lambda fresh=False, force=False: [dict(row(i), key=B if L.family(i) == B else i) for i in api['ids']]
+    L.busy_slots = lambda: {}
+    loads = []
+    models.load = lambda key, ident, context, parallel: (loads.append(ident), crashes.loaded_now([ident]), api['ids'].update({ident: context}), (True, 'ok'))[3]
+    models.unload = lambda ident: (api['ids'].pop(ident, None), (True, f'{ident} unloaded'))[1]   # the REST API: LM Studio's log says only "Received request"
+    models._lms, models.free_gb, models.ensure_server = (lambda *a, **k: (True, '')), (lambda: 100.0), (lambda *a, **k: True)
+    ps_ok, L._ps['ok'] = L._ps['ok'], True                    # the listing above stands for a good `lms ps`
+    try:
+        reset(time.time() - 600)
+        n0 = len([r for r in crashes.records(1) if r.get('event') == 'crash'])
+        code, words = models.use(O, context=8192)
+        did = models.keep(); time.sleep(0.4); did += models.keep(); time.sleep(0.4); did += models.keep()
+        st = crashes._read(fresh=True)
+        t('after `localmodels use other/model` no crash is recorded for the family it unloaded, and nothing loads it back',
+          code == 0 and loads == [O] and len([r for r in crashes.records(1) if r.get('event') == 'crash']) == n0 and not st.get('down')
+          and not st['seen'].get(B, {}).get('loaded') and not st['seen'].get(C2, {}).get('loaded'), (code, words, loads, did, st.get('down')))
+    finally:
+        L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
+        L._ps['ok'] = ps_ok
+
+
 def test_prune(box):
     print('localmodels prune: old job folders and logs go, a running batch and recent work stay')
     from localmodels import cli
@@ -901,6 +932,7 @@ def main():
         test_server_probe(box)
         test_unload(box)
         test_keep(box)
+        test_swap_away(box)
         test_prune(box)
         test_settings(box)
         test_install_dry(box)
