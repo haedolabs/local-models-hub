@@ -518,6 +518,25 @@ def test_settings(box):
     t('a bad file: the last good settings stand and the error names the file', L.settings().get('batch_at_once') == 3 and L.settings_error() and 'models.json' in L.settings_error(), L.settings_error())
     open(L.MODELS, 'w').write(json.dumps(dict(families={}, batch_at_once=4, headroom_gb=8))); os.utime(L.MODELS, (time.time() + 4, time.time() + 4))
     t('fixed: read again, the error gone', L.settings().get('batch_at_once') == 4 and L.settings_error() is None)
+    k = [6]
+    def bad(d, key):
+        open(L.MODELS, 'w').write(json.dumps(d)); k[0] += 2; os.utime(L.MODELS, (time.time() + k[0], time.time() + k[0]))
+        return L.settings().get('batch_at_once') == 4 and key in (L.settings_error() or ''), L.settings_error()
+    for d, key in ((dict(families={}, batch_at_once=5, headroom_gb='8GB'), 'headroom_gb'), (dict(families=[], batch_at_once=5), 'families'),
+                   (dict(families={B: dict(key=B, copies='2')}, batch_at_once=5), 'copies'), (dict(families={B: dict(key=B, copies=0)}, batch_at_once=5), 'copies'),
+                   (dict(families={B: dict(key=B, recycle='off')}, batch_at_once=5), 'recycle'), (dict(families={B: 'qwen'}, batch_at_once=5), B)):
+        good, words = bad(d, key)
+        t(f'a file of the wrong shape ({key}) is not taken: the last good settings stand, and the error names the key', good, words)
+    print('the settings file: the last good copy carries a restart over a file that does not parse')
+    open(L.MODELS, 'w').write(json.dumps(dict(families={}, batch_at_once=7, headroom_gb=8))); k[0] += 2; os.utime(L.MODELS, (time.time() + k[0], time.time() + k[0]))
+    keep_was, L.KEEP_GOOD = L.KEEP_GOOD, True                      # the gateway's process keeps the last good copy
+    t('the gateway reads a good file and keeps a copy of it', L.settings().get('batch_at_once') == 7 and os.path.exists(L.MODELS_GOOD), L.MODELS_GOOD)
+    L.KEEP_GOOD = keep_was
+    open(L.MODELS, 'w').write('{"families": nonsense'); k[0] += 2; os.utime(L.MODELS, (time.time() + k[0], time.time() + k[0]))
+    L._conf.update(path=None, mtime=None, data={}, error=None)     # a new process: nothing read yet
+    t('a new process whose first read fails runs on the last good copy, and says so', L.settings().get('batch_at_once') == 7 and 'last good copy' in (L.settings_error() or ''), L.settings_error())
+    os.remove(L.MODELS_GOOD); L._conf.update(path=None, mtime=None, data={}, error=None)
+    t('with no good copy either, it says it runs with none', L.settings() == {} and 'no valid settings' in (L.settings_error() or ''), L.settings_error())
     L.MODELS = real[0]; L._conf.update(real[1])
 
 

@@ -801,6 +801,7 @@ def keeper():
 
 
 def main(argv=()):
+    llmshare.KEEP_GOOD = True                             # this process keeps the last good settings for the next start
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 8192), hard), hard))   # a thread, a socket and a lock per waiting request

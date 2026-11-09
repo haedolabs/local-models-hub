@@ -92,7 +92,7 @@ def status():
     from . import maint
     mt = maint.view()
     if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
-    if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error() + ' (last valid settings remain in effect)'
+    if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error()
     if s['door'].get('write_problem'): out['records_not_written'] = s['door']['write_problem']
     from . import cli
     lines = cli.peer_lines(s['door']['up'])
