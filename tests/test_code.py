@@ -195,6 +195,39 @@ def test_mcp_stdout(box):
     t('the error is still recorded, in the state folder the server was given', os.path.exists(os.path.join(box, 'mcp-state', 'errors.jsonl')))
 
 
+def test_agent_roots(box):
+    from localmodels import mcp_server, whois
+    home = os.path.realpath(os.path.join(box, 'home'))
+    proj, other, ssh, lib = (os.path.join(home, *p) for p in (('Documents', 'proj', 'src'), ('Documents', 'other'), ('.ssh',), ('Library', 'x')))
+    tree = os.path.join(home, 'Documents', 'proj', '.claude', 'worktrees', 'w')
+    for d in (proj, other, ssh, lib, tree): os.makedirs(d)
+    saved = os.environ.get('HOME'), os.environ.get('PWD'), whois.ROOTS, mcp_server.AGENTS
+    os.environ['HOME'], os.environ['PWD'], whois.ROOTS = home, tree, [os.path.join(home, 'Documents')]
+    mcp_server.AGENTS = os.path.join(box, 'agents')
+    for p in ('proj', 'other'):
+        os.makedirs(os.path.join(mcp_server.AGENTS, p, 'ask-1'))
+        open(os.path.join(mcp_server.AGENTS, p, 'ask-1', 'jobs.json'), 'w').write(json.dumps(dict(jobs=[])))
+    try:
+        R = mcp_server._root
+        t('the home folder named with other capitals is refused (it would put ~/Library inside the root)',
+          R(os.path.join(os.path.dirname(home), 'HOME'))[0] is None and R(home)[0] is None, R(os.path.join(os.path.dirname(home), 'HOME')))
+        t('a dot-folder of the home folder (~/.ssh) is refused, from a terminal too', R(ssh)[0] is None and '.ssh' in R(ssh)[1], R(ssh))
+        t('a folder in ~/Library is refused', R(lib)[0] is None)
+        t("from a worktree session, its project's folder is accepted", R(proj, within=mcp_server._session_folder()) == (proj, None), R(proj, within=mcp_server._session_folder()))
+        r = mcp_server.call('ask', dict(prompt='x', folder=other))
+        t("through the MCP tools a folder outside the session's project is refused", r.get('ok') is False and 'outside' in (r.get('error') or ''), r)
+        r = mcp_server.call('batch', dict(jobs=[dict(prompt='x')], folder=ssh))
+        t('and so is a dot-folder', r.get('ok') is False and '.ssh' in (r.get('error') or ''), r)
+        t("job_status serves this project's jobs, not another project's",
+          mcp_server.call('job_status', dict(job='proj/ask-1')).get('ok') is True and mcp_server.call('job_status', dict(job='other/ask-1')).get('ok') is False,
+          (mcp_server.call('job_status', dict(job='proj/ask-1')), mcp_server.call('job_status', dict(job='other/ask-1'))))
+    finally:
+        for k, v in (('HOME', saved[0]), ('PWD', saved[1])):
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+        whois.ROOTS, mcp_server.AGENTS = saved[2], saved[3]
+
+
 def test_name_tool(box):
     from localmodels import mcp_server, names
     names.FILE, names._cache['mtime'] = os.path.join(box, 'names.json'), None
@@ -237,6 +270,8 @@ def main():
         test_mcp_stdout(box)
         print("a project names itself (the name tool)")
         test_name_tool(box)
+        print("the local agents read only the session's own project")
+        test_agent_roots(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
