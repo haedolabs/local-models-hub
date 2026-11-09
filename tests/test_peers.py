@@ -684,7 +684,8 @@ def test_two_doors(box):
         print('two doors: who a request is from, forwarded')
         with crashes._state() as st: st['down'] = {F: dict(crashed=time.time(), models=[F, F2], state='loading again')}
         plan(A); plan(B)
-        hd = {'X-Session': 'sess-1', 'X-Kind': 'batch', 'X-Step': 'extract 3 of 9', 'X-Run': 'nightly', 'X-Run-Total': '9', 'X-Run-Done': '2'}
+        hd = {'X-Session': 'sess-1', 'X-Kind': 'batch', 'X-Step': 'extract 3 of 9', 'X-Run': 'nightly', 'X-Run-Total': '9', 'X-Run-Done': '2',
+              'Authorization': 'Bearer sk-the-clients-own', 'x-api-key': 'the-clients-own', 'OpenAI-Organization': 'org-own'}
         code, r, h = ask('c1', kind='batch', headers=hd)
         prow = (logged(os.path.join(peer_dir, 'requests.jsonl')) or [{}])[0]
         t('this Mac\'s copies down after a crash: the peer answers at once, nothing held', code == 200 and B.seen and not A.seen, (code, A.seen, B.seen))
@@ -693,6 +694,8 @@ def test_two_doors(box):
           == ('proj', 'sess-1', 'batch', 'extract 3 of 9', 'nightly', 9, 2), prow)
         t('the peer logs which Mac sent it', prow.get('from') == 'front', prow)
         t("the token never reaches the peer's LM Studio", B.heads and not any(k.startswith('x-hub') for k in B.heads[-1]), B.heads[-1:] if B.heads else None)
+        t("the client's own API credentials stay on this Mac: the peer gets the token, never Authorization, x-api-key or the organization",
+          B.heads and not {'authorization', 'x-api-key', 'openai-organization'} & set(B.heads[-1]), B.heads[-1:] if B.heads else None)
         plan(B, 'sse')
         code, data, h = ask('s1', stream=True)
         frow = logged(llmshare.REQUESTS)[0]
