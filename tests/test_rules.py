@@ -524,6 +524,16 @@ def test_install_dry(box):
       and all(any(h['command'] == cmd for e in once['hooks'][ev] for h in e['hooks']) for ev in ('SessionStart', 'UserPromptSubmit')), once)
     gone = cli.with_hook(json.loads(json.dumps(once)), cmd, add=False)
     t('uninstall takes out only the hub\'s hook', gone['hooks'].get('UserPromptSubmit') == other['hooks']['UserPromptSubmit'] and 'SessionStart' not in gone['hooks'], gone)
+    import subprocess
+    real_inst, cli.INSTALLED = cli.INSTALLED, os.path.join(box, 'no-installed-copy')
+    r = subprocess.run(['/bin/sh', '-c', cli.hook_command()], capture_output=True, text=True)
+    cli.INSTALLED = real_inst
+    t('the hook command exits 0 when the installed copy is missing (exit 2 would refuse every prompt in every session)', r.returncode == 0, (r.returncode, r.stderr[-200:]))
+    new = cli.with_hook(json.loads(json.dumps(once)), cli.hook_command())
+    t("an install replaces a hook written in the old form, beside the person's own",
+      [h['command'] for e in new['hooks']['UserPromptSubmit'] for h in e['hooks']] == ['echo mine', cli.hook_command()], new['hooks']['UserPromptSubmit'])
+    t("the plugin's hook command cannot fail either", all('|| true' in h['command'] for ev in json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks', 'hooks.json')))['hooks'].values()
+                                                       for e in ev for h in e['hooks']))
     L.LMS = os.path.join(box, 'no-such-lms')
     t('a missing lms is noticed', cli.lms_found() is False)
     cli.PLIST, L.MODELS, L.LMS = real

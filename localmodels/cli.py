@@ -661,8 +661,19 @@ HOOK_EVENTS = ('SessionStart', 'UserPromptSubmit')
 
 
 def hook_command():
-    """The command Claude Code runs before each prompt: the installed copy's `localmodels notice` (silent unless maintenance)."""
-    return f'"{PY}" "{os.path.join(INSTALLED, "bin", "localmodels")}" notice'
+    """The command Claude Code runs before each prompt: the installed copy's `localmodels notice` (silent unless
+    maintenance). It cannot fail: with the installed copy gone, python's exit 2 would make Claude Code refuse every
+    prompt in every session, the one that would repair it included."""
+    script = os.path.join(INSTALLED, 'bin', 'localmodels')
+    return f'[ -f "{script}" ] && "{PY}" "{script}" notice || true'
+
+
+def _claude(*args, timeout=60):
+    """One `claude` command, bounded in time. -> the finished process, or None when it could not run in time."""
+    claude = shutil.which('claude')
+    if not claude: return None
+    try: return subprocess.run([claude, *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError): return None
 
 
 def with_hook(settings, cmd, add=True):
@@ -670,7 +681,7 @@ def with_hook(settings, cmd, add=True):
     person's own hooks and settings are left as they are."""
     hooks = settings.setdefault('hooks', {})
     for ev in HOOK_EVENTS:
-        kept = [e for e in hooks.get(ev, []) if not any('localmodels' in h.get('command', '') and h.get('command', '').endswith(' notice')
+        kept = [e for e in hooks.get(ev, []) if not any('localmodels' in h.get('command', '') and ' notice' in h.get('command', '')   # either form
                                                       for h in e.get('hooks', []))]
         if add: kept.append(dict(hooks=[dict(type='command', command=cmd, timeout=5)]))
         if kept: hooks[ev] = kept
@@ -773,14 +784,14 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         claude = shutil.which('claude')
         if claude:
             want = [PY, os.path.join(HOME, 'bin', 'localmodels'), 'mcp']
-            cur = subprocess.run([claude, 'mcp', 'get', 'local-models'], capture_output=True, text=True)
-            if cur.returncode == 0 and all(x in cur.stdout for x in want) and 'User' in cur.stdout:
+            cur = _claude('mcp', 'get', 'local-models')
+            if cur and cur.returncode == 0 and all(x in cur.stdout for x in want) and 'User' in cur.stdout:
                 print('3. the hub\'s MCP tools are already registered for every Claude Code session (local-models)')
             else:
-                subprocess.run([claude, 'mcp', 'remove', '--scope', 'user', 'local-models'], capture_output=True, text=True)
-                r = subprocess.run([claude, 'mcp', 'add', '--scope', 'user', 'local-models', '--', *want], capture_output=True, text=True)
-                print('3. the hub\'s MCP tools registered for every Claude Code session (local-models)' if r.returncode == 0 else
-                      f'3. could not register the tools: {(r.stderr or r.stdout).strip()[:300]}')
+                _claude('mcp', 'remove', '--scope', 'user', 'local-models')
+                r = _claude('mcp', 'add', '--scope', 'user', 'local-models', '--', *want)
+                print('3. the hub\'s MCP tools registered for every Claude Code session (local-models)' if r and r.returncode == 0 else
+                      f"3. could not register the tools: {((r.stderr or r.stdout) if r else 'claude did not answer within 60 s').strip()[:300]}")
         else: print('3. the claude command is not on PATH: register the MCP tools manually (GUIDE.md, setting up)')
         os.makedirs(os.path.dirname(SIGNPOST_FILE), exist_ok=True)
         text = open(SIGNPOST_FILE).read() if os.path.exists(SIGNPOST_FILE) else ''
@@ -809,6 +820,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
 
 
 def uninstall():
+    print('0. ' + set_hook(False))                         # first: a hook left pointing at removed code would refuse every prompt
     uid = f'gui/{os.getuid()}'
     for label in (LABEL,) + OLD_LABELS:
         if _loaded(label): _launchctl('bootout', f'{uid}/{label}')
@@ -816,14 +828,12 @@ def uninstall():
         except OSError: pass
     shutil.rmtree(INSTALLED, ignore_errors=True)
     print('1. gateway stopped; it no longer starts at login')
-    claude = shutil.which('claude')
-    if claude: subprocess.run([claude, 'mcp', 'remove', '--scope', 'user', 'local-models'], capture_output=True, text=True)
+    _claude('mcp', 'remove', '--scope', 'user', 'local-models')
     print('2. the hub\'s MCP tools are no longer registered')
     if os.path.exists(SIGNPOST_FILE):
         lines = [l for l in open(SIGNPOST_FILE).read().split('\n') if 'local-models hub signpost' not in l]
         tmp = SIGNPOST_FILE + '.tmp'; open(tmp, 'w').write('\n'.join(lines)); os.replace(tmp, SIGNPOST_FILE)
     print(f'3. the signpost line is out of {SIGNPOST_FILE}')
-    print('   ' + set_hook(False))
     src = os.path.join(HOME, 'bin', 'localmodels')
     for d in BINS:
         link = os.path.join(d, 'localmodels')
