@@ -36,7 +36,8 @@ def record(where, exc=None, words=None, trace=None, source='gateway'):
                **({'repeats': repeats} if repeats else {}))
     try: llmshare._append(FILE, rec, roll_at=ROLL_AT)
     except OSError: pass
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", file=sys.stderr, flush=True)   # stdout is a protocol channel (MCP, the hook)
+    try: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", file=sys.stderr, flush=True)   # stdout is a protocol channel (MCP, the hook)
+    except (OSError, ValueError): pass                     # not recorded: the log itself cannot be written; the record above stands
     return rec
 
 
