@@ -220,7 +220,7 @@ def door_link(force=False, timeout=8):
     when the door does not answer it (closed, or running code from before peers)."""
     try:
         req = urllib.request.Request(llmshare.HUB + '/hub/link', data=b'{}' if force else None, headers={'Content-Type': 'application/json'})
-        d = json.load(urllib.request.urlopen(req, timeout=timeout))
+        d = json.load(llmshare.urlopen(req, timeout=timeout))
         return d if isinstance(d, dict) and 'peers' in d else None
     except (OSError, ValueError): return None
 
@@ -1038,11 +1038,11 @@ def check():
     def t(name, good, note=''): ok.append(good); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
     t('gateway responds', llmshare.hub_up(fresh=True), llmshare.HUB)
     try:
-        page = urllib.request.urlopen(llmshare.HUB + '/', timeout=5).read()
-        snap = json.load(urllib.request.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
+        page = llmshare.urlopen(llmshare.HUB + '/', timeout=5).read()
+        snap = json.load(llmshare.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
         t('the dashboard answers', NAME.encode() in page and b'__HUB_NAME__' not in page and 'lmstudio' in snap, f'{llmshare.HUB}/ (localmodels open)')
     except (OSError, ValueError) as e: t('the dashboard answers', False, str(e))
-    try: models = json.load(urllib.request.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
+    try: models = json.load(llmshare.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
     except OSError as e: t('LM Studio reachable via the gateway', False, str(e))
     t('the lms command is found', lms_found(), llmshare.LMS if lms_found() else f"not at {llmshare.LMS} and not on PATH: open LM Studio once and run ~/.lmstudio/bin/lms bootstrap, or set LMS; without it the instance manager cannot load, reload or recycle instances")
     rows = llmshare.loaded(fresh=True)

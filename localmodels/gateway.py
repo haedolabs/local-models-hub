@@ -127,7 +127,7 @@ def glob_leases(pid):
 def server_up(timeout=3):
     """Whether LM Studio's server is up: only a refused connection means down. A slow answer, a reset or a cut answer
     means it is up and busy, and starting it then would restart it under every request in flight."""
-    try: urllib.request.urlopen(UP + '/v1/models', timeout=timeout); return True
+    try: llmshare.urlopen(UP + '/v1/models', timeout=timeout); return True
     except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
     except ConnectionRefusedError: return False
     except OSError: return True

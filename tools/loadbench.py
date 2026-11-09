@@ -127,7 +127,7 @@ def ask(model, text, think, max_tokens, tag):
     req = urllib.request.Request(BASE['url'] + '/v1/chat/completions', data=json.dumps(body).encode(), headers={
         'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test', 'X-Session': tag})
     t0 = time.time()
-    try: r = json.load(urllib.request.urlopen(req, timeout=3600)); err = None
+    try: r = json.load(llmshare.urlopen(req, timeout=3600)); err = None
     except urllib.error.HTTPError as e:
         try: err = f'HTTP {e.code}: ' + e.read().decode('utf-8', 'replace')[:200]
         except Exception: err = f'HTTP {e.code}'
@@ -241,7 +241,7 @@ def memory(a):
                 t0 = time.time()
                 try:
                     with (llmshare.slot(copy) if a.direct else contextlib.nullcontext()):   # straight to LM Studio: one of the hub's slots
-                        r = json.load(urllib.request.urlopen(req, timeout=3600))
+                        r = json.load(llmshare.urlopen(req, timeout=3600))
                     u, err = r.get('usage') or {}, None
                 except (OSError, ValueError) as e: u, err = {}, f'{type(e).__name__}: {e}'
                 results[k] = dict(prompt=u.get('prompt_tokens') or 0, completion=u.get('completion_tokens') or 0, seconds=round(time.time() - t0, 1), error=err)
@@ -344,7 +344,7 @@ def straight(a):
     """--url: one LM Studio measured straight, two cells (thinking on, off), --at-once requests at a time on --model."""
     if not a.model: sys.exit('--url needs --model: the model id that server lists (curl <url>/v1/models)')
     BASE['url'] = a.url.rstrip('/')
-    try: ids = [m['id'] for m in json.load(urllib.request.urlopen(BASE['url'] + '/v1/models', timeout=10)).get('data', [])]
+    try: ids = [m['id'] for m in json.load(llmshare.urlopen(BASE['url'] + '/v1/models', timeout=10)).get('data', [])]
     except (OSError, ValueError) as e: sys.exit(f"{BASE['url']} does not answer: {e}")
     if a.model not in ids: sys.exit(f"{a.model} is not loaded there; it lists: {', '.join(ids) or 'nothing'}")
     n, max_tokens = (2, 600) if a.smoke else (a.n, a.max_tokens)

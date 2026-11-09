@@ -34,7 +34,7 @@ def _post(path, body, project, kind='batch', timeout=3600, headers=None):
     """agent.post, with each run's name on its requests (X-Session), so the door's log tells the runs apart."""
     req = urllib.request.Request(llmshare.HUB + path, data=json.dumps(body).encode(), headers={
         'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test', 'X-Session': _tag.get(threading.get_ident(), 'thinkbench'), **(headers or {})})
-    return json.load(urllib.request.urlopen(req, timeout=timeout))
+    return json.load(llmshare.urlopen(req, timeout=timeout))
 
 
 def _text(p): return (str(p.get('quote', '')) + ' ' + str(p.get('why', ''))).lower()

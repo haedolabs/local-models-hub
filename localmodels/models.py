@@ -211,7 +211,7 @@ def _ok_id(s):
 
 def server_up(timeout=3):
     """Whether LM Studio's server is up: only a refused connection means down (a slow answer means up and busy)."""
-    try: urllib.request.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=timeout); return True
+    try: llmshare.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=timeout); return True
     except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
     except ConnectionRefusedError: return False
     except OSError: return True
@@ -246,7 +246,7 @@ def unload(ident):
     req = urllib.request.Request(llmshare.LMSTUDIO + '/api/v1/models/unload', data=json.dumps(dict(instance_id=ident)).encode(),
                                  headers={'Content-Type': 'application/json'})
     try:
-        d = json.load(urllib.request.urlopen(req, timeout=120))
+        d = json.load(llmshare.urlopen(req, timeout=120))
         if isinstance(d, dict) and d.get('instance_id') == ident: return True, f'{ident} unloaded'
     except urllib.error.HTTPError as e:                     # 404 model_not_found: the API is there and the instance is not
         try: err = (json.loads(e.read() or b'{}') or {}).get('error')
