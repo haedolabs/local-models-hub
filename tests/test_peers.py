@@ -14,6 +14,7 @@ import collections, errno, http.server, json, os, shutil, socket, subprocess, sy
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HOME)
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import crashes, gateway, llmshare, models, peers, recycle
 
 F, F2 = 'test/family', 'test/family:2'
@@ -292,7 +293,7 @@ def test_commands(box):
         code, out = run('add', 'macbook', '192.168.213.2')
         conf = json.load(open(llmshare.MODELS))
         tok = open(peers.TOKEN_FILE).read().strip()
-        t('peer add writes the peer into the settings, beside what was there', code == 0 and conf.get('peers') == {'macbook': {'url': 'http://192.168.213.2:1235'}} and F in conf['families'], conf)
+        t('peer add writes the peer into the settings, beside what was there', code == 0 and conf.get('peers') == {'macbook': {'url': f'http://192.168.213.2:{llmshare.HUB_PORT}'}} and F in conf['families'], conf)
         t('...and makes the token: 64 hex characters, mode 0600', len(tok) == 64 and os.stat(peers.TOKEN_FILE).st_mode & 0o777 == 0o600, oct(os.stat(peers.TOKEN_FILE).st_mode))
         t('...and never prints it: the next steps copy it over SSH from its file', tok not in out and 'ssh <user>@192.168.213.2' in out and peers.TOKEN_FILE in out, out[-300:])
         code, out2 = run('add', 'macbook', '192.168.213.2')
@@ -743,6 +744,7 @@ def main():
         test_two_doors(box)
         test_pool(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 
