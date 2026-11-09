@@ -159,8 +159,11 @@ def live_runs():
 def attach_runs(out):
     """Give each program its batch and its job: a run it named (X-Run) is the batch, and the phase it is on now (its step
     words, "check 10 of 50") the job; a phase read from step words alone is a job with no batch size known. The row's
-    'since' becomes when the batch (or the job) began, not when the program first used a model."""
-    live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
+    'since' becomes when the batch (or the job) began, not when the program first used a model. Progress that cannot be
+    read is recorded and leaves the rows as they are: it never takes the client list with it."""
+    try: live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
+    except Exception as e:
+        from . import errors; errors.record('dash: run progress', e); return
     for r in out:
         r.setdefault('job', None)
         mine = [g for g in live if g['project'] == r['project']]
