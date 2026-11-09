@@ -122,7 +122,7 @@ def run(url=None, minutes=60, workers=None, model=None, stop=None, say=print, se
                 'Content-Type': 'application/json', 'X-Project': name, 'X-Kind': 'batch', 'X-Run': batch,
                 'X-Run-Total': str(total), 'X-Run-Done': str(done), 'X-Step': f'{job} {i} of {total}', 'X-Timeout': '3600'})
             try:
-                usage = json.load(urllib.request.urlopen(req, timeout=3600)).get('usage') or {}
+                usage = json.load(llmshare.urlopen(req, timeout=3600)).get('usage') or {}
                 with s['lock']: s['done'] += 1; s['tokens'] += int(usage.get('completion_tokens') or 0)
             except urllib.error.HTTPError as e:              # 503 (maintenance, a reload): wait as told, the record is tried again
                 with s['lock']: s['started'] -= 1

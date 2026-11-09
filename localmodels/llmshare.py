@@ -56,6 +56,15 @@ _hub = {'at': 0.0, 'up': False}
 _q, _q_lock, _seq = {}, threading.Lock(), itertools.count()   # this process's waiters for a slot: ticket -> the copies it may take
 
 
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def urlopen(req, timeout=None):
+    """urllib's urlopen with no proxy: every address the hub calls is this Mac's own (the gateway, LM Studio), so neither
+    http_proxy in the environment nor the system's web proxy may see a prompt on its way there."""
+    return _opener.open(req, timeout=timeout)
+
+
 def _int(x):
     try: return int(x)
     except (TypeError, ValueError): return 0
@@ -178,7 +187,7 @@ def api_models(timeout=3):
     answer. Cheap, and from the server itself, so it is the cross-check when `lms ps` and the door disagree."""
     if time.time() - _api['at'] < 2: return _api['ids']
     try:
-        d = json.load(urllib.request.urlopen(LMSTUDIO + '/api/v0/models', timeout=timeout))
+        d = json.load(urlopen(LMSTUDIO + '/api/v0/models', timeout=timeout))
         ids = {m['id']: m.get('loaded_context_length') for m in d.get('data', []) if m.get('state') == 'loaded' and m.get('id')}
     except (OSError, ValueError, KeyError, TypeError): ids = None
     _api.update(at=time.time(), ids=ids)
@@ -506,7 +515,8 @@ def hub_up(fresh=False):
     """Whether the hub's door is answering (cached 5 s). A door that is slow to answer is up (something is listening and
     busy); only a refused connection means it is down."""
     if fresh or time.time() - _hub['at'] > 5:
-        try: up = json.load(urllib.request.urlopen(HUB + '/hub/health', timeout=3)).get('ok') is True
+        try: up = json.load(urlopen(HUB + '/hub/health', timeout=3)).get('ok') is True
+        except urllib.error.HTTPError: up = False                # something answered, and it is not the gateway's health
         except urllib.error.URLError as e: up = not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
         except ConnectionRefusedError: up = False
         except (OSError, ValueError): up = True
@@ -520,7 +530,7 @@ def base_url():
 
 
 def get(path, timeout=10):
-    return json.load(urllib.request.urlopen(base_url() + path, timeout=timeout))
+    return json.load(urlopen(base_url() + path, timeout=timeout))
 
 
 def post(path, body, project, kind='other', timeout=3600, headers=None):
@@ -531,21 +541,21 @@ def post(path, body, project, kind='other', timeout=3600, headers=None):
         hub_headers = dict(base, **{'X-Project': str(project), 'X-Timeout': str(int(timeout))}, **(headers or {}))   # the door bounds its wait by it
         if kind in KINDS and kind != 'other': hub_headers['X-Kind'] = kind   # else the hub reads the kind from the run's lease
         req = urllib.request.Request(HUB + path, data=data, headers=hub_headers)
-        try: return json.load(urllib.request.urlopen(req, timeout=timeout))
+        try: return json.load(urlopen(req, timeout=timeout))
         except urllib.error.HTTPError: raise
         except urllib.error.URLError as e:                 # the door is restarting (refused: the request never reached the
             if not isinstance(e.reason, ConnectionRefusedError): raise    # model), so this once go straight to LM Studio
             _hub.update(at=time.time(), up=False)
     req = urllib.request.Request(LMSTUDIO + path, data=data, headers=base)
     with (slot(body['model']) if body.get('model') else contextlib.nullcontext()):
-        return json.load(urllib.request.urlopen(req, timeout=timeout))
+        return json.load(urlopen(req, timeout=timeout))
 
 
 def hub_post(path, body=None, timeout=5):
     """A small request to the hub itself (/hub/...), or None when the door does not answer."""
     try:
         req = urllib.request.Request(HUB + path, data=json.dumps(body or {}).encode(), headers={'Content-Type': 'application/json'})
-        return json.load(urllib.request.urlopen(req, timeout=timeout))
+        return json.load(urlopen(req, timeout=timeout))
     except (OSError, ValueError): return None
 
 

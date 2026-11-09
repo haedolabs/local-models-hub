@@ -195,6 +195,34 @@ def test_mcp_stdout(box):
     t('the error is still recorded, in the state folder the server was given', os.path.exists(os.path.join(box, 'mcp-state', 'errors.jsonl')))
 
 
+def test_no_proxy(box):
+    import http.server, threading, urllib.request
+    got = []
+
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self): got.append(self.path); self.send_response(502); self.end_headers()
+        do_POST = do_GET
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Proxy); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    was = {k: os.environ.get(k) for k in ('http_proxy', 'HTTP_PROXY', 'no_proxy', 'NO_PROXY')}
+    os.environ.update(http_proxy=f'http://127.0.0.1:{srv.server_address[1]}', HTTP_PROXY=f'http://127.0.0.1:{srv.server_address[1]}')
+    for k in ('no_proxy', 'NO_PROXY'): os.environ.pop(k, None)
+    try:
+        try: urllib.request.build_opener().open(llmshare.HUB + '/hub/health', timeout=5)
+        except OSError: pass
+        t("(the test's proxy is in use: a default urllib opener sends this Mac's own requests to it)", got, got)
+        got.clear()
+        up = llmshare.hub_up(fresh=True)
+        try: llmshare.post('/v1/chat/completions', dict(model='m', messages=[dict(role='user', content='a prompt')]), 'proj', timeout=5)
+        except OSError: pass
+        t('with http_proxy set, the hub, LM Studio and the gateway are reached directly: the proxy receives nothing', not got and up is False, (got, up))
+    finally:
+        for k, v in was.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+        srv.shutdown()
+
+
 def test_agent_roots(box):
     from localmodels import mcp_server, whois
     home = os.path.realpath(os.path.join(box, 'home'))
@@ -272,6 +300,8 @@ def main():
         test_name_tool(box)
         print("the local agents read only the session's own project")
         test_agent_roots(box)
+        print('requests to this Mac never go through a proxy')
+        test_no_proxy(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')

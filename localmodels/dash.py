@@ -91,7 +91,7 @@ def door():
 
 def lmstudio():
     def server():
-        try: urllib.request.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=3); return 'on'
+        try: llmshare.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=3); return 'on'
         except (TimeoutError, urllib.error.URLError) as e:
             if isinstance(getattr(e, 'reason', e), (TimeoutError, OSError)) and not isinstance(getattr(e, 'reason', None), ConnectionRefusedError):
                 return (_cache.get('server') or (0, 'on'))[1]       # slow under load: as it was
@@ -242,7 +242,7 @@ def _procs():
 
 
 def _hub_pid():
-    try: return json.load(urllib.request.urlopen(llmshare.HUB + '/hub/health', timeout=1)).get('pid')
+    try: return json.load(llmshare.urlopen(llmshare.HUB + '/hub/health', timeout=1)).get('pid')
     except (OSError, ValueError): return None
 
 
