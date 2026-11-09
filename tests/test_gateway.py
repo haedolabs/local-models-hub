@@ -513,6 +513,14 @@ def run(box):
         rows[:] = saved
         admission._ratio.update(at=0.0, v=admission.RATIO)
 
+        print('a second gateway on the same port: it leaves the running one alone')
+        os.makedirs(llmshare.INFLIGHT, exist_ok=True)
+        mine = os.path.join(llmshare.INFLIGHT, 'running-gateway-1.json'); llmshare._write(mine, dict(hub_pid=os.getpid(), since=time.time(), state='answering'))
+        port_was = gateway.PORT
+        try: code2 = gateway.main()
+        finally: gateway.PORT = port_was
+        t("a start that finds the port taken returns 1 and leaves the running gateway's in-flight markers", code2 == 1 and os.path.exists(mine), (code2, os.path.exists(mine)))
+        os.remove(mine)
         print('the icon: a PNG at the standard paths, drawn from the theme tokens')
         import struct, zlib
         from localmodels import icon

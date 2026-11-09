@@ -805,14 +805,14 @@ def main(argv=()):
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 8192), hard), hard))   # a thread, a socket and a lock per waiting request
     except (ValueError, OSError): pass
-    try:
-        import glob
-        for f in glob.glob(os.path.join(llmshare.INFLIGHT, '*.json')): os.remove(f)     # one door at a time: what an earlier run left is gone
-    except OSError: pass
-    llmshare.leases()
     try: srv = Server(('127.0.0.1', PORT), Door)
     except OSError:
         print(f'port {PORT} in use: the gateway is probably already running ({llmshare.HUB}/hub/health)', flush=True); return 1
+    try:                                                  # the port is this process's now: what an earlier run left is stale
+        import glob
+        for f in glob.glob(os.path.join(llmshare.INFLIGHT, '*.json')): os.remove(f)
+    except OSError: pass
+    llmshare.leases()
     try:                                                  # some programs try ::1 first for "localhost"
         srv6 = Server6(('::1', PORT), Door); threading.Thread(target=srv6.serve_forever, daemon=True).start()
     except OSError: pass

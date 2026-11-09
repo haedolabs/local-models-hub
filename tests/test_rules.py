@@ -439,6 +439,26 @@ def test_keep(box):
     with crashes._state() as st: st['down'] = {}
 
 
+def test_recycle_resumed(box):
+    print('a recycle cut between its unload and its load (the gateway stopped): resumed with the load, not another unload')
+    from localmodels import llmshare as L, models
+    real = L.api_models, L.loaded, models.load, models.unload, models.ensure_server, L.settings
+    api, loads, unloads = {'ids': {B: 65536}}, [], []
+    L.api_models = lambda timeout=3: dict(api['ids'])
+    L.loaded = lambda fresh=False, force=False: [row(i) for i in api['ids']]
+    L.settings = lambda: dict(families={B: dict(key=B, copies=2, context=65536, parallel=4)}, batch_at_once=8, headroom_gb=8)
+    models.load = lambda key, ident, context, parallel: (loads.append(ident), api['ids'].update({ident: context}), (True, 'ok'))[2]
+    models.unload = lambda ident: (unloads.append(ident), api['ids'].pop(B, None), (True, ''))[2]     # a missing copy's name takes the key's instance
+    models.ensure_server = lambda *a, **k: True
+    try:
+        reset(time.time() - 600)
+        with crashes._state() as st: st['recycle'] = dict(job=dict(copy=C2, family=B, state='reloading', since=time.time() - 30, why='test', counts={}), last={}, fresh={}, retry_after=0)
+        words = models._recycle(dict(copy=C2, family=B, why='test'), L.settings()['families'])
+        t('its copy is not listed: it is loaded, and nothing is unloaded (by name, that would take its sibling)', unloads == [] and loads == [C2] and B in api['ids'], (unloads, loads, words))
+    finally:
+        L.api_models, L.loaded, models.load, models.unload, models.ensure_server, L.settings = real
+
+
 def test_swap_away(box):
     print('a swap to another model: the family it unloads is not read as crashed, and is not loaded back')
     from localmodels import llmshare as L, models
@@ -1036,6 +1056,7 @@ def main():
         test_unload(box)
         test_keep(box)
         test_swap_away(box)
+        test_recycle_resumed(box)
         test_prune(box)
         test_settings(box)
         test_write_problem(box)
