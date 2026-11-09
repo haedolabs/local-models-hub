@@ -688,6 +688,21 @@ def test_maintenance(box):
     prev = maint.end()
     t('off: the record comes back (with what was loaded before), nothing is announced after', prev and maint.read() is None, prev)
 
+    print('maintenance: the command line, read as a person means it')
+    from localmodels import cli
+    P = lambda s: cli.maintenance_args(s.split(), now=now)
+    t('"in 2 hours" starts in 120 minutes; "now for 1.5h" lasts 90; units in words or letters',
+      P('in 2 hours')[0] == now + 7200 and P('now for 1.5h')[2] == 90 and P('in 90 min for 2h')[0:3:2] == (now + 5400, 120), (P('in 2 hours'), P('now for 1.5h')))
+    t('words of the reason are never read as times: "update now available", "restart after update"',
+      P('at 23:59 for 30m update now available')[0] == cli._at('23:59') and P('at 23:59 for 30m update now available')[3] == 'update now available'
+      and P('in 15m for 30m restart after update')[1] is False and P('in 15m for 30m restart after update')[3] == 'restart after update', P('in 15m for 30m restart after update'))
+    t('"scheduled maintenance" keeps both words', P('now scheduled maintenance')[3] == 'scheduled maintenance', P('now scheduled maintenance'))
+    bad = []
+    for s in ('in soon', 'for ever now', 'in 2 fortnights', 'at 25:00'):
+        try: P(s); bad.append(s)
+        except ValueError: pass
+    t('a time word whose value cannot be read is refused, nothing set', not bad, bad)
+
     print('maintenance after the batches: it starts when no batch has sent a request for 2 minutes')
     maint.announce(after_batches=True, minutes=20, why='reboot')
     t('waiting for the batches: phase says so, nothing refused yet', maint.read()['phase'] == 'waiting' and 'batch traffic drains' in maint.words(maint.read()))

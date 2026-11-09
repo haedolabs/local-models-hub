@@ -9,7 +9,7 @@
   localmodels keep               one instance-manager pass: crash reloads, missing replicas, due recycles
   localmodels recycle [model] | --status   request fresh instances before a batch (instances past before_batch of
                                  their threshold recycle first) | tokens since load against the recycle threshold
-  localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off
+  localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [reason ...] | off
                                  announce a maintenance window (X-Hub-Maintenance, dashboard, MCP status, Claude Code
                                  hook); while active, new requests get 503 + Retry-After and the instance manager pauses;
                                  off reloads the families loaded at its start. No arguments: the window and overlapping runs
@@ -895,6 +895,54 @@ def _minutes(word):
     return max(1, h * 60 + mi + round(s / 60))
 
 
+UNITS = dict(s=1 / 60, sec=1 / 60, secs=1 / 60, second=1 / 60, seconds=1 / 60, m=1, min=1, mins=1, minute=1, minutes=1,
+             h=60, hr=60, hrs=60, hour=60, hours=60)
+WHEN = ('in', 'at', 'for', 'now', 'after', 'after-batches')
+MAINT_USAGE = 'localmodels maintenance in 15m | at 20:30 | now | after-batches [for 30m] [reason ...]'
+
+
+def _duration(words, j):
+    """A duration at words[j]: '30m', '1h30m', '1.5h', '90' (minutes), or a number and a unit word ('2 hours').
+    -> (minutes, words used), or (None, 0); a bare number followed by a word that is neither a unit nor a time word
+    ('2 fortnights') is not read as minutes."""
+    if j >= len(words): return None, 0
+    w, nxt = words[j].lower(), (words[j + 1].lower() if j + 1 < len(words) else None)
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)([a-z]*)', w)
+    if m and m.group(2) in UNITS: return max(1, round(float(m.group(1)) * UNITS[m.group(2)])), 1
+    if m and not m.group(2):
+        if nxt in UNITS: return max(1, round(float(m.group(1)) * UNITS[nxt])), 2
+        if nxt is not None and nxt not in WHEN: return None, 0
+        return max(1, round(float(m.group(1)))), 1
+    mins = _minutes(w)
+    return (mins, 1) if mins else (None, 0)
+
+
+def maintenance_args(words, now=None):
+    """The maintenance command's words: the time words first (in, at, now, after-batches, for), then the reason, taken
+    verbatim from its first word on, so a reason's own words ("update now available") are never read as times.
+    -> (start, after_batches, minutes, reason); ValueError with the usage when a time word's value cannot be read or no
+    start is given."""
+    now = now or time.time()
+    start, after, minutes, i = None, False, 30, 0
+    while i < len(words):
+        w = words[i].lower()
+        if w in ('in', 'for'):
+            d, n = _duration(words, i + 1)
+            if d is None: raise ValueError(f'{w} needs a duration (15m, 2h, 1.5h, 90 min): {MAINT_USAGE}')
+            if w == 'in': start = now + 60 * d
+            else: minutes = d
+            i += 1 + n; continue
+        if w == 'at':
+            at = _at(words[i + 1]) if i + 1 < len(words) else None
+            if at is None: raise ValueError(f'at needs a time (20:30): {MAINT_USAGE}')
+            start, i = at, i + 2; continue
+        if w == 'now': start, i = now, i + 1; continue
+        if w in ('after-batches', 'after'): after, i = True, i + 1; continue
+        break
+    if start is None and not after: raise ValueError(f'say when: {MAINT_USAGE}')
+    return start, after, minutes, ' '.join(words[i:])
+
+
 def _at(word):
     """'20:30' -> that time today, or tomorrow when it has passed; None when it is not a time."""
     m = re.fullmatch(r'(\d{1,2}):(\d\d)', word or '')
@@ -960,9 +1008,9 @@ def demo_cmd(a):
 
 
 def maintenance_cmd(a):
-    """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off."""
+    """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [reason ...] | off."""
     from . import dash, maint, models
-    words = [x for x in a if x != 'maintenance']
+    words = list(a)
     if words[:1] == ['off']:
         for line in models.end_maintenance(): print(line)
         print('maintenance ended: requests are admitted again and the instance manager resumes')
@@ -978,21 +1026,9 @@ def maintenance_cmd(a):
                   + (f", done about {finish_words(p['finish'])}" if p.get('finish') else ', no estimate yet')
                   + (' · ends after maintenance starts' if clash else ''))
         return 0
-    start, after, minutes, why, i = None, False, 30, [], 0
-    while i < len(words):
-        w = words[i]
-        if w == 'in' and i + 1 < len(words) and _minutes(words[i + 1]):
-            start = time.time() + 60 * _minutes(words[i + 1]); i += 2; continue
-        if w == 'at' and i + 1 < len(words) and _at(words[i + 1]):
-            start = _at(words[i + 1]); i += 2; continue
-        if w == 'for' and i + 1 < len(words) and _minutes(words[i + 1]):
-            minutes = _minutes(words[i + 1]); i += 2; continue
-        if w == 'now': start = time.time(); i += 1; continue
-        if w in ('after-batches', 'after'): after = True; i += 1; continue
-        why.append(w); i += 1
-    if start is None and not after:
-        print('say when: localmodels maintenance in 15m | at 20:30 | now | after-batches [for 30m] [why ...]'); return 2
-    m = maint.announce(start=start, minutes=minutes, why=' '.join(why), after_batches=after)
+    try: start, after, minutes, why = maintenance_args(words)
+    except ValueError as e: print(f'nothing set: {e}'); return 2
+    m = maint.announce(start=start, minutes=minutes, why=why, after_batches=after)
     print('set: ' + maint.words(m))
     print('  every gateway response now carries X-Hub-Maintenance; the dashboard, `localmodels`, the status tool and the')
     print('  Claude Code hook report it; once active, new requests get 503 + Retry-After and the instance manager pauses')
