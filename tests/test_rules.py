@@ -505,6 +505,11 @@ def test_prune(box):
     f, n, b = cli.prune(30, root)
     t('one old folder and one old log removed, their bytes counted', (f, n) == (1, 1) and b > 0, (f, n, b))
     t('the recent folder, the recent log and the running batch kept', os.path.isdir(new) and os.path.isdir(live) and os.path.exists(os.path.join(proj, 'new-ask.json')) and not os.path.exists(old))
+    for n, age in (('20261001-010101-1-ask.json', ago40), ('20261106-010101-1-ask.json', ago2)):    # job logs written straight under the root
+        open(os.path.join(root, n), 'w').write('{}'); os.utime(os.path.join(root, n), (age, age))
+    f, n, b = cli.prune(30, root)
+    t('a job log written straight under the root is pruned by age too', n == 1 and not os.path.exists(os.path.join(root, '20261001-010101-1-ask.json'))
+      and os.path.exists(os.path.join(root, '20261106-010101-1-ask.json')), (f, n))
 
 
 def test_settings(box):

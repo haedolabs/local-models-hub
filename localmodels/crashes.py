@@ -40,6 +40,7 @@ from . import llmshare
 LOGS = os.path.expanduser(os.environ.get('LMSTUDIO_LOGS') or '~/.lmstudio/server-logs')
 RECORD = os.path.join(llmshare.SHARED, 'crashes.jsonl')
 STATE = os.path.join(llmshare.SHARED, 'keeper.json')
+ROLL_AT = 2_000_000                # crashes.jsonl becomes crashes.jsonl.1 past this size; both are read
 CAP, WINDOW = 3, 3600            # reloads of one model within an hour; a crash after the third leaves it down
 GIVE_UP = 3600                   # a crashed model not loaded again within an hour (no room, a load that fails) is left down
 RETRY_LEFT = 3600                # a model left down is tried once more this often
@@ -171,17 +172,18 @@ def _read(fresh=False):
 
 
 def _record(rec):
-    llmshare._append(RECORD, dict(rec, at=round(rec.get('at') or time.time(), 1)))
+    llmshare._append(RECORD, dict(rec, at=round(rec.get('at') or time.time(), 1)), roll_at=ROLL_AT)
 
 
 def records(days=7):
     since, out = time.time() - days * 86400, []
-    try:
-        for line in open(RECORD):
-            try: r = json.loads(line)
-            except ValueError: continue
-            if r.get('at', 0) >= since: out.append(r)
-    except OSError: pass
+    for path in (RECORD + '.1', RECORD):
+        try:
+            for line in open(path):
+                try: r = json.loads(line)
+                except ValueError: continue
+                if r.get('at', 0) >= since: out.append(r)
+        except OSError: pass
     return sorted(out, key=lambda r: r.get('at', 0))
 
 
