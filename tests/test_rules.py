@@ -170,7 +170,8 @@ def test_admission(box):
       admission.estimate(b'x' * 30000, dict(max_tokens=1000)) == 11000 and admission.estimate(b'x' * 30000, {}) == 14096
       and admission.estimate(b'x' * 30000, dict(max_tokens=20000)) == 14096 and admission.estimate(b'x' * 30000, dict(max_completion_tokens=500)) == 10500,
       [admission.estimate(b'x' * 30000, j) for j in (dict(max_tokens=1000), {}, dict(max_tokens=20000))])
-    t('...at most one context window', admission.estimate(b'x' * 300000, {}, 65536) == 65536)
+    t('...at most one context window; an embedding writes nothing', admission.estimate(b'x' * 300000, {}, 65536) == 65536
+      and admission.estimate(b'x' * 30000, {}, 0, answer=False) == 10000)
     img = b'{"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,' + b'A' * 500000 + b'"}}]}'
     t('an image sent inline counts what a model reads of it, not its encoding', admission.prompt_bytes(img) < 4200, admission.prompt_bytes(img))
     rows_ = [dict(at=time.time() - 60, status=200, prompt_tokens=10000, bytes=32000)] * 20 + [dict(at=time.time() - 60, status=200, prompt_tokens=10000, bytes=44000)] * 20

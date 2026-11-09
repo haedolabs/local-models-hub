@@ -19,8 +19,17 @@ the models (--anyway: start regardless). --smoke: two short requests in one cell
 --url measures one LM Studio directly (another Mac's, say, through `ssh -L 2234:127.0.0.1:1234 <that Mac>`): the same
 requests and scoring, two cells (one instance, --at-once requests at a time, thinking on and off), no lease and no hub,
 so the numbers compare with the one-instance cells of a run through the gateway.
+
+  python3 tools/loadbench.py --memory [--copy <id>] [--sizes 16000,32000,48000] [--at-once-list 1,2,4] [--answer 256]
+                             [--floor 12] [--anyway]
+                             the memory an instance takes for the context it holds: for each prompt size and number at
+                             once (fresh memos, so no prompt cache serves them; thinking off; a short answer), pinned to
+                             one instance (the family's second replica by default), its engine's physical footprint every
+                             0.5 s (proc_pid_rusage, which does not stop the process) against its footprint at rest, with
+                             the Mac's free memory; cells in order of the context they hold, and none started once free
+                             memory has fallen below --floor GiB. Report: ~/Library/Logs/LocalModels/loadbench-memory-<time>.json.
 """
-import argparse, concurrent.futures as cf, json, os, random, re, statistics, sys, threading, time, urllib.error, urllib.request
+import argparse, concurrent.futures as cf, json, os, random, re, statistics, subprocess, sys, threading, time, urllib.error, urllib.request
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HOME)
@@ -162,6 +171,102 @@ def cell(name, model, at_once, think, n, max_tokens, run_id, seed0):
                 items=sum(r['n_items'] for r in rs), requests=rs)
 
 
+# ---------------------------------------------------------------- --memory: what an instance takes for the context it holds
+CHARS_PER_TOKEN = 4.0          # the memos read at about 4 characters a token (measured: 13,000 characters and the instructions, ~3,500 tokens)
+
+
+def engine_of(copy):
+    """(pid, footprint bytes) of the LM Studio engine serving this instance: the engine process that started closest
+    before the hub saw the instance loaded (keeper.json), or (None, None)."""
+    from localmodels import admission, crashes
+    since = ((crashes._read(fresh=True).get('seen') or {}).get(copy) or {}).get('since')
+    eng = admission.engines()
+    if not since or not eng: return None, None
+    starts = {}
+    for line in subprocess.run(['ps', '-o', 'pid=,etime=', '-p', ','.join(map(str, eng))], capture_output=True, text=True).stdout.splitlines():
+        p = line.split()
+        if len(p) < 2: continue
+        e, d = p[1], 0
+        if '-' in e: d, e = e.split('-'); d = int(d)
+        parts = [int(x) for x in e.split(':')]
+        while len(parts) < 3: parts.insert(0, 0)
+        starts[int(p[0])] = time.time() - (d * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2])
+    pid = min(starts, key=lambda q: abs(starts[q] - since), default=None)
+    return (pid, eng.get(pid)) if pid and abs(starts[pid] - since) < 180 else (None, None)
+
+
+def memory(a):
+    """--memory: each cell's peak footprint against the context it holds (module docstring)."""
+    from localmodels import admission, dash, models
+    fams = llmshare.settings().get('families') or {}
+    family = a.family or next(iter(fams), None)
+    copies = llmshare.copies(family, fresh=True) if family else []
+    copy = a.copy or next((c for c in copies if c != family), None) or (copies[0] if copies else None)
+    if not copy: sys.exit('no instance loaded')
+    pid, foot = engine_of(copy)
+    if not pid: sys.exit(f'the engine process of {copy} could not be told apart (keeper.json has no load time for it near any engine\'s start)')
+    weights = models.gb(next((r['size'] for r in llmshare.loaded() if r['id'] == copy), '0 GB'))
+    sizes = [int(x) for x in a.sizes.split(',') if x.strip()]
+    cells = sorted(((s, n) for s in sizes for n in (int(x) for x in a.at_once_list.split(',') if x.strip())), key=lambda c: (c[0] * c[1], c[1]))
+    print(f'{copy}: engine pid {pid}, {foot / 2**30:.2f} GiB now ({weights:.2f} GiB of weights); cells {cells}; stop below {a.floor} GiB free')
+    out, run_id, seed = [], int(time.time()), 50_000
+
+    def rest():                                            # the instance idle (nothing of the gateway's in flight on it), then its footprint
+        for _ in range(240):
+            if not [m for m in llmshare.inflight() if m.get('copy') == copy]: break
+            time.sleep(0.5)
+        time.sleep(2)
+        return admission._footprint(pid) or 0
+
+    with llmshare.lease('local-models', [family], 'test'):
+        for size, n in cells:
+            free = models.free_gb()
+            if free < a.floor: print(f'  stop: {free:.1f} GiB free < {a.floor} GiB'); break
+            if engine_of(copy)[0] != pid: print(f'  stop: {copy} was reloaded (a recycle or a crash): its engine changed'); break
+            idle = rest()
+            texts = [memo(seed + k, chars=int(size * CHARS_PER_TOKEN))[0] for k in range(n)]; seed += n
+            results, peak, low, gpu_peak, done = [None] * n, idle, free, 0.0, threading.Event()
+
+            def one(k):
+                body = dict(model=copy, max_tokens=a.answer, **agent.SAMPLING, **agent.THINK_OFF,
+                            messages=[{'role': 'system', 'content': 'Summarize the memo in three sentences.'}, {'role': 'user', 'content': texts[k]}])
+                req = urllib.request.Request(llmshare.HUB + '/v1/chat/completions', data=json.dumps(body).encode(), headers={
+                    'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test', 'X-Session': f'loadbench-memory-{run_id}'})
+                t0 = time.time()
+                try: r = json.load(urllib.request.urlopen(req, timeout=3600)); u = r.get('usage') or {}; err = None
+                except (OSError, ValueError) as e: u, err = {}, f'{type(e).__name__}: {e}'
+                results[k] = dict(prompt=u.get('prompt_tokens') or 0, completion=u.get('completion_tokens') or 0, seconds=round(time.time() - t0, 1), error=err)
+
+            ths = [threading.Thread(target=one, args=(k,)) for k in range(n)]
+            t0 = time.time()
+            for th in ths: th.start()
+            while any(th.is_alive() for th in ths):
+                f = admission._footprint(pid) or 0
+                peak = max(peak, f)
+                try: used, total = dash.memory(); low = min(low, total - used)
+                except (OSError, ValueError): pass
+                time.sleep(0.5)
+            ctx = sum(r['prompt'] + r['completion'] for r in results if r)
+            c = dict(size=size, at_once=n, prompt=[r['prompt'] for r in results], context=ctx, seconds=round(time.time() - t0, 1),
+                     errors=[r['error'] for r in results if r['error']], idle_gib=round(idle / 2**30, 2), peak_gib=round(peak / 2**30, 2),
+                     above_weights=round(peak / 2**30 - weights, 2), above_idle=round((peak - idle) / 2**30, 2), min_free_gib=round(low, 1))
+            out.append(c)
+            print(f"  {n} x {size:,}: {ctx:,} tokens held at once · {c['seconds']} s · footprint at rest {c['idle_gib']} GiB, peak {c['peak_gib']} "
+                  f"(+{c['above_idle']} over rest, +{c['above_weights']} over the weights) · least free {c['min_free_gib']} GiB"
+                  + (f" · errors: {c['errors']}" if c['errors'] else ''), flush=True)
+    pts = [(c['context'], c['above_idle']) for c in out if c['context'] and not c['errors']]
+    if len(pts) >= 2:
+        mx, my = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+        sxx = sum((p[0] - mx) ** 2 for p in pts)
+        k = sum((p[0] - mx) * (p[1] - my) for p in pts) / sxx if sxx else 0
+        print(f'\n  peak over rest = {my - k * mx:.2f} GiB + {k * 2**30 / 1024:.0f} KiB per token held (least squares over {len(pts)} cells)')
+    os.makedirs(os.path.expanduser('~/Library/Logs/LocalModels'), exist_ok=True)
+    path = os.path.expanduser(f"~/Library/Logs/LocalModels/loadbench-memory-{time.strftime('%Y%m%d-%H%M')}.json")
+    json.dump(dict(copy=copy, pid=pid, weights_gib=weights, at=run_id, cells=out), open(path, 'w'), indent=1)
+    print(f'report: {path}')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--n', type=int, default=16); ap.add_argument('--max-tokens', type=int, default=10000)
@@ -169,12 +274,15 @@ def main():
     ap.add_argument('--smoke', action='store_true'); ap.add_argument('--anyway', action='store_true')
     ap.add_argument('--url'); ap.add_argument('--model'); ap.add_argument('--at-once', type=int, default=4); ap.add_argument('--label', default='remote')
     ap.add_argument('--think', default='both', choices=['both', 'on', 'off'], help='with --url: which thinking cells to run')
+    ap.add_argument('--memory', action='store_true'); ap.add_argument('--copy'); ap.add_argument('--sizes', default='16000,32000,48000')
+    ap.add_argument('--at-once-list', default='1,2,4'); ap.add_argument('--answer', type=int, default=256); ap.add_argument('--floor', type=float, default=12.0)
     a = ap.parse_args()
     if a.url: return straight(a)
     if not llmshare.hub_up(fresh=True): sys.exit("gateway down: localmodels start")
     busy = [d for d in llmshare.leases() if d.get('kind') == 'batch']
     if busy and not a.anyway:
         print('a batch is using the models (' + ', '.join(sorted({d.get('project') or '?' for d in busy})) + '): try later, or --anyway'); return 3
+    if a.memory: return memory(a)
     fams = llmshare.settings().get('families') or {}
     family = a.family or next(iter(fams), None) or next((llmshare.family(r['id']) for r in llmshare.loaded(fresh=True)), None)
     if not family: sys.exit('no model loaded')

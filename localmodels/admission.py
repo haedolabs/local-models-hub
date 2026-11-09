@@ -81,15 +81,15 @@ def ratio():
     return _ratio['v']
 
 
-def estimate(body, j=None, window=0):
+def estimate(body, j=None, window=0, answer=True):
     """A request's context in tokens before LM Studio reads it: its prompt (the body's bytes at this Mac's bytes per token)
-    and what it may write (max_tokens, max_completion_tokens or max_output_tokens, at most ANSWER; ANSWER when unsaid),
-    at most one context window when it is known."""
+    and what it may write (max_tokens, max_completion_tokens or max_output_tokens, at most ANSWER; ANSWER when unsaid;
+    nothing for answer=False, an embedding), at most one context window when it is known."""
     j = j if isinstance(j, dict) else {}
     out = next((j[k] for k in ('max_tokens', 'max_completion_tokens', 'max_output_tokens') if j.get(k) is not None), None)
     try: out = int(out)
     except (TypeError, ValueError): out = ANSWER
-    n = int(prompt_bytes(body) / ratio()) + (min(out, ANSWER) if out > 0 else ANSWER)
+    n = int(prompt_bytes(body) / ratio()) + ((min(out, ANSWER) if out > 0 else ANSWER) if answer else 0)
     return min(n, int(window)) if window else n
 
 
