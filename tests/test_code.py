@@ -177,6 +177,23 @@ def test_record(box):
     t('a broken line is skipped; an old one falls outside the window', len(errors.recent(5)) == 3 and len(errors.recent(180)) == 4)
 
 
+def test_mcp_stdout(box):
+    import subprocess
+    env = dict(os.environ, LOCALMODELS_STATE=os.path.join(box, 'mcp-state'), PYTHONDONTWRITEBYTECODE='1')
+    msgs = [dict(jsonrpc='2.0', id=1, method='initialize', params={}),
+            dict(jsonrpc='2.0', id=2, method='tools/call', params=dict(name='no-such-tool', arguments={}))]
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'bin', 'localmodels'), 'mcp'], input=''.join(json.dumps(m) + '\n' for m in msgs),
+                       capture_output=True, text=True, env=env, timeout=60)
+    lines = [x for x in r.stdout.split('\n') if x.strip()]
+
+    def parses(x):
+        try: return isinstance(json.loads(x), dict)
+        except ValueError: return False
+    t("after a tool call that raises, every line the MCP server wrote to stdout is a JSON-RPC message (the error line goes to stderr)",
+      len(lines) == 2 and all(parses(x) for x in lines) and 'no-such-tool' in r.stderr, lines)
+    t('the error is still recorded, in the state folder the server was given', os.path.exists(os.path.join(box, 'mcp-state', 'errors.jsonl')))
+
+
 def test_name_tool(box):
     from localmodels import mcp_server, names
     names.FILE, names._cache['mtime'] = os.path.join(box, 'names.json'), None
@@ -216,6 +233,7 @@ def main():
           js_undefined('<script>function a(xs) { return xs.map(short).join(", "); }</script>') == ['short'])
         print('the error record')
         test_record(box)
+        test_mcp_stdout(box)
         print("a project names itself (the name tool)")
         test_name_tool(box)
     finally: shutil.rmtree(box, ignore_errors=True)

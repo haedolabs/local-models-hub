@@ -9,7 +9,7 @@ recorded at most once a minute (a loop that fails every second does not flood th
 errors.jsonl in the hub's state folder rolls over past 1 MB. `localmodels errors` and GET /hub/errors read it; the
 dashboard shows a line when something was recorded in the last 10 minutes. Recording costs nothing until something fails.
 """
-import json, os, threading, time, traceback
+import json, os, sys, threading, time, traceback
 
 from . import llmshare
 
@@ -36,7 +36,7 @@ def record(where, exc=None, words=None, trace=None, source='gateway'):
                **({'repeats': repeats} if repeats else {}))
     try: llmshare._append(FILE, rec, roll_at=ROLL_AT)
     except OSError: pass
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", flush=True)
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", file=sys.stderr, flush=True)   # stdout is a protocol channel (MCP, the hook)
     return rec
 
 
