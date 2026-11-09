@@ -512,6 +512,33 @@ def test_write_problem(box):
     t('the next append that works clears it', good is True and llmshare.write_problem() is None, llmshare.write_problem())
 
 
+def test_cli_args():
+    print('the command line: an unknown option, a help flag or a bad value runs nothing')
+    import contextlib, io
+    from localmodels import cli
+    ran = []
+    names = ('publish', 'uninstall', 'install', 'prune', 'door', 'demo_cmd', 'status')
+    real = {n: getattr(cli, n) for n in names}
+    for n in names: setattr(cli, n, lambda *a, n=n, **k: ran.append((n, a, k)) or 0)
+    try:
+        def run(*argv):
+            ran.clear(); out = io.StringIO()
+            with contextlib.redirect_stdout(out): code = cli.main(list(argv))
+            return code, list(ran), out.getvalue()
+        code, did, out = run('publish', '--dry-run')
+        t('publish --dry-run is the dry run (the checks only), not a release', code == 0 and did and '--dry' in did[0][1][0], (code, did))
+        for argv in (('publish', '--help'), ('uninstall', '--help'), ('install', '-h'), ('--help',), ('-h',)):
+            code, did, out = run(*argv)
+            t(f'{" ".join(argv)}: the help, nothing run', code == 0 and not did and 'localmodels publish' in out, (argv, code, did))
+        for argv in (('install', '--bogus'), ('publish', '--version'), ('prune', '--days', '-1'), ('uninstall', '--force'), ('stop', '--now')):
+            code, did, out = run(*argv)
+            t(f'{" ".join(argv)}: refused with exit 2, nothing run', code == 2 and not did, (argv, code, did, out[-120:]))
+        code, did, out = run('install', '--wait=480')
+        t('--wait=480 is read as --wait 480', code == 0 and did and did[0][1][0] == 480 * 60, did)
+    finally:
+        for n, f in real.items(): setattr(cli, n, f)
+
+
 def test_install_dry(box):
     print('install --dry says what it would do and writes nothing; check notices a missing lms')
     import contextlib, io
@@ -997,6 +1024,7 @@ def main():
         test_prune(box)
         test_settings(box)
         test_write_problem(box)
+        test_cli_args()
         test_install_dry(box)
         test_first_settings()
         test_runs()
