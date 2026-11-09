@@ -55,6 +55,8 @@
   localmodels mcp                the MCP server (Claude Code starts it)
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
                                  the version stamped, committed, tagged and pushed (--dry: the checks only)
+  localmodels help | -h | --help anywhere: this text. An option a verb does not take, or a value it cannot use, runs
+                                 nothing (exit 2); --name=value is read as --name value, --dry-run as --dry
 """
 import errno, glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
 
@@ -1347,9 +1349,47 @@ def publish(a):
     return 0
 
 
+FLAGS = {   # verb: (options that take a value, options that stand alone); a verb not listed reads its own words
+    'status': ((), ()), 'st': ((), ()), 'open': ((), ()), 'log': (('--hours',), ()), 'swapcheck': ((), ()),
+    'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
+    'demo': (('--minutes',), ('--dry',)), 'peer': ((), ('--dry',)), 'peers': ((), ('--dry',)), 'crashes': (('--days',), ('--scan',)),
+    'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
+    'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
+    'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
+    'restart': ((), ()), 'mcp': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+}
+LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
+
+
+def checked_args(verb, a):
+    """The options after a verb, checked before anything runs: one it does not take, one that needs a value and has
+    none, or a number below what it allows -> words for a person (exit 2); None when all is well."""
+    values, alone = FLAGS[verb]
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x in values:
+            if i + 1 >= len(a) or a[i + 1].startswith('--'): return f'{x} needs a value (localmodels help)'
+            if x in LEAST:
+                try: bad = float(a[i + 1]) < LEAST[x]
+                except ValueError: return f'{x}: {a[i + 1]!r} is not a number'
+                if bad: return f'{x}: {a[i + 1]} is below {LEAST[x]}'
+            i += 2; continue
+        if x in alone or not x.startswith('-'): i += 1; continue
+        return f'unknown option {x} for {verb} (localmodels help)'
+    return None
+
+
 def main(argv):
-    a = list(argv)
+    a = []
+    for x in argv:                                       # --flag=value is --flag value; --dry-run is --dry
+        if x.startswith('--') and '=' in x: a += x.split('=', 1)
+        else: a.append('--dry' if x == '--dry-run' else x)
+    if '-h' in a or '--help' in a: print(__doc__.strip()); return 0   # anywhere: a help flag never runs a verb
     verb = a.pop(0) if a and not a[0].startswith('-') else 'status'
+    if verb in FLAGS:
+        why = checked_args(verb, a)
+        if why: print(why); return 2
     if verb in ('status', 'st'): return status()
     if verb == 'dash':
         from . import dash
@@ -1409,6 +1449,6 @@ def main(argv):
         if not a: print('localmodels agent-run <folder>'); return 2
         return mcp_server.run_folder(a[0])
     if verb == 'publish': return publish(a)
-    if verb in ('help', '-h', '--help'): print(__doc__.strip()); return 0
+    if verb == 'help': print(__doc__.strip()); return 0
     if verb == 'version': print(VERSION); return 0
     print(f'unknown: {verb} (localmodels help)'); return 2
