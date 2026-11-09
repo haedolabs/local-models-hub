@@ -218,7 +218,7 @@ class Upstream:
     def __init__(self, method, path, body, headers, base=None):
         u = urllib.parse.urlsplit(base or UP)
         if base:                                         # a peer: connect within seconds, then wait as long as the answer takes
-            self.conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=peers.CONNECT)
+            self.conn = peers.LinkConnection(u.hostname, u.port or 80, timeout=peers.CONNECT)   # only over the link's interface
             self.conn.connect(); _keepalive(self.conn.sock); self.conn.sock.settimeout(3600)
         else: self.conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=3600)
         self.conn.request(method, path, body=body, headers=headers)
@@ -730,7 +730,7 @@ def listen_link():
                     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {cur[0]}:{cur[1]} stopped", flush=True)
                 cur, peers.LISTEN['words'] = None, None
                 if want:
-                    problem = peers.token_problem()
+                    problem = peers.serve_problem(want['address']) or peers.token_problem()
                     if problem: words = f'link listener not started: {problem}'
                     else:
                         try:

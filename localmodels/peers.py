@@ -31,7 +31,7 @@ address; route_of() says which interface the route to a peer takes. macOS's Loca
 LaunchAgent's connections to the local network with "no route to host" and no prompt: reach_words() says where to turn it
 on. LM Link (LM Studio's own linking) is not used: llmshare leaves its rows (deviceIdentifier set) out of the listing.
 """
-import collections, errno, hashlib, hmac, ipaddress, json, os, re, secrets, shlex, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
+import collections, errno, hashlib, hmac, http.client, ipaddress, json, os, re, secrets, shlex, socket, subprocess, threading, time, urllib.parse
 
 from . import VERSION, errors, llmshare, maint
 
@@ -47,7 +47,6 @@ PEER_WAIT = 5                  # seconds a peer's door may keep this Mac's reque
 CONNECT = 3                    # seconds to connect to a peer
 WAKE = threading.Event()       # a request to a peer failed: look again at once
 LISTEN = {'words': None}       # in the door: what its listener for peers does now, in words (gateway.listen_link)
-_open = urllib.request.build_opener(urllib.request.ProxyHandler({})).open    # never through a proxy from the environment
 _cache = {}
 
 
@@ -159,6 +158,16 @@ def serving():
     return dict(address=addr, port=port)
 
 
+def serve_problem(address):
+    """Why this Mac will not listen for peers on `serve`'s address, or None: it must be one address of this Mac, so the
+    listener is bound to its interface; 0.0.0.0 or :: would listen on every interface, Wi-Fi included."""
+    a = str(address or '').strip('[]')
+    try: ip = ipaddress.ip_address(a.split('%')[0])
+    except ValueError: return f'serve address {a!r} is not an IP address: give the Thunderbolt Bridge address of this Mac'
+    if ip.is_unspecified: return f'serve address {a} listens on every interface: give the Thunderbolt Bridge address of this Mac'
+    return None
+
+
 def cid(model, peer):
     """The copy id the door gives a family on a peer: '<family> on <peer>'."""
     return f'{model}{ON}{peer}'
@@ -198,6 +207,60 @@ def interface_of(address, text=None):
     for name, addrs in interfaces(text).items():
         if any(a == address for a, _ in addrs): return name
     return None
+
+
+def on_link(host, text=None):
+    """Where a peer is reached: (interface, this Mac's address there, the peer's address) when the peer's IPv4 address,
+    or one its name resolves to, is on the subnet of one of this Mac's interfaces (a direct link, no router); else
+    (None, words, None), and nothing is sent to it. With the Thunderbolt cable out the bridge has no address, and the
+    peer's address would take the default route to whatever answers there. A loopback peer is on lo0; an IPv6 link-local
+    address names its interface (fe80::2%bridge0)."""
+    h = str(host or '').strip('[]')
+    if loopback(h): return 'lo0', None, h
+    if '%' in h: return h.split('%', 1)[1], None, h
+    try: ips = [ipaddress.ip_address(h)]
+    except ValueError:
+        try: ips = [ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(h, None, socket.AF_INET, socket.SOCK_STREAM)]
+        except (OSError, UnicodeError, ValueError): ips = []
+    ifs = interfaces(text) if text is not None else _every('interfaces', 2, interfaces)
+    for ip in ips:
+        for name, addrs in ifs.items():
+            for a, n in addrs:
+                if ip.version == 4 and str(ip) != a and ip in ipaddress.ip_network(f'{a}/{n}', strict=False): return name, a, str(ip)
+    return None, (f"{h} is not on a subnet of this Mac's interfaces (Thunderbolt cable out, the bridge without its static address, "
+                  'or a routed address): nothing is sent to it'), None
+
+
+class LinkConnection(http.client.HTTPConnection):
+    """An HTTP connection to a peer's door that leaves only through the interface the peer is on (IP_BOUND_IF, from this
+    Mac's address there), so with the link down nothing takes another route; with no such interface it is never opened
+    (ENETUNREACH). http.client follows no redirect and reads no proxy from the environment."""
+    def connect(self):
+        iface, src, addr = on_link(self.host)
+        if not iface: raise OSError(errno.ENETUNREACH, src)
+        fam = socket.AF_INET6 if ':' in addr else socket.AF_INET
+        info = socket.getaddrinfo(addr, self.port, fam, socket.SOCK_STREAM)[0]
+        s = socket.socket(info[0], info[1], info[2])
+        try:
+            idx = socket.if_nametoindex(iface)
+            if fam == socket.AF_INET6: s.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
+            else: s.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+            if src: s.bind((src, 0))
+            s.settimeout(self.timeout)
+            s.connect(info[4])
+        except OSError: s.close(); raise
+        self.sock = s
+
+
+def fetch(url, path, headers, timeout=CONNECT):
+    """GET a path from a peer's door over a LinkConnection. -> (status, body); OSError when the peer cannot be reached."""
+    u = urllib.parse.urlsplit(url)
+    c = LinkConnection(u.hostname, u.port or 80, timeout=timeout)
+    try:
+        c.request('GET', path, headers=headers)
+        r = c.getresponse()
+        return r.status, r.read(4_000_000)
+    finally: c.close()
 
 
 def ports(text=None):
@@ -539,16 +602,18 @@ class Link:
         if not tok:
             with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', token_problem() or 'no peer-token on this host', tok, t0
             p.tries_refused += 1; return
-        req = urllib.request.Request(p.url + '/hub/peer', headers={'X-Hub-Token': tok, 'X-Hub-From': me()})
+        iface, why, _ = on_link(p.host)
+        if not iface: return self._down(p, why)                 # the token goes nowhere but the link
         try:
-            with _open(req, timeout=CONNECT) as r: rep = json.load(r)
-            if not isinstance(rep, dict) or rep.get('hub') != 'local-models': raise ValueError('response is not a local-models hub report')
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', f'auth failed (HTTP {e.code}): peer-token mismatch; both hosts need the same peer-token', tok, t0
+            code, data = fetch(p.url, '/hub/peer', {'X-Hub-Token': tok, 'X-Hub-From': me()})
+            if code in (401, 403):
+                with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', f'auth failed (HTTP {code}): peer-token mismatch; both hosts need the same peer-token', tok, t0
                 p.tries_refused += 1; return
-            return self._down(p, f'peer gateway returned HTTP {e.code}')
-        except (OSError, ValueError) as e: return self._down(p, reach_words(e) if isinstance(e, OSError) else f'invalid poll response ({e})')
+            if code != 200: return self._down(p, f'peer gateway returned HTTP {code}')
+            rep = json.loads(data)
+            if not isinstance(rep, dict) or rep.get('hub') != 'local-models': raise ValueError('response is not a local-models hub report')
+        except OSError as e: return self._down(p, reach_words(e))
+        except (ValueError, http.client.HTTPException) as e: return self._down(p, f'invalid poll response ({type(e).__name__}: {e})')
         with self.lock:
             p.rtt, p.report, p.seen_at, p.fails, p.next_at, p.tries_refused = time.time() - t0, rep, time.time(), 0, time.time() + POLL, 0
             m = rep.get('maintenance') or {}

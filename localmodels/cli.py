@@ -56,7 +56,7 @@
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
                                  the version stamped, committed, tagged and pushed (--dry: the checks only)
 """
-import glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
+import errno, glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
 
 from . import HOME, NAME, VERSION, llmshare
 
@@ -451,10 +451,9 @@ def peer_cmd(a):
         for p in ps:
             tok, here = peers.token(), None
             try:
-                req = urllib.request.Request(p['url'] + '/hub/health', headers={'X-Hub-Token': tok or ''})
-                peers._open(req, timeout=peers.CONNECT).read(); here = 'connected, token accepted'
-            except urllib.error.HTTPError as e: here = f"connected, HTTP {e.code}" + (' (peer-token mismatch)' if e.code in (401, 403) else '')
-            except OSError as e: here = peers.reach_words(e)
+                code, _ = peers.fetch(p['url'], '/hub/health', {'X-Hub-Token': tok or ''})
+                here = 'connected, token accepted' if code == 200 else f"connected, HTTP {code}" + (' (peer-token mismatch)' if code in (401, 403) else '')
+            except OSError as e: here = peers.reach_words(e) if e.errno != errno.ENETUNREACH else str(e.strerror or e)
             if p['state'] == 'down' and here.startswith('connected'):    # a process's first connection after the link comes up can
                 time.sleep(2)                                            # fail while macOS evaluates its Local Network policy: poll once more
                 p = next((q for q in (door_link(force=True) or {}).get('peers') or [] if q['name'] == p['name']), p)

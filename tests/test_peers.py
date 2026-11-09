@@ -115,6 +115,15 @@ def test_units(box):
     w = peers.reach_words(OSError(errno.EHOSTUNREACH, 'No route to host'))
     t("EHOSTUNREACH is read as macOS's Local Network permission, with where to turn it on", 'Local Network' in w and 'Privacy' in w, w)
     t('a refused connection is read as the peer gateway not listening', 'ECONNREFUSED' in peers.reach_words(ConnectionRefusedError(errno.ECONNREFUSED, 'Connection refused')))
+    t("a peer on a subnet of this Mac's interfaces is reached only through that interface, from this Mac's address there",
+      peers.on_link('192.168.213.1', ifc) == ('bridge0', '192.168.213.2', '192.168.213.1'), peers.on_link('192.168.213.1', ifc))
+    out = ifc.replace('\tinet 192.168.213.2 netmask 0xffffff00 broadcast 192.168.213.255\n', '')    # the cable out: the bridge has no IPv4 address
+    t('with the cable out the peer is on no subnet here: no interface, and the words say nothing is sent',
+      peers.on_link('192.168.213.1', out)[0] is None and 'nothing is sent' in peers.on_link('192.168.213.1', out)[1], peers.on_link('192.168.213.1', out))
+    t('the link listener is bound to one address of this Mac: an unspecified address (every interface) or a name is refused',
+      peers.serve_problem('0.0.0.0') and peers.serve_problem('::') and peers.serve_problem('mac.local') and peers.serve_problem('192.168.213.1') is None)
+    t('a loopback peer (a sandbox) is on lo0; an IPv6 link-local address names its interface',
+      peers.on_link('127.0.0.1', ifc)[0] == 'lo0' and peers.on_link('fe80::2%bridge0', ifc)[0] == 'bridge0')
 
     mine = dict(variant='test/family@8bit', bytes=1000, format='safetensors', definition='abc')
     t('the same variant, size, format and definition: the same model', peers.match(mine, dict(mine))[0])
@@ -488,6 +497,39 @@ def test_link_rules(box):
         t('a peer with nothing in flight takes any request; a peer that reports no budget (an older hub) too',
           L.ctx_fits(c, 0, 50000) and not L.ctx_fits(c, 9000, 2000) and (setattr(p, 'ctx', {}) or L.ctx_fits(c, 9000, 50000)))
     finally: llmshare.settings = real
+
+    print('the link: the token goes only to a peer on a subnet of this Mac, and never follows a redirect')
+    got = []
+
+    class Catch(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            got.append(self.headers.get('X-Hub-Token')); self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+    catch = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Catch); threading.Thread(target=catch.serve_forever, daemon=True).start()
+
+    class Move(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            self.send_response(302); self.send_header('Location', f'http://127.0.0.1:{catch.server_address[1]}/hub/peer'); self.end_headers()
+    move = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Move); threading.Thread(target=move.serve_forever, daemon=True).start()
+    tok_was, peers.token = peers.token, lambda: TOKEN
+    real_conn = peers.LinkConnection.connect if hasattr(peers, 'LinkConnection') else None
+    tried = []
+    try:
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'off': dict(url='http://192.0.2.7:1235'),
+                                                                                    'moved': dict(url=f'http://127.0.0.1:{move.server_address[1]}')})
+        L = peers.Link()
+        if real_conn: peers.LinkConnection.connect = lambda self: (tried.append(self.host), real_conn(self))[1]
+        L.poll(force=True)
+        off, moved = L.peers['off'], L.peers['moved']
+        t('a peer address on no subnet of this Mac (the cable out, or a routed address): down, and no connection is even tried',
+          off.state == 'down' and 'nothing is sent' in (off.why or '') and '192.0.2.7' not in tried, (off.state, off.why, tried))
+        t("a redirect from a peer's address is not followed: the token reaches nothing else", moved.state == 'down' and '302' in (moved.why or '') and not got,
+          (moved.state, moved.why, got))
+    finally:
+        llmshare.settings, peers.token = real, tok_was
+        if real_conn: peers.LinkConnection.connect = real_conn
+        catch.shutdown(); move.shutdown()
 
 
 # ---------------------------------------------------------------- two doors
