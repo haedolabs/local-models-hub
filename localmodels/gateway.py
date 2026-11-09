@@ -37,7 +37,7 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, crashes, errors, icon, llmshare, maint, peers, recycle, runs, web, whois
+from . import VERSION, admission, crashes, errors, icon, llmshare, maint, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
@@ -47,9 +47,9 @@ GEN = re.compile(r'/(chat/completions|completions|embeddings|responses|messages|
 SWAP = re.compile(r'/(load|unload)$')
 PASS = ('content-type', 'authorization', 'accept', 'x-api-key', 'anthropic-version', 'openai-organization')
 GONE = re.compile(r'crashed|no models? (?:are |is )?loaded|not loaded|model_not_found|has been unloaded|model unloaded', re.I)
-# The engine's own failures, which LM Studio answers with HTTP 400 while the instance may still be listed for a moment:
-# "Channel Error" is what every request in flight gets when the generation thread dies (measured with metal::malloc crashes).
-ENGINE = re.compile(r'channel error|fatal exception|generation thread|metal::\w+|resource limit \(\d+\)|segmentation fault', re.I)
+# The engine's own failures (crashes.ENGINE, one list with the crash classifier's), which LM Studio answers with HTTP 400 while
+# the instance may still be listed for a moment: "Channel Error" is what every request in flight gets when the generation
+# thread dies; "[METAL] ... Insufficient Memory (...kIOGPUCommandBufferCallbackErrorOutOfMemory)" is the engine out of memory.
 LOG_MAX, RETRY_AFTER, AWAKE_FOR = 20_000_000, 30, 600
 # How each of LM Studio's APIs ends a stream that came out whole: OpenAI's chat and completions with `data: [DONE]`, the
 # others with a last event of their own (Anthropic's messages, OpenAI's responses, LM Studio's own chat). An error event
@@ -423,6 +423,16 @@ class Door(http.server.BaseHTTPRequestHandler):
         code, usage, waited, chosen, held, note, tries, peer = 0, {}, 0.0, model, 0.0, None, 0, None
         sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
         sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
+        need, room = admission.estimate(body, j, admission.window(model)), [None]   # its context in tokens; why it last waited for room
+
+        def waiting(unfit):                                # admission: the copies it waits on for room, not for a slot
+            words = admission.why_waiting(unfit, llmshare.load_here(), need) if unfit else None
+            if words: room[0] = words
+            if rec.get('wait_for') != words:
+                if words: rec['wait_for'] = words
+                else: rec.pop('wait_for', None)
+                try: llmshare._write(mark, rec)
+                except OSError: pass
         try:
             base = llmshare.family(model)
             m = maint.on()
@@ -443,7 +453,8 @@ class Door(http.server.BaseHTTPRequestHandler):
                         why = (f'{base} is still reloading after a crash' if crashes.reloading(model) else
                                f'{base} is being recycled' if recycle.draining() else f'no instance of {base} is loaded (localmodels use {base})')
                         code, _ = self._send(503, dict(error=f'{why}; retry in {RETRY_AFTER} s'), retry_after=RETRY_AFTER); note = why; break
-                    with llmshare.slot_any(lambda: self._candidates(model, skip, kind), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600, kind=kind) as (chosen, w):
+                    with llmshare.slot_any(lambda: self._candidates(model, skip, kind), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
+                                           kind=kind, need=need, fits=admission.fits, waiting=waiting) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'client closed the connection while queued'; break
                         m = maint.on()
@@ -451,7 +462,8 @@ class Door(http.server.BaseHTTPRequestHandler):
                             ra = maint.retry_after(m)
                             code, _ = self._send(503, dict(error=f'service unavailable: {maint.words(m)}; retry in {ra} s'), retry_after=ra)
                             note = 'maintenance'; break
-                        rec.update(state='answering', answering_since=time.time(), copy=chosen)
+                        rec.pop('wait_for', None)
+                        rec.update(state='answering', answering_since=time.time(), copy=chosen, ctx=need)   # ctx: recycle.plan counts it
                         try: llmshare._write(mark, rec)
                         except OSError: pass
                         peer = peers.split(chosen)[1]
@@ -493,6 +505,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             log(dict(at=round(time.time(), 1), project=project, session=who.get('session'), host_session=who.get('host_session'),
                      kind=kind, model=model, copy=chosen, endpoint=path.split('?')[0].rstrip('/').rsplit('/', 1)[-1], status=code, stream=bool(j.get('stream')),
                      seconds=round(time.time() - t0, 2), waited=round(held + (waited or 0), 2), prompt_tokens=p, completion_tokens=c,
+                     bytes=admission.prompt_bytes(body), ctx=need, **({'wait_for': room[0]} if room[0] else {}),   # sizes only, never content
                      **({'held': round(held, 2)} if held else {}), **({'note': note} if note else {}), **({'step': step} if step else {}),
                      **({'tries': tries} if tries > 1 else {}), **run, **({'peer': peers.split(chosen)[1]} if peers.split(chosen)[1] else {}),
                      **({'from': front} if front else {})))
@@ -554,10 +567,10 @@ class Door(http.server.BaseHTTPRequestHandler):
             if code >= 400:
                 data = resp.read(200_000)
                 text = data.decode('utf-8', 'replace')
-                if model and not peer and known(model) and code < 500:
+                failed = crashes.engine_failure(text)
+                if model and not peer and known(model) and (code < 500 or failed):   # a 5xx in the engine's words is a crash too
                     if re.search(r'crashed', text, re.I): return code, {}, f'LM Studio returned HTTP {code}: model crashed'
-                    failed = ENGINE.search(text)
-                    if failed: return code, {}, f'LM Studio returned HTTP {code}: engine failure ({failed.group(0)})'
+                    if failed: return code, {}, f'LM Studio returned HTTP {code}: engine failure ({failed})'
                     if GONE.search(text): return code, {}, f'LM Studio returned HTTP {code}: model not loaded'
                     asked = rename[0] if rename else model                  # the words are new: is the copy that answered still there?
                     there = llmshare.api_models()

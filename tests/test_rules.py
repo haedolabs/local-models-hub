@@ -129,7 +129,106 @@ def test_recycle():
     recycle.plan(rows, {}); j = recycle.job()
     t('idle past the soft share of the written threshold: recycled now', j and j['copy'] == C2 and 'idle at 76%' in j['why'], j and j['why'])
     t('the default counts tokens written', recycle.thresholds({})['written'] == 150000 and recycle.thresholds(dict(recycle=dict(written=0)))['written'] == 0)
+
+    print('prompt-heavy work: the context in flight counts toward the threshold, so the drain starts before it is crossed')
+    reset(since); served(C2, 37, written_each=500, prompt_each=6000)       # 240,500 processed (80%), 18,500 written
+    t('80% of the band and busy, nothing in flight counted: not due', recycle.plan(rows, busy, flying={}) is None)
+    w = recycle.plan(rows, busy, flying={C2: 70000}); j = recycle.job()
+    t('80% plus 70,000 tokens in flight: it drains now, and says the requests in flight carried it there',
+      j and j['copy'] == C2 and 'with the requests in flight' in j['why'] and '~70,000 tokens in flight' in j['why'], j and j['why'])
+    reset(since); served(C2, 37, written_each=500, prompt_each=6000)
+    os.makedirs(llmshare.INFLIGHT, exist_ok=True)
+    marks = [os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-t{k}.json') for k in range(3)]
+    for p, (state, ctx) in zip(marks, (('answering', 40000), ('answering', 30000), ('queued', 90000))):
+        llmshare._write(p, dict(hub_pid=os.getpid(), since=time.time(), state=state, copy=C2, ctx=ctx))
+    recycle.plan(rows, busy); j = recycle.job()
+    t("...read from the gateway's in-flight markers by default (answering requests only)", j and j['copy'] == C2 and '~70,000 tokens in flight' in j['why'], j and j['why'])
+    for p in marks: os.remove(p)
+    reset(since); served(C2, 50, written_each=500, prompt_each=6000)       # 325,000: past the threshold
+    with crashes._state() as st: st['recycle']['last'][B] = time.time() - 10
+    t('a copy past its threshold waits GAP_HARD (30 s) after its sibling\'s recycle', recycle.plan(rows, busy, flying={}) is None)
+    with crashes._state() as st: st['recycle']['last'][B] = time.time() - 40
+    recycle.plan(rows, busy, flying={}); j = recycle.job()
+    t('...then drains, though two minutes have not passed (its sibling took every request while it drained)', j and j['copy'] == C2, j)
+    reset(since); served(C2, 36, written_each=500, prompt_each=6000)       # 234,000: 78%, past the soft share, idle
+    with crashes._state() as st: st['recycle']['last'][B] = time.time() - 40
+    t('a copy only past the soft share still waits the two minutes', recycle.plan(rows, {}, flying={}) is None)
+    with crashes._state() as st: st['recycle']['last'][B] = time.time() - 200
+    recycle.plan(rows, {}, flying={}); j = recycle.job()
+    t('...and is recycled idle after them', j and j['copy'] == C2 and 'idle' in j['why'], j and j['why'])
     llmshare.settings = real
+
+
+def test_admission(box):
+    print("admission by context size: a request's size, an instance's budget, who fits")
+    from localmodels import admission, models
+    real = llmshare.settings, admission.MODELS_DIR, admission.free_gib, llmshare.requests_log
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False)}
+    llmshare.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
+    admission._ratio.update(at=time.time() + 3600, v=3.0)
+    t('a request: its prompt from its bytes (3 a token here), and its answer up to 4,096 counted',
+      admission.estimate(b'x' * 30000, dict(max_tokens=1000)) == 11000 and admission.estimate(b'x' * 30000, {}) == 14096
+      and admission.estimate(b'x' * 30000, dict(max_tokens=20000)) == 14096 and admission.estimate(b'x' * 30000, dict(max_completion_tokens=500)) == 10500,
+      [admission.estimate(b'x' * 30000, j) for j in (dict(max_tokens=1000), {}, dict(max_tokens=20000))])
+    t('...at most one context window', admission.estimate(b'x' * 300000, {}, 65536) == 65536)
+    img = b'{"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,' + b'A' * 500000 + b'"}}]}'
+    t('an image sent inline counts what a model reads of it, not its encoding', admission.prompt_bytes(img) < 4200, admission.prompt_bytes(img))
+    rows_ = [dict(at=time.time() - 60, status=200, prompt_tokens=10000, bytes=32000)] * 20 + [dict(at=time.time() - 60, status=200, prompt_tokens=10000, bytes=44000)] * 20
+    llmshare.requests_log = lambda hours=1.0, tail=0: list(rows_)
+    admission._ratio.update(at=0.0)
+    r1 = admission.ratio()
+    llmshare.requests_log = lambda hours=1.0, tail=0: list(rows_[:15])
+    admission._ratio.update(at=0.0)
+    r2 = admission.ratio()
+    t("bytes per token from this Mac's own requests: the lower quartile, so estimates err high; 3.0 until 20 are on record", r1 == 3.2 and r2 == 3.0, (r1, r2))
+    llmshare.requests_log = real[3]
+    admission._ratio.update(at=time.time() + 3600, v=3.0)
+
+    qwen = dict(text_config=dict(num_hidden_layers=40, num_attention_heads=16, num_key_value_heads=2, head_dim=256, hidden_size=2048,
+                                 layer_types=['linear_attention'] * 3 + ['full_attention'] + ['linear_attention'] * 3 + ['full_attention']
+                                 + (['linear_attention'] * 3 + ['full_attention']) * 8))
+    dense = dict(num_hidden_layers=80, num_attention_heads=64, num_key_value_heads=8, hidden_size=8192)
+    t("a model's memory per token from its config: KV cache in its full-attention layers, attention scores while it reads",
+      admission.shape(qwen) == (20480, 65536) and admission.shape(dense) == (327680, 262144) and admission.shape({}) is None,
+      (admission.shape(qwen), admission.shape(dense)))
+    d = os.path.join(box, 'lms-models', 'lmstudio-community', 'Qwen3.6-35B-A3B-MLX-8bit'); os.makedirs(d)
+    json.dump(qwen, open(os.path.join(d, 'config.json'), 'w'))
+    admission.MODELS_DIR = os.path.join(box, 'lms-models'); admission._shapes.clear()
+    pt = admission.per_token(dict(id=B, key=B, variant=B + '@8bit'))
+    t('...found by the model and its loaded variant under LM Studio\'s models folder; a model it cannot find counts PER_TOKEN',
+      pt == int((20480 + 65536) * admission.CACHE_SHARE) and admission.per_token(dict(id='x/other', key='x/other')) == admission.PER_TOKEN, pt)
+    two = [dict(row(B), variant=B + '@8bit', size='35.16 GB'), dict(row(C2), variant=B + '@8bit', size='35.16 GB')]
+    want = int((((128 - 22.4 - 8) / 2) - 35.16 - admission.KEPT) * 2**30 / pt)
+    b2 = admission.default_budget(C2, two, memory=(128.0, 22.4, 107.5))
+    t('the M5 Max: each of two instances gets its share of memory less other programs and headroom, less its weights and the cache it keeps',
+      b2 == want and 90000 < b2 < 100000, (b2, want))
+    fam[B]['copies'] = 1
+    llmshare.settings = lambda: dict(families=fam, batch_at_once=4, headroom_gb=4)
+    one = two[:1]
+    want1 = int((min(48 - 5.4 - 4, 40 - admission.OTHER_GPU) - 35.16) * 2**30 / pt)
+    b1 = admission.default_budget(B, one, memory=(48.0, 5.4, 40.0))
+    t('the M4 Pro peer: one instance, the lesser of memory and the GPU limit, no sibling cache to keep', b1 == want1 and 25000 < b1 < 35000, (b1, want1))
+    t('...never below LEAST, never above every slot\'s window', admission.default_budget(B, one, memory=(40.0, 5.4, 36.0)) == admission.LEAST
+      and admission.default_budget(B, one, memory=(1024.0, 5.4, 900.0)) == 65536 * 4)
+    fam[B]['copies'] = 2
+    llmshare.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
+    fam[B]['admit'] = dict(tokens=50000); admission._budgets.clear()
+    t('"admit": {"tokens": N} sets it; "admit": false turns it off; a peer\'s instance has none here',
+      admission.budget(C2) == 50000 and (fam[B].update(admit=False) or admission.budget(C2) == 0) and admission.budget(B + ' on macbook') == 0)
+    fam[B]['admit'] = dict(tokens=50000)
+    free = {'v': 30.0}
+    admission.free_gib = lambda: free['v']
+    t('an instance with nothing in flight takes any request; a busy one, while its load and the request fit the budget',
+      admission.fits(C2, 0, 60000) and admission.fits(C2, 30000, 20000) and not admission.fits(C2, 30001, 20000))
+    free['v'] = 6.0
+    t('below headroom_gb free, a long request waits for an idle instance; a short one still starts',
+      not admission.fits(C2, 10000, admission.LONG) and admission.fits(C2, 10000, admission.LONG - 1) and admission.fits(C2, 0, admission.LONG))
+    w = admission.why_waiting([C2], {C2: 10000}, admission.LONG)
+    t('...and says so', 'memory headroom' in (w or '') and '6.0 GiB free' in w, w)
+    marks = [dict(copy=C2, state='answering', ctx=7000), dict(copy=C2, state='answering', ctx=3000), dict(copy=C2, state='queued', ctx=9000), dict(copy=B, state='answering')]
+    t('the context in flight per instance, from the in-flight markers: answering requests only', admission.in_flight(marks) == {C2: 10000}, admission.in_flight(marks))
+    llmshare.settings, admission.MODELS_DIR, admission.free_gib, _ = real
+    admission._ratio.update(at=0.0, v=admission.RATIO); admission._budgets.clear(); admission._shapes.clear()
 
 
 def test_listing(box):
@@ -311,6 +410,21 @@ def test_keep(box):
     unloads.clear(); loads.clear(); listings[:] = [[row(B), row(C2)]]
     words = models.keep()
     t('then copy 1, now the oldest: its own recycle unloads it', unloads == [B] and loads == [B] and recycle.job() is None, (unloads, words))
+
+    unloads.clear(); loads.clear(); reset(time.time() - 3 * 3600); served(C2, 130)          # copy 2 draining, then it crashes
+    with crashes._state() as st:
+        st['recycle']['job'] = dict(copy=C2, family=B, state='draining', since=time.time() - 60, why='test', counts={}, share=1.2)
+        st['down'] = {B: dict(crashed=time.time() - 10, models=[C2], state='loading again', keeper=True, gone=True)}
+    listings[:] = [[row(B)]]; api['ids'] = {B: 65536}
+    n0 = len([r for r in crashes.records(1) if r.get('event') == 'recycled'])
+    words = models.keep()
+    rec = [r for r in crashes.records(1) if r.get('event') == 'recycle given up']
+    t('a copy that crashes while it drains: crash recovery reloads it, and that reload ends the drain (it is fresh)',
+      loads == [C2] and recycle.job() is None and rec and 'crashed while draining' in rec[-1].get('why', '') and C2 not in recycle.draining(), (loads, words, rec[-1:]))
+    listings[:] = [[row(B), row(C2)]]; api['ids'] = {B: 65536, C2: 65536}
+    words = models.keep()
+    t('...so it is not unloaded again for the old count, and no recycle is recorded for it',
+      not unloads and len([r for r in crashes.records(1) if r.get('event') == 'recycled']) == n0, (unloads, words))
     L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
     with crashes._state() as st: st['down'] = {}
 
@@ -677,6 +791,7 @@ def main():
     try:
         sandbox(box)
         test_recycle()
+        test_admission(box)
         test_listing(box)
         test_server_probe(box)
         test_unload(box)
