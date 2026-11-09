@@ -425,6 +425,7 @@ def run(box):
         llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2, context=16384, parallel=2, recycle=False, admit=dict(tokens=10000))},
                                          batch_at_once=4, headroom_gb=1)
         admission._ratio.update(at=time.time() + 3600, v=3.0)      # 3 bytes a token, as before any request of this Mac is on record
+        real_free, admission.free_gib = admission.free_gib, (lambda: 64.0)   # memory to spare: the budget alone decides here
         big, small = 21000, 600                                      # bytes of prompt: ~7,000 tokens and ~200, plus 100 of answer each
         plan('slow', 'slow', 'slow', 'slow'); Fake.slow = 3.0
         got, marks_seen = {}, {}
@@ -463,7 +464,7 @@ def run(box):
         order = [s_[1] for s_ in Fake.seen]
         t('a short request behind the long one takes the room it leaves (backfill); after RESERVE the long one keeps its place, so the next short one waits behind it',
           order == ['S1', 'S2', 'E', 'S3'] and all(got.get(k, [0])[0] == 200 for k in ('S1', 'S2', 'E', 'S3')), (order, {k: got.get(k, [0])[0] for k in ('S1', 'S2', 'E', 'S3')}))
-        llmshare.RESERVE, llmshare.parallel_of, llmshare.settings = real_reserve, real_par, real_set
+        llmshare.RESERVE, llmshare.parallel_of, llmshare.settings, admission.free_gib = real_reserve, real_par, real_set, real_free
         rows[:] = saved
         admission._ratio.update(at=0.0, v=admission.RATIO)
 

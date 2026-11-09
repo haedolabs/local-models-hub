@@ -14,7 +14,7 @@ runs while nobody looks, except the memory sample.
 """
 import collections, json, os, re, threading, time
 
-from . import HOME, NAME, VERSION, crashes, dash, errors, llmshare, maint, names, peers, recycle, sessions
+from . import HOME, NAME, VERSION, admission, crashes, dash, errors, llmshare, maint, names, peers, recycle, sessions
 from . import names as names_mod          # colors() takes a parameter called names
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dash.html')
@@ -93,8 +93,11 @@ def snapshot():
 def _snapshot():
     lm, users, cs = dash.lmstudio(), dash.users(), dash.claude()
     holders = collections.defaultdict(collections.Counter)          # copy -> {project: answering}
-    for f in llmshare.inflight():
+    marks = llmshare.inflight()
+    for f in marks:
         if f.get('state') == 'answering': holders[f.get('copy') or f.get('model')][names.project(f.get('project'))] += 1
+    loads = admission.in_flight(marks)                               # copy -> tokens of context in flight (admission.py)
+    room = collections.Counter(f.get('model') for f in marks if f.get('state') == 'queued' and f.get('wait_for'))   # waiting for room
     try: view = _cached('recycle-view', 10, lambda: recycle.view(lm['models']))
     except Exception as e: view = dict(copies={}, job=None, last={}); errors.record('snapshot: recycle view', e)
     job = view.get('job')
@@ -107,8 +110,10 @@ def _snapshot():
             if other: hold.append(dict(project='direct to LM Studio', n=other))
             cps.append(dict(id=c['id'], state=c['state'], parallel=c['parallel'], busy=c.get('busy', 0), context=c['context'],
                             size=c.get('size'), holders=hold, served=view['copies'].get(c['id']),
-                            recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs))
-        fams.append(dict(id=f['id'], at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps))
+                            recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs,
+                            ctx=dict(load=loads.get(c['id'], 0), budget=admission.budget(c['id']))))
+        fams.append(dict(id=f['id'], at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps,
+                         waiting_room=sum(n for m, n in room.items() if llmshare.family(m) == f['id'])))
     n, secs, refused = _cached('waits7', 30, lambda: llmshare.waits(7))
     out = dict(time=time.time(), clock=time.strftime('%H:%M:%S'),
                door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting_here()),

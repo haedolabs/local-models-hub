@@ -136,6 +136,13 @@ def status():
                                               for i, c in v['copies'].items()))
         if v.get('job'): print('  ' + recycle.words(v['job']))
     except Exception as e: print(f'  (could not read per-instance token counts: {e})')   # not recorded: shown to the person running the command
+    try:
+        from . import admission
+        a = admission.view(lm['models'])
+        if any(x['budget'] for x in a.values()):
+            print('  context in flight: ' + ' · '.join(f"{dash.short(i)} {x['load'] / 1000:.0f}k of {x['budget'] / 1000:.0f}k" for i, x in a.items() if x['budget'])
+                  + ' (admission by context size)')
+    except Exception as e: print(f'  (could not read the context in flight: {e})')   # not recorded: shown to the person running the command
     for line in crash_lines(): print(line)
     print('clients:' if users else 'clients: none')
     for r in users:
