@@ -876,6 +876,21 @@ def test_privacy_check(box):
     except RuntimeError as e: moved = f'refused: {e}'
     t('HEAD moved since the checks: refused', str(moved).startswith('refused'), moved)
 
+    print('publish: before anything is stamped, the version, the tag and origin are checked')
+    g('reset', '-q', '--hard', 'HEAD~1'); g('push', '-q', '-f', 'origin', 'HEAD:refs/heads/main'); g('fetch', '-q', 'origin')
+    P = lambda want, cur='1.0.0': cli.preflight(repo, want, cur, 'main')
+    t('a version not above the current one is refused', P('1.0.0') and P('0.9.9') and P('1.0') , (P('1.0.0'), P('0.9.9'), P('1.0')))
+    g('tag', '-a', 'v1.0.5', '-m', 'old'); t('a tag that exists here is refused', P('1.0.5') and 'v1.0.5' in P('1.0.5'), P('1.0.5')); g('tag', '-d', 'v1.0.5')
+    other = os.path.join(box, 'other-clone'); subprocess.run(['git', 'clone', '-q', origin, other], check=True)
+    o = lambda *a: subprocess.run(['git', '-C', other, *a], capture_output=True, text=True, check=True).stdout
+    o('config', 'user.email', 't@example.org'); o('config', 'user.name', 'T'); o('config', 'commit.gpgsign', 'false')
+    o('tag', '-a', 'v1.0.6', '-m', 'pushed elsewhere'); o('push', '-q', 'origin', 'v1.0.6')
+    w6 = P('1.0.6')
+    t('a tag that is already on origin is refused', w6 and 'origin' in w6, w6)
+    t('a new version with origin contained in HEAD: nothing to say', P('1.0.7') is None, P('1.0.7'))
+    open(os.path.join(other, 'later.txt'), 'w').write('x\n'); o('add', '.'); o('commit', '-q', '-m', 'pushed from elsewhere'); o('push', '-q', 'origin', 'HEAD:main')
+    t('origin has a commit this branch lacks: refused (pull first), nothing stamped', P('1.0.7') and 'pull' in P('1.0.7'), P('1.0.7'))
+
 
 def test_about(box):
     print("the dashboard's corner: the version, the license and the source, read from the hub's own files at run time")

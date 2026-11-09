@@ -1262,6 +1262,25 @@ def private_check(repo, words_file, tip='HEAD'):
     return out
 
 
+def preflight(repo, want, current, branch):
+    """What would make this release go wrong, checked before anything is stamped: a version that is not X.Y.Z or not
+    above the current one, its tag already here or on origin, or origin's branch holding commits HEAD lacks (the branch
+    push would be refused while the tag went out). Fetches origin. -> words, or None when all is well."""
+    if not re.match(r'^\d+\.\d+\.\d+$', str(want or '')): return f'{want!r} is not a version like 1.2.3'
+    cur = (current if current.count('.') == 2 else current + '.0').split('.')
+    if tuple(int(x) for x in want.split('.')) <= tuple(int(x) for x in cur): return f'{want} is not above the current version {current}'
+    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, timeout=120)
+    if git('rev-parse', '-q', '--verify', f'refs/tags/v{want}').returncode == 0: return f'the tag v{want} already exists here'
+    if 'origin' not in git('remote').stdout.split(): return None                   # the first push: nothing there yet
+    r = git('fetch', '-q', 'origin')
+    if r.returncode: return f'could not fetch origin ({(r.stderr or r.stdout).strip()[:200]}): nothing checked against it'
+    if git('ls-remote', '--tags', 'origin', f'refs/tags/v{want}').stdout.strip(): return f'the tag v{want} is already on origin'
+    if git('rev-parse', '-q', '--verify', f'refs/remotes/origin/{branch}').returncode == 0 and \
+            git('merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD').returncode != 0:
+        return f'origin/{branch} has commits this branch lacks: pull first (git pull --ff-only origin {branch})'
+    return None
+
+
 def stamp(repo, want, head):
     """The version `want` stamped into the code and the plugin manifest and committed on its own, on `head`, the commit
     the checks read. -> the release commit's sha; RuntimeError when HEAD has moved since the checks or anything is
@@ -1279,7 +1298,9 @@ def stamp(repo, want, head):
     open(init, 'w').write(new)
     open(p, 'w').write(json.dumps(d, indent=2) + '\n')
     r = git('commit', '-q', '-m', f'Release {want}', '--', *STAMPED)
-    if r.returncode: raise RuntimeError((r.stderr or r.stdout).strip())
+    if r.returncode:
+        git('checkout', 'HEAD', '--', *STAMPED)                # the stamp is undone: the tree is as the checks left it
+        raise RuntimeError((r.stderr or r.stdout).strip())
     return git('rev-parse', 'HEAD').stdout.strip()
 
 
@@ -1291,6 +1312,12 @@ def publish(a):
         branch, head = _git('rev-parse', '--abbrev-ref', 'HEAD'), _git('rev-parse', 'HEAD')
     except RuntimeError as e: print(f'git: {e}'); return 2
     if branch == 'HEAD': print('HEAD is detached: check out the branch to release first'); return 2
+    cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
+    want = opt(a, '--version')
+    if not want:
+        x, y, z = (int(p) for p in cur.split('.')); want = f'{x}.{y}.{z + 1}'
+    why = preflight(HOME, want, VERSION, branch)
+    if why: print(f'nothing published: {why}'); return 2
     print('1. the sandbox tests:')
     bad = False
     for name, good, note in run_tests():
@@ -1321,12 +1348,7 @@ def publish(a):
     else:
         print(f"   clean: {pc['lines']} added lines, {pc['files']} new file names and {pc['commits']} commit messages, in "
               + ('the commits not yet on origin' if pc['since'] else 'every commit (nothing is on origin yet)'))
-    if '--dry' in a: print('--dry: the checks only; nothing stamped, committed or pushed'); return 0
-    cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
-    want = opt(a, '--version')
-    if not want:
-        x, y, z = (int(p) for p in cur.split('.')); want = f'{x}.{y}.{z + 1}'
-    if not re.match(r'^\d+\.\d+\.\d+$', want): print(f'{want!r} is not a version like 1.2.3'); return 2
+    if '--dry' in a: print(f'--dry: the checks only; nothing stamped, committed or pushed (this release would be {want})'); return 0
     try:
         release = stamp(HOME, want, head)
         _git('tag', '-a', f'v{want}', '-m', f'Release {want}', release)
@@ -1340,7 +1362,7 @@ def publish(a):
                   f'   localmodels publish --remote git@github.com:<owner>/<repo>.git   (next time; this release is committed and tagged)\n'
                   '   or: git remote add origin <url> && git push -u origin main --follow-tags')
             return 0
-        _git('push', 'origin', f'{release}:refs/heads/{branch}', '--follow-tags')    # the commit checked and its release commit, whatever the branch holds by now
+        _git('push', '--atomic', 'origin', f'{release}:refs/heads/{branch}', '--follow-tags')   # the checked commit and its release commit, with its tag, or nothing
         url = _git('remote', 'get-url', 'origin')
     except RuntimeError as e: print(f'5. push failed: {e}'); return 1
     m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', url)
