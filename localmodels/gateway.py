@@ -212,6 +212,12 @@ def _listed():
     return set(ids) if ids is not None else None
 
 
+def peer_words(said):
+    """What the hub records of a peer's error text: only the engine's failure words in it, if any ('' otherwise). The
+    text came from the peer's LM Studio, and can quote the prompt it failed on."""
+    return crashes.engine_failure(str(said or '')) or ''
+
+
 def _keepalive(sock):
     """TCP keepalive on a connection to a peer: a link that dies during a long answer is noticed in about 25 s (the
     peer's system answers the probes even while its model is busy), not after the hour a read may take."""
@@ -588,8 +594,9 @@ class Door(http.server.BaseHTTPRequestHandler):
                 try: said = json.loads(data).get('error')
                 except (ValueError, AttributeError): said = None
                 said = said.get('message') if isinstance(said, dict) else said
-                peers.LINK.failed(peer, code, str(said or '')[:200], dict(resp.getheaders()))
-                return code, {}, f'peer {name} returned HTTP {code}' + (f' ({str(said)[:160]})' if said else '')
+                said = peer_words(said)                                      # never the text as it came: it can quote a prompt
+                peers.LINK.failed(peer, code, said, dict(resp.getheaders()))
+                return code, {}, f'peer {name} returned HTTP {code}' + (f' ({said})' if said else '')
             if code >= 400:
                 data = resp.read(200_000)
                 text = data.decode('utf-8', 'replace')

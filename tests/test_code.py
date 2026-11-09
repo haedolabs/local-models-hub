@@ -303,6 +303,13 @@ def main():
         rows = {f: [l for l in text.split('\n') if 'job_status' in l and 'swap_check' in l and 'tools' in l.lower()] for f, text in lists.items()}
         missing = {f: [n for n in tools if not ls or not all(re.search(rf'\b{n}\b', l) for l in ls)] for f, ls in rows.items()}
         t('every MCP tool is named where the tools are listed (module docstring, README, plugin manifest, setup command)', not any(missing.values()), missing)
+        print("what a client sent stays out of the hub's records")
+        from localmodels import gateway, whois
+        apps = [whois._app(a) for a in (['node', '-e', 'fetch("a secret prompt")'], ['python3', '-X', 'dev', '-c', 'print("secret")'],
+                                         ['/usr/bin/perl', '-p', '-e', 's/x/secret/'], ['python3', 'tools/run.py', '--x'], ['python3', '-m', 'pkg.mod'])]
+        t("inline code (-c, -e, -p, --eval) is never a client's name, only its interpreter's", apps == ['node', 'python', 'perl', 'run.py', 'pkg.mod'], apps)
+        w = [gateway.peer_words(x) for x in ('Error rendering prompt: "the text of a prompt"', 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memory', None)]
+        t("a peer's error text is recorded only as the engine's failure words, never as it came (it can quote a prompt)", w == ['', 'Insufficient Memory', ''], w)
         print('the error record')
         test_record(box)
         test_mcp_stdout(box)
