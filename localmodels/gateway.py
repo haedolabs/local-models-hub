@@ -47,6 +47,7 @@ LINK_PASS = ('X-Project', 'X-Session', 'X-Kind', 'X-Step', 'X-Run', 'X-Run-Total
 GEN = re.compile(r'/(chat/completions|completions|embeddings|responses|messages|chat)$')
 SWAP = re.compile(r'/(load|unload)$')
 PASS = ('content-type', 'authorization', 'accept', 'x-api-key', 'anthropic-version', 'openai-organization')
+OWN = ('authorization', 'x-api-key', 'openai-organization')   # a client's own credentials: passed to LM Studio here, never to a peer (the token authenticates the front)
 GONE = re.compile(r'crashed|no models? (?:are |is )?loaded|not loaded|model_not_found|has been unloaded|model unloaded', re.I)
 # The engine's own failures (crashes.ENGINE, one list with the crash classifier's), which LM Studio answers with HTTP 400 while
 # the instance may still be listed for a moment: "Channel Error" is what every request in flight gets when the generation
@@ -547,6 +548,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if peer:
             target, extra = peers.LINK.target(peer)
             if not target: return 502, {}, f'peer {name}: removed from settings'
+            headers = {k: v for k, v in headers.items() if k.lower() not in OWN}   # the client's own credentials stay on this Mac
             headers.update(along or {}); headers.update(extra); headers['X-Timeout'] = str(peers.PEER_WAIT)
         who = f'peer {name}' if name else 'LM Studio'
         up = None
