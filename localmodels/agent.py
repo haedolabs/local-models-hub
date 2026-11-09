@@ -211,19 +211,45 @@ def answer(m):
     return re.sub(r'<think>.*?</think>', '', m.get('content') or '', flags=re.S).strip()
 
 
-def json_from(text):
+def json_from(text, kind=None):
+    """The JSON in a model's answer: the whole text (a code fence stripped), else the first object or list in it that
+    parses, so words before or after it do no harm. kind ('object' or 'array', the schema's): only that kind."""
     t = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', (text or '').strip())
-    for cand in (t, (re.search(r'\{.*\}', t, re.S) or [None])[0]):
-        if not cand: continue
-        try: return json.loads(cand)
-        except ValueError: pass
+    want = {'object': dict, 'array': list}.get(kind, (dict, list))
+    try:
+        v = json.loads(t)
+        if kind not in ('object', 'array') or isinstance(v, want): return v
+    except ValueError: pass
+    dec = json.JSONDecoder()
+    for m in list(re.finditer(r'[\[{]', t))[:400]:
+        try: v = dec.raw_decode(t, m.start())[0]
+        except ValueError: continue
+        if isinstance(v, want): return v
     return None
 
 
+def _is(v, kind):
+    if kind == 'integer': return (isinstance(v, int) or isinstance(v, float) and v.is_integer()) and not isinstance(v, bool)
+    if kind == 'number': return isinstance(v, (int, float)) and not isinstance(v, bool)
+    t = {'object': dict, 'array': list, 'string': str, 'boolean': bool, 'null': type(None)}.get(kind)
+    return isinstance(v, t) if t else True
+
+
 def valid(obj, schema):
-    if schema.get('type') == 'object': return isinstance(obj, dict) and all(k in obj for k in schema.get('required', []))
-    if schema.get('type') == 'array': return isinstance(obj, list)
-    return obj is not None
+    """obj matches the schema, all the way down: type, required, properties, items, enum, const, minItems and maxItems
+    (what strict mode enforces; a plain answer, asked without it, is held to the same)."""
+    if not isinstance(schema, dict): return True
+    if 'enum' in schema and obj not in schema['enum']: return False
+    if 'const' in schema and obj != schema['const']: return False
+    ty = schema.get('type')
+    if ty is not None and not any(_is(obj, k) for k in (ty if isinstance(ty, list) else [ty])): return False
+    if isinstance(obj, dict):
+        if not all(k in obj for k in schema.get('required') or []): return False
+        if not all(valid(obj[k], sub) for k, sub in (schema.get('properties') or {}).items() if k in obj): return False
+    if isinstance(obj, list):
+        if len(obj) < int(schema.get('minItems') or 0) or ('maxItems' in schema and len(obj) > int(schema['maxItems'])): return False
+        if isinstance(schema.get('items'), dict) and not all(valid(x, schema['items']) for x in obj): return False
+    return True
 
 
 def nonempty(schema):
@@ -237,10 +263,13 @@ def nonempty(schema):
 
 
 def empty(obj):
-    """An answer with nothing in it: a list with no items, or an object whose every value is empty (the model's whim on
-    a strict schema: it opens and closes its thinking and lists nothing)."""
+    """An answer with nothing in it (the model's whim on a strict schema: it opens and closes its thinking and lists
+    nothing): a list with no items, an object whose lists are all empty (a count or a note beside them changes nothing),
+    or an object with no list whose every value is empty."""
     if isinstance(obj, list): return not obj
-    if isinstance(obj, dict): return bool(obj) and all(v in ([], {}, None, '') for v in obj.values())
+    if isinstance(obj, dict) and obj:
+        lists = [v for v in obj.values() if isinstance(v, list)]
+        return all(not v for v in lists) if lists else all(v in ([], {}, None, '') for v in obj.values())
     return False
 
 
@@ -385,8 +414,9 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                 try: m = ask(body, think=think)
                 except urllib.error.HTTPError as e:
                     last_err = (e.code, err_text(e)); modes.pop(0); continue
-                obj = json_from(m.get('content'))                            # LM Studio may put it in either
-                if obj is None: obj = json_from(m.get('reasoning_content'))
+                kind = job['schema'].get('type')
+                obj = json_from(m.get('content'), kind)                      # LM Studio may put it in either
+                if obj is None: obj = json_from(m.get('reasoning_content'), kind)
                 if obj is None and m.get('_finish') == 'length' and not grown:                # cut off: once more with room
                     grown, tokens = True, tokens * 2; usage['cut'] = usage.get('cut', 0) + 1; continue
                 if obj is not None and valid(obj, job['schema']):
@@ -396,6 +426,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                                                {'role': 'user', 'content': 'That answer lists nothing. Look again at what you found and list every item, as the schema asks.'}]
                         continue
                     result = obj; break
+                if obj is not None: usage['invalid'] = usage.get('invalid', 0) + 1           # JSON, but not the schema's shape
                 if kept is not None: result = kept; break                                     # the plain ask gave nothing usable: the empty answer stands
                 modes.pop(0)
             if result is None and last_err:
