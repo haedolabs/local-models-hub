@@ -219,7 +219,9 @@ def parallel_of(model):
 # ---------------------------------------------------------------- copies: one model loaded more than once
 MODELS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models.json')   # the repo's defaults
 MODELS = os.path.join(SHARED, 'models.json')                                                 # the live settings on this Mac
+MODELS_GOOD = os.path.join(SHARED, 'models.last-good.json')                                  # the last file the gateway read well
 SWAP_LOCK = os.path.join(SHARED, 'swap.lock')
+KEEP_GOOD = False                                        # the gateway sets it: its process alone writes MODELS_GOOD
 _conf = {'path': None, 'mtime': None, 'data': {}, 'error': None}
 
 
@@ -227,23 +229,64 @@ def settings_path():
     return MODELS if os.path.exists(MODELS) else MODELS_DEFAULT
 
 
+def _number(v, positive=False, whole=False):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and (not whole or float(v).is_integer()) and (not positive or v > 0)
+
+
+def validate(d):
+    """The settings' shape, checked before a file is taken: ValueError naming the key that is wrong."""
+    if not isinstance(d, dict): raise ValueError('not a JSON object')
+    fams = d.get('families', {})
+    if not isinstance(fams, dict): raise ValueError('"families" must be an object of families')
+    for name, f in fams.items():
+        if not isinstance(f, dict): raise ValueError(f'family {name!r} must be an object')
+        for k in ('copies', 'context', 'parallel'):
+            if k in f and not _number(f[k], positive=True, whole=True): raise ValueError(f'{name}: "{k}" must be a whole number above 0, not {f[k]!r}')
+        for k in ('recycle', 'admit'):
+            v = f.get(k)
+            if k in f and not (isinstance(v, bool) or isinstance(v, dict) and all(_number(x) for x in v.values())):
+                raise ValueError(f'{name}: "{k}" must be true, false or an object of numbers, not {v!r}')
+        if 'key' in f and not isinstance(f['key'], str): raise ValueError(f'{name}: "key" must be a model key')
+    for k, positive in (('headroom_gb', False), ('batch_at_once', True)):
+        if k in d and not _number(d[k], positive=positive): raise ValueError(f'"{k}" must be a number, not {d[k]!r}')
+    for k in ('peers', 'serve'):
+        if k in d and not isinstance(d[k], dict): raise ValueError(f'"{k}" must be an object')
+
+
 def settings():
     """The hub's settings: {"families": {id: {key, copies, context, parallel, recycle}}, "batch_at_once", "headroom_gb"}.
-    A file that cannot be read (bad JSON, half written) leaves the last good settings standing; settings_error() says so."""
+    A file that cannot be read (bad JSON, half written) or has the wrong shape (validate) leaves the last good settings
+    standing: in a process that has read none yet (a gateway just restarted), the last good copy the gateway kept;
+    settings_error() says which."""
     p = settings_path()
     try: m = os.path.getmtime(p)
     except OSError: return _conf['data']
     if (p, m) != (_conf['path'], _conf['mtime']):
+        first = _conf['path'] is None
         try:
             d = json.load(open(p))
-            if not isinstance(d, dict): raise ValueError('not a JSON object')
+            validate(d)
             _conf.update(path=p, mtime=m, data=d, error=None)
-        except (OSError, ValueError) as e: _conf.update(path=p, mtime=m, error=f'{p}: {type(e).__name__}: {e}')
+            if KEEP_GOOD and p == MODELS:
+                try:
+                    tmp = f'{MODELS_GOOD}.{os.getpid()}.tmp'
+                    with open(tmp, 'w') as f: json.dump(d, f, indent=2)
+                    os.replace(tmp, MODELS_GOOD)
+                except OSError: pass
+        except (OSError, ValueError) as e:
+            why, data = f'{p}: {type(e).__name__}: {e}', _conf['data']
+            if first:                                        # nothing read in this process yet: the last good copy, if any
+                try:
+                    data = json.load(open(MODELS_GOOD)); validate(data)
+                    why += f"; the last good copy (saved {time.strftime('%d %b %H:%M', time.localtime(os.path.getmtime(MODELS_GOOD)))}) is in effect"
+                except (OSError, ValueError): data, why = {}, why + '; no valid settings: running with none'
+            else: why += '; the last valid settings remain in effect'
+            _conf.update(path=p, mtime=m, data=data, error=why)
     return _conf['data']
 
 
 def settings_error():
-    """Why the settings file could not be read, or None (the last good settings stand meanwhile)."""
+    """Why the settings file could not be taken, and which settings are in effect meanwhile, or None."""
     return _conf['error']
 
 
