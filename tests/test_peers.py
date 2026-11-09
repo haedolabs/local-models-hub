@@ -531,6 +531,28 @@ def test_link_rules(box):
         if real_conn: peers.LinkConnection.connect = real_conn
         catch.shutdown(); move.shutdown()
 
+    print('the link: a peer away for days keeps its 60 s backoff, and one peer that fails to be read never stops the others')
+    fetch_was, peers.token = peers.fetch, lambda: TOKEN
+    asked = []
+
+    def fetch(url, path, headers, timeout=peers.CONNECT):
+        asked.append(url)
+        if url.endswith(':1'): raise RuntimeError('a look that fails in an unforeseen way')
+        raise ConnectionRefusedError(errno.ECONNREFUSED, 'refused')
+    try:
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'first': dict(url='http://127.0.0.1:1'), 'second': dict(url='http://127.0.0.1:2')})
+        L = peers.Link(); L.sync()
+        p = L.peers['first']; p.fails = 2000
+        try: L._down(p, 'away'); err = None
+        except Exception as e: err = e
+        t('after 2,000 failed looks (about 18 hours away) the next look is 60 s later, as after 6', err is None and 59 <= p.next_at - time.time() <= 61, repr(err) if err else p.next_at - time.time())
+        peers.fetch = fetch
+        try: L.poll(force=True); err = None
+        except Exception as e: err = e
+        t('a first peer whose look raises: recorded, marked down, and the second peer is still polled',
+          err is None and asked == ['http://127.0.0.1:1', 'http://127.0.0.1:2'] and L.peers['first'].state == 'down' and L.peers['second'].state == 'down', (repr(err), asked))
+    finally: llmshare.settings, peers.fetch, peers.token = real, fetch_was, tok_was
+
 
 # ---------------------------------------------------------------- two doors
 def test_two_doors(box):

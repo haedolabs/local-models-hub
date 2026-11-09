@@ -594,7 +594,10 @@ class Link:
             if not force:
                 if p.state == 'refused' and tok == p.refused_token and now - p.refused_at < REFUSED_AGAIN: continue
                 if p.state != 'refused' and now < p.next_at: continue
-            self._look(p, tok); looked = True
+            try: self._look(p, tok)
+            except Exception as e:                       # one peer's look never stops the others' or link.json
+                errors.record(f'peer poller: {name}', e); self._down(p, f'look failed: {type(e).__name__}: {e}')
+            looked = True
         if (self.peers or had or os.path.exists(STATE)) and (looked or force or time.time() - self.wrote > WRITE_EVERY): self.write()
 
     def _look(self, p, tok):
@@ -639,7 +642,7 @@ class Link:
         with self.lock:
             p.fails += 1
             p.state, p.why = 'down', why
-            p.next_at = time.time() + min(BACKOFF_MAX, POLL * 2 ** (p.fails - 1))
+            p.next_at = time.time() + min(BACKOFF_MAX, POLL * 2 ** min(p.fails - 1, 6))   # the exponent bounded: a float overflows past 2**1023
             p.cap = {}
 
     def _mine(self):
