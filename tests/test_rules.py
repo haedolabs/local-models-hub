@@ -229,6 +229,9 @@ def test_admission(box):
       and 2.2 < g20 < 2.3 and 12 - g40 < 8 < 12 - g20, (round(g20, 2), round(g40, 2)))
     w = admission.why_waiting([C2], {C2: 10000}, 40000)
     t('...and says so', 'memory headroom: 12.0 GiB free' in (w or '') and '~4.5 GiB for this request' in w and 'headroom_gb 8' in w, w)
+    llmshare.listed = lambda: list(two[:1]); free['v'] = 2.0                # one instance: its engine reclaims its own cache
+    t('an instance alone on its Mac is bounded by its budget alone, whatever free memory says (its engine fills it with cache)',
+      admission.fits(B, 10000, 40000) and not admission.fits(B, 10001, 40000) and admission.why_waiting([B], {B: 10000}, 40000) is None)
     llmshare.listed = real_listed
     marks = [dict(copy=C2, state='answering', ctx=7000), dict(copy=C2, state='answering', ctx=3000), dict(copy=C2, state='queued', ctx=9000), dict(copy=B, state='answering')]
     t('the context in flight per instance, from the in-flight markers: answering requests only', admission.in_flight(marks) == {C2: 10000}, admission.in_flight(marks))

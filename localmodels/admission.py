@@ -26,10 +26,10 @@ text-generation-inference bounds the tokens a batch may hold (max_batch_total_to
                        turns it off.
   fits(copy, load, need)   an instance with nothing in flight takes any request, so every request the context window
                        allows can run; a busy one takes it while its load plus this request stays within its budget and,
-                       while the Mac's free memory, less what this one will take (its tokens at per_token()), stays
-                       above headroom_gb. A peer's
-                       instance is admitted by the room that peer reported (peers.Link.ctx_fits), and again by its own
-                       gateway.
+                       beside a sibling, while the Mac's free memory, less what this one will take (its tokens at
+                       per_token()), stays above headroom_gb (an engine alone fills memory up to the GPU limit with a
+                       cache it reclaims itself, so free memory says nothing there). A peer's instance is admitted by
+                       the room that peer reported (peers.Link.ctx_fits), and again by its own gateway.
 llmshare.slot_any applies fits under one lock with the slot it takes and keeps each instance's load, so two requests never
 both take the last room. A request that fits no busy instance waits while shorter ones behind it take the room there is
 (backfilling, as batch schedulers do), and after llmshare.RESERVE seconds it keeps its place on every instance it wants
@@ -259,6 +259,7 @@ def fits(copy, load, need):
     if load <= 0: return True                              # nothing in flight: it takes it, whatever its size
     b = budget(copy)
     if b and load + need > b: return False
+    if len(llmshare.listed()) < 2: return True               # an engine alone reclaims its own cache within the GPU limit
     free = free_gib()
     return free is None or free - need_gib(copy, need) >= headroom()
 
@@ -273,7 +274,7 @@ def why_waiting(copies, loads, need):
         b = budget(c)
         if b and load + need > b: return f'context budget: ~{need:,} tokens + {load:,} in flight > {b:,} on {c}'
         free, mine = free_gib(), need_gib(c, need)
-        if free is not None and free - mine < headroom():
+        if len(llmshare.listed()) > 1 and free is not None and free - mine < headroom():
             return f'memory headroom: {free:.1f} GiB free; ~{mine:.1f} GiB for this request would leave less than headroom_gb {headroom():g}'
     return None
 
