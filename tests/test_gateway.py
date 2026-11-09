@@ -10,6 +10,7 @@ loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_
 import http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import admission, crashes, gateway, llmshare, recycle
 
 F, F2 = 'test/family', 'test/family:2'
@@ -93,6 +94,7 @@ def main():
     box = tempfile.mkdtemp(prefix='localmodels-doortest-')
     try: run(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 

@@ -7,6 +7,7 @@ grows the room for an answer cut off, keeps labels distinct, and never lets one 
 import email.message, io, json, os, shutil, sys, tempfile, time, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import agent, llmshare
 
 ok = []
@@ -44,6 +45,7 @@ def main():
     box = tempfile.mkdtemp(prefix='localmodels-agenttest-')
     try: run(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 

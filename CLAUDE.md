@@ -15,7 +15,7 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 - `localmodels/web.py`, `dash.html`, `dash.py` — the dashboard and the terminal dash.
 - `localmodels/names.py`, `errors.py`, `demo.py`, `icon.py` — display names and screenshot mode; the error recorder; the synthetic workload of `localmodels demo`; the icon, drawn from the dashboard's theme tokens.
 - `localmodels/cli.py`, `bin/localmodels` — the command.
-- `tests/` — sandbox tests with a fake LM Studio (two gateways for peers); `tools/` — measurements.
+- `tests/` — sandbox tests with a fake LM Studio (two gateways for peers); each imports `tests/_sandbox.py` first, so its state folder, port and LM Studio are temporary; `tools/` — measurements.
 - `docs/` — the README's pictures, taken in screenshot mode (`localmodels present on`) during `localmodels demo`.
 
 ## Working on it
