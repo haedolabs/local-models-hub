@@ -86,15 +86,31 @@ def _error(where, e):
     except Exception: pass                                   # not recorded: the recorder itself failed; nothing left to tell
 
 
+_unwritten = {}                                          # the last record this process could not write: path, error, since
+
+
 def _append(path, rec, roll_at=0):
-    """One JSON line, appended under a lock so two processes never interleave; past roll_at bytes the file becomes <path>.1."""
+    """One JSON line, appended under a lock so two processes never interleave; past roll_at bytes the file becomes
+    <path>.1. -> True when written; False when not (a full disk, a folder not writable), kept for write_problem()."""
     try:
         os.makedirs(SHARED, exist_ok=True)
         with open(path, 'a') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             f.write(json.dumps(rec) + '\n')
             if roll_at and f.tell() > roll_at and os.path.getsize(path) > roll_at: os.replace(path, path + '.1')
-    except OSError: pass
+    except OSError as e:
+        _unwritten.update(path=path, error=e.strerror or str(e), since=_unwritten.get('since') or time.time())
+        return False
+    _unwritten.clear()
+    return True
+
+
+def write_problem():
+    """Words when this process could not write the hub's records lately, else None: the request log feeds the recycle
+    counts, admission's bytes per token, batch progress and the charts, so they stand still until it can."""
+    if not _unwritten: return None
+    return (f"the hub's records are not writable since {time.strftime('%H:%M', time.localtime(_unwritten['since']))} "
+            f"({os.path.basename(_unwritten['path'])}: {_unwritten['error']}): recycle counts, batch progress and the charts are frozen")
 
 
 def _note(kind, model, seconds=0.0):
@@ -515,7 +531,10 @@ def hub_up(fresh=False):
     """Whether the hub's door is answering (cached 5 s). A door that is slow to answer is up (something is listening and
     busy); only a refused connection means it is down."""
     if fresh or time.time() - _hub['at'] > 5:
-        try: up = json.load(urlopen(HUB + '/hub/health', timeout=3)).get('ok') is True
+        try:
+            health = json.load(urlopen(HUB + '/hub/health', timeout=3))
+            up = isinstance(health, dict) and health.get('ok') is True
+            _hub['health'] = health if up else {}
         except urllib.error.HTTPError: up = False                # something answered, and it is not the gateway's health
         except urllib.error.URLError as e: up = not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
         except ConnectionRefusedError: up = False

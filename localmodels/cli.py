@@ -129,6 +129,7 @@ def status():
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
     if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (last valid settings in effect)')
+    if d.get('write_problem'): print(f"  RECORDS NOT WRITTEN: {d['write_problem']}")
     for line in peer_lines(d['up']): print(line)
     try:
         v = recycle.view(lm['models'])
