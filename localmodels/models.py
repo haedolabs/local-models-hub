@@ -438,14 +438,14 @@ def _again(job, room):
             why = f'{free:.0f} GB free, an instance needs {need:.0f} GB incl. headroom'
             crashes.waiting(base, why); did.append(f'{c} crashed; reload deferred: {why}'); return did
         if not tried: crashes.trying(base); tried = True
+        t1 = time.time()
         ok, out = load(job['key'], c, job['context'] or 32768, job['parallel'] or 4)
         if not ok:
             crashes.loaded(base, [c], False, time.time() - t0, refused(out) or out)
             did.append(f'{c}: crash recovery reload failed: {refused(out) or out[-200:]}'); return did
-    if not tried: return did                               # someone else loaded it meanwhile: the next look records it
-    ensure_server()                                        # LM Studio may turn its server off when a model changes
-    crashes.loaded(base, job['ids'], True, time.time() - t0)
-    did.append(f"{', '.join(job['ids'])} crashed; reloaded in {time.time() - t0:.0f} s")
+        ensure_server()                                    # LM Studio may turn its server off when a model changes
+        crashes.loaded(base, [c], True, time.time() - t1)   # each copy serves as soon as it is back, whatever its siblings do
+        did.append(f'{c} reloaded after the crash in {time.time() - t1:.0f} s')
     return did
 
 
