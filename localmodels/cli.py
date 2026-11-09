@@ -30,6 +30,7 @@
   localmodels peer add <name> <address>   add a peer gateway by its Thunderbolt Bridge address (port 1235 by default)
   localmodels peer remove <name>
   localmodels peer serve <address> | off  serve as a peer: bind a link listener on that address (token required)
+  localmodels peer log [--hours 24]   each change of a peer's state (up, down, refused, maintenance), with its reason
   localmodels peer token         create peer-token (0600) if missing; print the ssh command that copies it to another host
   localmodels peer gpu-limit     write the boot LaunchDaemon com.local-models.gpu-limit (iogpu.wired_limit_mb = total - 8 GiB)
                                  and print the sudo commands that install it; verify an installed one
@@ -441,6 +442,14 @@ def peer_cmd(a):
         return 0
     if verb == 'gpu-limit' and len(w) == 1: return gpu_limit_cmd()
     if verb == 'copy-model': return copy_model_cmd(w, '--dry' in a)
+    if verb == 'log':                                    # each change of a peer's state, with its reason
+        hours = num(w, '--hours', 24.0)
+        if hours is None: return 2
+        evs = peers.link_events(hours)
+        if not evs: print(f'no change of a peer state in the last {hours:g} h ({peers.EVENTS})'); return 0
+        for e in evs:
+            print(f"{time.strftime('%d %b %H:%M:%S', time.localtime(e['at']))}  {e.get('peer')}: {e.get('was')} -> {e.get('state')}" + (f"  ({e['why']})" if e.get('why') else ''))
+        return 0
     if verb == 'token' and len(w) == 1:
         print(token_words())
         print(f'copy to another host: {token_copy()}')
@@ -1398,7 +1407,7 @@ def publish(a):
 FLAGS = {   # verb: (options that take a value, options that stand alone); a verb not listed reads its own words
     'status': ((), ()), 'st': ((), ()), 'open': ((), ()), 'log': (('--hours',), ()), 'swapcheck': ((), ()),
     'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
-    'demo': (('--minutes',), ('--dry',)), 'peer': ((), ('--dry',)), 'peers': ((), ('--dry',)), 'crashes': (('--days',), ('--scan',)),
+    'demo': (('--minutes',), ('--dry',)), 'peer': (('--hours',), ('--dry',)), 'peers': (('--hours',), ('--dry',)), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),

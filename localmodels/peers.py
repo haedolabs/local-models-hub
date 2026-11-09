@@ -37,11 +37,12 @@ from . import VERSION, errors, llmshare, maint
 
 TOKEN_FILE = os.path.join(llmshare.SHARED, 'peer-token')      # the same on every Mac of the set; mode 0600
 STATE = os.path.join(llmshare.SHARED, 'link.json')            # the front's look at its peers, written by the door
+EVENTS = os.path.join(llmshare.SHARED, 'link-events.jsonl')   # each change of a peer's state: time, peer, from, to, why
 LMSTUDIO_HOME = (os.path.dirname(os.path.dirname(llmshare.LMS)) if llmshare.LMS.endswith(os.sep + os.path.join('bin', 'lms'))
                  else os.path.expanduser('~/.lmstudio'))
 NAME = re.compile(r'^[A-Za-z0-9._-]{1,40}$')
 ON = ' on '                    # a copy on a peer is "<family> on <peer>": model ids hold no spaces, so it is never a local id
-POLL, BACKOFF_MAX, REFUSED_AGAIN, ROUTE_EVERY, WRITE_EVERY = 2.0, 60.0, 300.0, 300.0, 10.0
+POLL, BACKOFF_MAX, REFUSED_AGAIN, ROUTE_EVERY, WRITE_EVERY = 2.0, 10.0, 300.0, 300.0, 10.0   # a peer is only ever on a direct link: a look at one that is away costs a connect timeout at most
 STRIKES, STRIKE_WINDOW = 3, 60   # requests a peer failed though its look was fine, within this many seconds: it is backed off
 PEER_WAIT = 5                  # seconds a peer's door may keep this Mac's request waiting for a slot before it answers 503
 CONNECT = 3                    # seconds to connect to a peer
@@ -556,6 +557,7 @@ class Peer:
         self.refused_token, self.refused_at, self.tries_refused = None, 0.0, 0
         self.report, self.route, self.route_at = None, (None, None), 0.0
         self.strikes = []                               # when requests failed there though the peer looked up
+        self.since = time.time()                        # when it came into its state (link-events.jsonl has each change)
         self.inflight = collections.Counter()           # family -> this Mac's requests on the peer now
         self.cap = {}                                   # family -> how many this Mac may have there, from the last look
         self.ctx = {}                                   # family -> (its context budget, what others hold there), from the last look
@@ -594,9 +596,11 @@ class Link:
             if not force:
                 if p.state == 'refused' and tok == p.refused_token and now - p.refused_at < REFUSED_AGAIN: continue
                 if p.state != 'refused' and now < p.next_at: continue
+            was = p.state
             try: self._look(p, tok)
             except Exception as e:                       # one peer's look never stops the others' or link.json
                 errors.record(f'peer poller: {name}', e); self._down(p, f'look failed: {type(e).__name__}: {e}')
+            self._changed(p, was)
             looked = True
         if (self.peers or had or os.path.exists(STATE)) and (looked or force or time.time() - self.wrote > WRITE_EVERY): self.write()
 
@@ -713,6 +717,7 @@ class Link:
         with self.lock:
             p = self.peers.get(name)
             if not p: return
+            was = p.state
             mh = hd.get('x-hub-maintenance') or ''
             if code in (401, 403): p.state, p.why, p.refused_token, p.refused_at, p.cap = 'refused', f'auth failed (HTTP {code}): peer-token mismatch', token(), time.time(), {}
             elif mh.startswith('on'):
@@ -725,7 +730,15 @@ class Link:
                 p.strikes = [t for t in p.strikes if t > time.time() - STRIKE_WINDOW] + [time.time()]
                 if len(p.strikes) >= STRIKES:            # its look is fine but its requests fail: back off as if it were down
                     p.strikes = []; self._down(p, f'{STRIKES} request failures within {STRIKE_WINDOW} s ({words or code})')
+        self._changed(p, was)
         self.write(); WAKE.set()
+
+    def _changed(self, p, was):
+        """A peer whose state changed since `was`: the time it did, and one line in link-events.jsonl (names, states,
+        the reason and the time; never anything a request carried)."""
+        if p.state == was: return
+        p.since = time.time()
+        llmshare._append(EVENTS, dict(at=round(p.since, 1), peer=p.name, was=was, state=p.state, why=p.why), roll_at=1_000_000)
 
     def answered(self, c):
         """A request on a peer was answered: its failures in a row start again."""
@@ -752,7 +765,7 @@ class Link:
                 d = dict(name=name, url=p.url, host=p.host, state=p.state, why=p.why, seen=round(p.seen_at, 1) if p.seen_at else None,
                          rtt_ms=round(p.rtt * 1000, 1) if p.rtt is not None else None, route=dict(interface=p.route[0], port=p.route[1]),
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
-                         address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, families=fams,
+                         address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, since=round(p.since, 1), families=fams,
                          maintenance=rep.get('maintenance'), keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
                          memory=rep.get('memory') if p.state in ('up', 'maintenance') else None,
                          soc=rep.get('soc') if p.state in ('up', 'maintenance') else None)
@@ -782,6 +795,19 @@ def poller():
 
 
 # ---------------------------------------------------------------- every screen reads the front's look from link.json
+def link_events(hours=24):
+    """The changes of the peers' states in the last hours, oldest first: [{at, peer, was, state, why}]."""
+    since, out = time.time() - hours * 3600, []
+    for path in (EVENTS + '.1', EVENTS):
+        try:
+            for line in open(path):
+                try: e = json.loads(line)
+                except ValueError: continue
+                if isinstance(e, dict) and e.get('at', 0) >= since: out.append(e)
+        except OSError: pass
+    return sorted(out, key=lambda e: e.get('at', 0))
+
+
 def view(max_age=30):
     """The front's look at its peers, as the door last wrote it: [peer dicts], or [] when there are none (or the door has
     not looked for max_age seconds: its look is then stale, and each peer says so)."""

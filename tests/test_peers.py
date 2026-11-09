@@ -548,13 +548,43 @@ def test_link_rules(box):
         p = L.peers['first']; p.fails = 2000
         try: L._down(p, 'away'); err = None
         except Exception as e: err = e
-        t('after 2,000 failed looks (about 18 hours away) the next look is 60 s later, as after 6', err is None and 59 <= p.next_at - time.time() <= 61, repr(err) if err else p.next_at - time.time())
+        t('after 2,000 failed looks (about 18 hours away) the next look is at most 10 s later: a cable plugged back in shows within seconds', err is None and 9 <= p.next_at - time.time() <= 11, repr(err) if err else p.next_at - time.time())
         peers.fetch = fetch
         try: L.poll(force=True); err = None
         except Exception as e: err = e
         t('a first peer whose look raises: recorded, marked down, and the second peer is still polled',
           err is None and asked == ['http://127.0.0.1:1', 'http://127.0.0.1:2'] and L.peers['first'].state == 'down' and L.peers['second'].state == 'down', (repr(err), asked))
     finally: llmshare.settings, peers.fetch, peers.token = real, fetch_was, tok_was
+
+    print('the link: every change of a peer\'s state is recorded with its reason and time, and read back')
+    answers = []
+
+    def fetch2(url, path, headers, timeout=peers.CONNECT):
+        a = answers.pop(0)
+        if isinstance(a, Exception): raise a
+        return 200, json.dumps(a).encode()
+    peers.fetch, peers.token = fetch2, lambda: TOKEN
+    events_was = peers.EVENTS; peers.EVENTS = os.path.join(box, 'link-events.jsonl')
+    try:
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'m4': dict(url='http://127.0.0.1:3')})
+        L = peers.Link()
+        refused = ConnectionRefusedError(errno.ECONNREFUSED, 'refused')
+        answers[:] = [refused, refused, dict(hub='local-models', families={})]
+        L.poll(force=True); first = L.peers['m4'].since
+        L.poll(force=True)
+        L.poll(force=True)
+        ev = peers.link_events(1)
+        t('down, still down, then up: two records (a state that stays is not recorded again), each with its time and reason',
+          [(e['peer'], e['was'], e['state']) for e in ev] == [('m4', 'new', 'down'), ('m4', 'down', 'up')] and 'ECONNREFUSED' in ev[0]['why'] and all(e.get('at') for e in ev), ev)
+        t('the peer says since when it is in its state', L.peers['m4'].since >= first and L.view()[0].get('since'), (first, L.peers['m4'].since))
+        t('the record holds names, states, reasons and times only', all(set(e) <= {'at', 'peer', 'was', 'state', 'why'} for e in ev), ev)
+        import contextlib, io
+        from localmodels import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): code = cli.peer_cmd(['log'])
+        t('localmodels peer log reads them back, oldest first', code == 0 and 'm4' in out.getvalue() and out.getvalue().index('down') < out.getvalue().index('up'), out.getvalue())
+    finally:
+        llmshare.settings, peers.fetch, peers.token, peers.EVENTS = real, fetch_was, tok_was, events_was
 
 
 # ---------------------------------------------------------------- two doors

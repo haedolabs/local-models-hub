@@ -211,7 +211,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
     <div class="chips"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
+      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
       <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
   </header>
   <div>
@@ -567,10 +567,15 @@ function renderNow() {
   const ps = S.peers || [], up = ps.filter(p => p.state === 'up'), serve = S.link && S.link.serving ? (S.link.listening || 'serving as a peer') : '';
   $('chip-peers').style.display = ps.length || serve ? '' : 'none';
   document.querySelector('.wrap').classList.toggle('peers', ps.length > 0);
+  $('poll-now').style.display = up.length < ps.length ? '' : 'none';
   if (ps.length || serve) {
+    const why = p => { const w = String(p.why || '').split(/[:(]/)[0].trim(); return w.length > 48 ? w.slice(0, 47) + '…' : w; };   // the whole reason is the tooltip
+    const away = p => p.state === 'down' ? `peer ${p.name}: unreachable${p.since ? ' since ' + clock(p.since) : ''}${why(p) ? ` (${why(p)})` : ''} · next poll in ${Math.max(0, Math.round((p.next_at || 0) - S.time))} s`
+      : p.state === 'refused' ? `peer ${p.name}: auth failed` : `peer ${p.name}: ${p.state}`;
     const said = [ps.length ? (up.length === ps.length ? `peers ${up.length}/${ps.length} reachable: ${up.map(p => p.name).join(', ')}`
-      : ps.filter(p => p.state !== 'up').map(p => `peer ${p.name}: ${p.state === 'down' ? 'unreachable' : p.state === 'refused' ? 'auth failed' : p.state}`).join(' · ')) : '', serve].filter(Boolean).join(' · ');
+      : ps.filter(p => p.state !== 'up').map(away).join(' · ')) : '', serve].filter(Boolean).join(' · ');
     chip('chip-peers', up.length === ps.length && (!serve || /^listening/.test(serve)), said, said);
+    $('chip-peers').title = ps.map(p => p.words).filter(Boolean).join('\n');
     if (up.length < ps.length && ps.every(p => p.state === 'up' || p.state === 'maintenance')) $('chip-peers').querySelector('i').style.background = 'var(--warning)';
     $('ans-hint').textContent = 'top line: total slots (local instances + peer replicas available to this gateway); right edge: now';
   }
@@ -920,6 +925,11 @@ document.addEventListener('click', ev => {
 });
 const THEMES = ['auto', 'light', 'dark'];
 function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; }
+$('poll-now').addEventListener('click', async () => {          // the gateway looks at every peer at once, then the page reads it
+  const b = $('poll-now'); b.disabled = true; b.textContent = 'polling…';
+  try { await fetch('/hub/link', {method: 'POST'}); } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
+  finally { b.disabled = false; b.textContent = 'poll now'; tickNow(); }
+});
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];
   applyTheme(next); try { localStorage.setItem('lm-theme', next); } catch (e) {}
