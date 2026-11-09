@@ -501,6 +501,17 @@ def test_settings(box):
     L.MODELS = real[0]; L._conf.update(real[1])
 
 
+def test_write_problem(box):
+    print("a record the hub cannot write is said everywhere, not dropped in silence (recycle counts would freeze)")
+    blocked = os.path.join(box, 'not-a-folder'); open(blocked, 'w').write('a file where a folder should be')
+    path = os.path.join(blocked, 'requests.jsonl')
+    ok = llmshare._append(path, dict(at=1))
+    words = llmshare.write_problem()
+    t('a failed append returns False, and the words name the file and what is frozen', ok is False and words and 'requests.jsonl' in words and 'recycle' in words, (ok, words))
+    good = llmshare._append(os.path.join(box, 'requests-ok.jsonl'), dict(at=1))
+    t('the next append that works clears it', good is True and llmshare.write_problem() is None, llmshare.write_problem())
+
+
 def test_install_dry(box):
     print('install --dry says what it would do and writes nothing; check notices a missing lms')
     import contextlib, io
@@ -985,6 +996,7 @@ def main():
         test_swap_away(box)
         test_prune(box)
         test_settings(box)
+        test_write_problem(box)
         test_install_dry(box)
         test_first_settings()
         test_runs()

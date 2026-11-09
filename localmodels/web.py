@@ -118,7 +118,7 @@ def _snapshot():
     out = dict(time=time.time(), clock=time.strftime('%H:%M:%S'),
                door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting_here()),
                lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age())),
-               settings_error=llmshare.settings_error(),
+               settings_error=llmshare.settings_error(), write_problem=llmshare.write_problem(),
                crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7))),
                recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10])),
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],

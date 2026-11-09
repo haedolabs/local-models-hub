@@ -654,7 +654,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/health':
             m = maint.read()
             return self._send(200, dict(ok=True, hub='local-models', version=VERSION, pid=os.getpid(), port=PORT,
-                                        since=round(_start['since']), lmstudio=UP,
+                                        since=round(_start['since']), lmstudio=UP, write_problem=llmshare.write_problem(),
                                         maintenance=dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), why=m.get('why'), words=maint.words(m)) if m else None))
         q = urllib.parse.parse_qs(path.partition('?')[2])
         try:

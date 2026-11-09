@@ -86,7 +86,7 @@ def door():
     """The hub's door: up or not, and whether launchd runs the code that is in this repo now."""
     up = llmshare.hub_up(fresh=True)
     stale = every('stale', 10, lambda: os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME))
-    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(stale))
+    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(stale), write_problem=(llmshare._hub.get('health') or {}).get('write_problem') if up else None)
 
 
 def lmstudio():
