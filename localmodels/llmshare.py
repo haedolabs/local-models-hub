@@ -157,6 +157,11 @@ def loaded(fresh=False, force=False):
     finally: _ps_lock.release()
 
 
+def listed():
+    """The last listing in hand, never read again here (for code that must not wait on `lms ps`, which can take 20 s)."""
+    return list(_ps['rows'])
+
+
 def read_ok():
     """Whether the last `lms ps` answered whole: when it did not, nobody can tell what a swap would unload, so do not swap,
     and a copy that seems missing is unsure."""
@@ -321,25 +326,53 @@ def waiting_here():
     with _q_lock: return dict(people=sum(1 for t in _q if t[0] == 0), others=sum(1 for t in _q if t[0] != 0))
 
 
+RESERVE = 20               # seconds a request waits for room (admission.fits) before it keeps its place on every copy it wants
+_load, _load_lock = {}, threading.Lock()   # this process's context in flight per copy, in tokens (admission.py)
+
+
+def load_here():
+    """The context in flight per copy that this process admitted, in tokens: {copy: n}."""
+    with _load_lock: return {m: n for m, n in _load.items() if n > 0}
+
+
 @contextlib.contextmanager
-def slot_any(models, wait=3600, kind='other'):
+def slot_any(models, wait=3600, kind='other', need=0, fits=None, waiting=None):
     """Hold one prediction slot on the first of these models that has one free: a model's copies, in order, so the first
     copy's slots fill before the second's (two on each measured slower than four on one). models: a list, or a function
     that gives the list each time it is tried, so a copy that comes back or is being drained counts at once. Waiters in
     this process take turns: a chat or ask request (a person is waiting) before anything else, then first come first
     served, per copy: a waiter leaves a copy's slot to an earlier waiter that may take it. Slots held by other processes
-    (llmshare.slot in a project's own code) are simply busy. Yields (the model, seconds waited); TimeoutError after `wait` s."""
+    (llmshare.slot in a project's own code) are simply busy. need, fits: the request's context in tokens and whether a copy
+    may take it with what it holds (fits(model, load, need); the gateway's is admission.fits), applied under one lock with
+    the slot and the copy's load, so two waiters never both take the last room. A waiter that fits no copy yet leaves those
+    copies to later waiters that fit (backfilling) until it has waited RESERVE seconds; then it keeps its place on every
+    copy it wants, so a long request is never starved by short ones. waiting(copies) hears, whenever it changes, which
+    copies it is waiting on for room rather than for a slot. Yields (the model, seconds waited); TimeoutError after `wait` s."""
     pick = models if callable(models) else (lambda: list(models))
-    ticket, t0, held, got = (0 if kind in PEOPLE else 1, next(_seq)), time.time(), None, None
+    ticket, t0, held, got, said = (0 if kind in PEOPLE else 1, next(_seq)), time.time(), None, None, None
     try:
         while held is None:
             cands = list(pick() or [])
+            if fits is None: room = cands
+            else:
+                with _load_lock: loads = {m: _load.get(m, 0) for m in cands}
+                room = [m for m in cands if fits(m, loads[m], need)]           # outside the lock: fits may read the listing
+            reserve = fits is not None and time.time() - t0 >= RESERVE
             with _q_lock:
-                _q[ticket] = cands
+                _q[ticket] = cands if reserve or fits is None else room
                 ahead = {m for t, ms in _q.items() if t < ticket for m in ms}
-            mine = [m for m in cands if m not in ahead]
-            if mine: held, got = _take(mine)
+            mine = [m for m in room if m not in ahead]
+            if mine:
+                with _load_lock:                             # the check again with the take: no other waiter takes the room meanwhile
+                    if fits is not None: mine = [m for m in mine if fits(m, _load.get(m, 0), need)]
+                    if mine: held, got = _take(mine)
+                    if held is not None and need: _load[got] = _load.get(got, 0) + need
             if held is None:
+                unfit = tuple(m for m in cands if m not in room)
+                if waiting and unfit != said:
+                    said = unfit
+                    try: waiting(list(unfit))
+                    except Exception as e: _error('slot_any: waiting', e)
                 if time.time() - t0 > wait:
                     _note('slot timeout', family(cands[0]) if cands else '?', time.time() - t0)
                     raise TimeoutError(f"no free LM Studio slot for {', '.join(cands) or 'the model'} after {wait:.0f} s")
@@ -349,7 +382,10 @@ def slot_any(models, wait=3600, kind='other'):
     waited = time.time() - t0
     if waited > 2: _note('slot wait', family(got), waited)
     try: yield got, waited
-    finally: _release(held)
+    finally:
+        _release(held)
+        if need:
+            with _load_lock: _load[got] = max(0, _load.get(got, 0) - need)
 
 
 @contextlib.contextmanager

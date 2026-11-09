@@ -1,8 +1,12 @@
 """crashes - when LM Studio's engine crashes and takes a model with it, the hub notices, records it and loads it again.
 
-The failure: LM Studio's MLX engine can die with "[metal::malloc] Resource limit (499000) exceeded", then a segmentation
-fault; every request on that copy ends with "The model has crashed without additional information", and LM Studio does
-not load the model again. Left alone, a Mac can run no model until a person loads one.
+The failures: LM Studio's MLX engine can die with "[metal::malloc] Resource limit (499000) exceeded" (its count of Metal
+buffers, which grows with the work a copy has done), or with "[METAL] Command buffer execution failed: Insufficient Memory
+(kIOGPUCommandBufferCallbackErrorOutOfMemory)" (the Mac's memory ran out under several long contexts at once), then a
+segmentation fault; every request on that copy ends with "Channel Error" or "The model has crashed without additional
+information", and LM Studio does not load the model again. Left alone, a Mac can run no model until a person loads one.
+ENGINE is the one list of the engine's failure words: the gateway reads a request's error with it (a crash: held and
+sent again) and this module reads LM Studio's log with it (an exception about the engine keeps its words in the record).
 
 How the hub tells a crash from an unload, from LM Studio's own log (~/.lmstudio/server-logs): a request on a model that
 crashed ends with "- Caused By: Error: The model has crashed ..." under "[ERROR][<model>]"; a model someone unloaded ends
@@ -48,8 +52,26 @@ CAUSE = re.compile(r'^- Caused By: (?:Error: )?(The model has crashed.{0,120})')
 ERROR = re.compile(r'^([A-Za-z_][\w.]*(?:Error|Exception)): (.{0,300})')
 FATAL = re.compile(r'Fatal Python error: (.{1,80})')
 LOADING = re.compile(r'\[Endpoint=(loadModel|unloadModel)\] (?:Loading|Unloading) model: (\S+)')
-ENGINE = re.compile(r'\[metal::|resource limit|out of memory|insufficient memory|segmentation fault|abort trap|bus error|exit code', re.I)
+# The engine's own failure words, most telling first (engine_failure names a failure by the first that matches): Metal's
+# out-of-memory error for a command buffer, its buffer-count limit, the signals that end the engine, and what LM Studio
+# answers every request in flight when the generation thread dies (measured: "Channel Error", with the instance still
+# listed for a moment). LM Studio's load guardrail ("insufficient system resources") is a refused load, not a crash: no word
+# here matches it.
+ENGINE_WORDS = (r'insufficient memory', r'out of memory', r'kIOGPUCommandBufferCallbackError\w*', r'command buffer execution failed',
+                r'resource limit(?: \(\d+\))?', r'metal::\w+', r'\[metal\]', r'segmentation fault', r'abort trap', r'bus error',
+                r'fatal exception', r'generation thread', r'channel error', r'exit code')
+ENGINE = re.compile('|'.join(ENGINE_WORDS), re.I)
+_ENGINE_EACH = [re.compile(w, re.I) for w in ENGINE_WORDS]
 _ctx, _seen_state = {}, {'at': 0.0, 'st': {}}
+
+
+def engine_failure(text):
+    """The engine's failure in LM Studio's words when this text has any of them (the most telling: 'Insufficient Memory'
+    before '[METAL]', 'Resource limit (499000)' before 'Channel Error'), else None."""
+    for rx in _ENGINE_EACH:
+        m = rx.search(str(text or ''))
+        if m: return m.group(0)
+    return None
 
 
 # ---------------------------------------------------------------- LM Studio's log
@@ -299,7 +321,9 @@ def waiting(base, why):
 
 def loaded(base, ids, ok, seconds, words=''):
     """What the keeper's load came to: when every copy is back, the door stops holding requests at once. A reload that
-    worked counts toward the 3 an hour; one that failed is tried again after a pause (1, 2, then 5 minutes)."""
+    worked counts toward the 3 an hour; one that failed is tried again after a pause (1, 2, then 5 minutes). A copy that
+    crashed while it drained for a recycle comes back fresh: the reload was its recycle, so that job ends here (recorded as
+    'recycle given up', with why) instead of unloading the fresh copy again."""
     with _state() as st:
         d = (st.get('down') or {}).get(base)
         if ok:
@@ -308,6 +332,13 @@ def loaded(base, ids, ok, seconds, words=''):
             if d: del st['down'][base]
             for i in ids: st.setdefault('seen', {}).setdefault(i, {}).update(loaded=True, since=time.time(), at=time.time())
             st.get('missing', {}).pop(base, None)
+            r = st.get('recycle') or {}
+            j = r.get('job')
+            if j and j.get('copy') in ids:
+                _record(dict(event='recycle given up', family=base, model=j['copy'],
+                             why='crashed while draining; crash recovery reloaded it, so its count starts again'))
+                r['job'] = None
+                r.setdefault('last', {})[base] = time.time()
         else:
             _record(dict(event='could not load', family=base, models=ids, words=str(words)[-200:]))
             if d:

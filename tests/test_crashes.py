@@ -32,6 +32,18 @@ UNLOAD = """[2026-11-06 00:27:57][INFO][LMSAuthenticator][Client=lms-cli][Endpoi
 [2026-11-06 00:27:57][ERROR][qwen/qwen3.6-35b-a3b] Error: Channel Error
 - Caused By: ExplicitModelUnloadError: Model unloaded.
 """
+# LM Studio's log of the engine out of memory (trimmed, paths shortened): two requests in flight on copy 2
+OOM_ERROR = 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory).'
+OOM_LOG = """[2026-11-08 17:30:37][DEBUG][model_kit][ERROR]: Encountered fatal exception in the backend generation thread: Traceback (most recent call last):
+  File "/Users/x/.lmstudio/extensions/backends/vendor/_amphibian/app-mlx-generate-mac26-arm64@41/lib/python3.11/site-packages/mlx_engine/model_kit/batched_vision/batch_generator.py", line 488, in _step
+    mx.async_eval(*eval_targets)
+""" + OOM_ERROR + """
+[2026-11-08 17:30:37][DEBUG] Fatal Python error: Segmentation fault
+[2026-11-08 17:30:37][DEBUG][coordinator][INFO]: Prompt cache restore: cached_tokens=8960 uncached_tokens=1097 lifetime_efficiency=22.00%
+""" + """[2026-11-08 17:30:37][ERROR][qwen/qwen3.6-35b-a3b:2] Error: Channel Error
+    at _0x39cfde.chatCompletionSync (/Applications/LM Studio.app/Contents/Resources/app/.webpack/main/index.js:1129:10808)
+- Caused By: Error: The model has crashed without additional information. (Exit code: null)
+""" * 2
 B, C2 = 'qwen/qwen3.6-35b-a3b', 'qwen/qwen3.6-35b-a3b:2'
 ok = []
 
@@ -73,6 +85,16 @@ def run(box):
     t('the loads and unloads are seen', [v for _, v, _ in events] == ['loadModel', 'loadModel', 'unloadModel'], events)
     c2, ev2, _ = crashes.parse(['[2026-11-07 11:53:02][INFO] Server started.'], {})
     t("a restart of LM Studio's server is seen", [v for _, v, _ in ev2] == ['serverStart'] and not c2, ev2)
+    c3, _, fatal3 = crashes.parse(OOM_LOG.split('\n'), {})
+    t('the engine out of memory under long contexts: both requests in flight recorded as a crash, with Metal\'s own words',
+      len(c3) == 2 and {x['model'] for x in c3} == {C2} and all(x['error'] == OOM_ERROR for x in c3) and fatal3 and fatal3[1] == 'Segmentation fault',
+      (len(c3), c3[0]['error'] if c3 else None, fatal3))
+    said = {w: crashes.engine_failure(w) for w in (OOM_ERROR, 'RuntimeError: [metal::malloc] Resource limit (499000) exceeded.', 'Error: Channel Error',
+                                                     'Encountered fatal exception in the backend generation thread', 'Fatal Python error: Segmentation fault')}
+    t('one list of the engine\'s failure words, the most telling named first', list(said.values()) == ['Insufficient Memory', 'Resource limit (499000)', 'Channel Error', 'fatal exception', 'Segmentation fault'], said)
+    t("...and none in LM Studio's refused load (its guardrail) or a bad request",
+      crashes.engine_failure('Error: Model loading was stopped due to insufficient system resources.') is None
+      and crashes.engine_failure("Invalid 'messages': must be an array") is None)
 
     print('scan: a crash from before the hub looked')
     open(os.path.join(crashes.LOGS, '2026-11', '2026-11-07.3.log'), 'w').write(CRASH_LOG)

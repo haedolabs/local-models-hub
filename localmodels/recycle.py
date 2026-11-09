@@ -20,7 +20,10 @@ request log; a copy is as far along its band as the count furthest along its own
 off; "written": 0 leaves the answers uncounted; "requests" is a backstop for clients that report no usage, 0 = off).
 With long answers every crash measured came at 197,524 to 213,269 tokens written (295,340 to 478,356 processed), so the
 written count is the tighter one there; with short answers the processed count reaches its threshold first. The door's keeper (models.keep, every 20 s) asks plan(): a copy past
-"tokens" is marked DRAINING, the door sends it nothing new (gateway.generate leaves it out; a lone copy's requests, or
+"tokens", counting the context of its requests in flight (each in-flight marker's estimate, admission.py: with prompt-heavy
+work, agent conversations of 18,000 to 44,000 tokens that re-send their history, a copy crossed 300,000 within minutes and
+its requests in flight carried it to 404,635 before it could drain), is marked DRAINING, the door sends it nothing new
+(gateway.generate leaves it out; a lone copy's requests, or
 requests that name that copy, are held as after a crash), its requests in flight finish, and when none is left (the slot
 locks and LM Studio's own status agree) models.keep unloads it and loads it again with the family's settings, under the
 swap lock, and records it in crashes.jsonl (event "recycled"). LM Studio's server resolves an unload by name to the
@@ -30,7 +33,9 @@ Studio took another one, that one is loaded again at once and the recycle is giv
 drain rarely runs. before_batch: when a batch begins it asks the door (POST /hub/recycle, which
 agent.batch does; or `localmodels recycle`), and a copy past that share of its band is recycled first, so a night's work
 starts on fresh copies. One copy at a time; never while its family has a copy down or missing; two minutes between two
-recycles of a family; a drain that has not emptied in 10 minutes is given up and tried again 10 minutes later. A copy
+recycles of a family, except for a copy past its threshold, which drains 30 s after its sibling is back (GAP_HARD: while
+one copy drains the other takes every request, so it reaches its own threshold sooner); a crash during a drain ends it
+(the reload is the recycle: crashes.loaded); a drain that has not emptied in 10 minutes is given up and tried again 10 minutes later. A copy
 loaded with other settings than the family's (LM Studio's window, its just-in-time loading) is recycled the same way, so
 the family comes back to its settings.
 
@@ -44,6 +49,7 @@ from . import crashes, llmshare
 
 DEFAULT = dict(tokens=300_000, written=150_000, soft=220_000, before_batch=0.5, requests=0)
 DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try again after; between two recycles of a family; a fresh-start request lasts
+GAP_HARD = 30             # seconds after a family's last recycle before a copy past its threshold drains (GAP holds the rest)
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
 _held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
 
@@ -149,14 +155,18 @@ def draining():
     return {j['copy']} if j else set()
 
 
-def plan(rows, busy=None):
+def plan(rows, busy=None, flying=None):
     """One look (the keeper's): mark the copy that is due for a recycle, if any. rows: what LM Studio holds now; busy: the
-    slots held per copy (llmshare.busy_slots). -> words or None."""
+    slots held per copy (llmshare.busy_slots); flying: the context in flight per copy, in tokens (admission.in_flight, from
+    the gateway's in-flight markers), which counts toward the processed threshold, so a copy that its requests in flight
+    would carry past it drains now, not once they have. -> words or None."""
+    from . import admission
     busy = busy or {}
     st = crashes._read(fresh=True)
     r = st.get('recycle') or {}
     if r.get('job') or time.time() < (r.get('retry_after') or 0): return None
     seen, down, have = st.get('seen') or {}, st.get('down') or {}, {x['id']: x for x in rows}
+    flying = admission.in_flight() if flying is None else flying
     best = None
     _held.clear()
     for base, f in (llmshare.settings().get('families') or {}).items():
@@ -164,14 +174,18 @@ def plan(rows, busy=None):
         if not th or base in down: continue
         ids = llmshare.copy_ids(base, f.get('copies', 1))
         if any(i not in have for i in ids): continue                     # a copy is missing: the keeper's other job comes first
-        if time.time() - (r.get('last') or {}).get(base, 0) < GAP: continue
+        after = time.time() - (r.get('last') or {}).get(base, 0)
+        if after < GAP_HARD: continue
         fresh = time.time() - (r.get('fresh') or {}).get(base, 0) < FRESH_FOR
         for i in ids:
             c = counts(i, _since(seen, i))
-            s = share(c, th)
+            s, ahead = share(c, th), int(flying.get(i) or 0)
+            sp = share(dict(c, tokens=c['tokens'] + ahead), th) if ahead else s
             idle = not busy.get(llmshare._safe(i)) and have[i].get('state') == 'IDLE'
             wrong = drift(have[i], f)
             if s >= 1: why, rank = f"recycle threshold reached: {_work(c, th)}", 3 + s
+            elif sp >= 1: why, rank = f"recycle threshold reached with the requests in flight: {_work(c, th)}, and ~{ahead:,} tokens in flight", 3 + sp
+            elif after < GAP: continue                                    # two minutes after the family's last recycle: only a copy past its threshold
             elif wrong and idle: why, rank = f'load parameters differ from the family settings ({wrong})', 2.5
             elif fresh and s >= th['before_batch']: why, rank = f"batch starting at {int(s * 100)}% of its recycle threshold, past {int(th['before_batch'] * 100)}%: {_work(c, th)}", 2 + s
             elif idle and s >= th['soft'] / max(1, th['tokens']): why, rank = f"idle at {int(s * 100)}% of its recycle threshold, past the soft threshold ({int(100 * th['soft'] / max(1, th['tokens']))}%): {_work(c, th)}", 1 + s

@@ -433,26 +433,35 @@ def capacity_for(fam, front):
 
 def report(front=None):
     """This Mac as a peer sees itself (GET /hub/peer): {name, version, time, maintenance, listing_ok, families: {id:
-    {copies, slots, busy, answering: {front: n}, holders: {project: n}, fingerprint, in_settings}}, keeper}. Never content."""
-    from . import crashes, models, recycle
+    {copies, slots, busy, answering: {front: n}, holders: {project: n}, fingerprint, in_settings, ctx: {budget, load, by:
+    {front: tokens}}}}, keeper}: ctx is the context its usable copies may hold in flight (admission.budget), what they hold,
+    and how much of it each front sent, so a front sends only what fits. Never content."""
+    from . import admission, crashes, models, recycle
     rows, busy, fams = llmshare.loaded(), llmshare.busy_slots(), {}
     draining, conf = recycle.draining(), llmshare.settings().get('families') or {}
+    marks = llmshare.inflight()
+    loads = admission.in_flight(marks)
     for r in rows:
         base = llmshare.family(r['id'])
         f = fams.setdefault(base, dict(copies=[], slots=0, busy=0, answering=collections.Counter(), holders=collections.Counter(),
-                                       fingerprint=None, in_settings=base in conf))
+                                       fingerprint=None, in_settings=base in conf, ctx=dict(budget=0, load=0, by=collections.Counter())))
         down = r['id'] in crashes.down_copies(base)
         n = busy.get(llmshare._safe(r['id']), 0)
         usable = r['state'] != 'LOADING' and not down and r['id'] not in draining
-        f['copies'].append(dict(id=r['id'], parallel=r.get('parallel') or 1, state=r['state'], busy=n, down=down, draining=r['id'] in draining))
-        if usable: f['slots'] += max(1, r.get('parallel') or 1); f['busy'] += n
+        b = admission.budget(r['id'])
+        f['copies'].append(dict(id=r['id'], parallel=r.get('parallel') or 1, state=r['state'], busy=n, down=down, draining=r['id'] in draining,
+                                ctx=loads.get(r['id'], 0), budget=b))
+        if usable:
+            f['slots'] += max(1, r.get('parallel') or 1); f['busy'] += n
+            f['ctx']['budget'] += b; f['ctx']['load'] += loads.get(r['id'], 0)
         if f['fingerprint'] is None or r['id'] == base: f['fingerprint'] = fingerprint(r)
-    for m in llmshare.inflight():
+    for m in marks:
         if m.get('state') != 'answering': continue
         f = fams.get(llmshare.family(m.get('copy') or m.get('model')))
         if not f: continue
-        if m.get('from'): f['answering'][m['from']] += 1
+        if m.get('from'): f['answering'][m['from']] += 1; f['ctx']['by'][m['from']] += int(m.get('ctx') or 0)
         f['holders'][m.get('project') or '?'] += 1
+    for f in fams.values(): f['ctx']['by'] = dict(f['ctx']['by'])
     keeper = dict(gpu=models.gpu(), warnings=[])
     for base, f in fams.items():
         size = (f['fingerprint'] or {}).get('bytes')
@@ -486,6 +495,7 @@ class Peer:
         self.strikes = []                               # when requests failed there though the peer looked up
         self.inflight = collections.Counter()           # family -> this Mac's requests on the peer now
         self.cap = {}                                   # family -> how many this Mac may have there, from the last look
+        self.ctx = {}                                   # family -> (its context budget, what others hold there), from the last look
         self.match = {}                                 # family -> (True, None) or (False, words)
         self.first = {}                                 # family -> the slots of the peer's first copy (filled before a second copy anywhere)
 
@@ -545,6 +555,11 @@ class Link:
             p.state, p.why = ('maintenance', m.get('words') or 'maintenance window active') if m.get('phase') == 'on' else ('up', None)
             fams, conf, front = rep.get('families') or {}, llmshare.settings().get('families') or {}, me()
             p.cap = {b: capacity_for(f, front) for b, f in fams.items() if isinstance(f, dict)}
+            p.ctx = {}
+            for b, f in fams.items():
+                x = f.get('ctx') if isinstance(f, dict) else None
+                if isinstance(x, dict):                  # its budget, and what others than this Mac hold there
+                    p.ctx[b] = (int(x.get('budget') or 0), max(0, int(x.get('load') or 0) - int((x.get('by') or {}).get(front) or 0)))
             p.match, p.first = {}, {}
             for b, f in fams.items():
                 cs = sorted((c for c in ((f or {}).get('copies') or []) if isinstance(c, dict) and not c.get('down') and not c.get('draining')
@@ -600,6 +615,20 @@ class Link:
         with self.lock:
             p = self.peers.get(name)
             if p and p.inflight[fam] > 0: p.inflight[fam] -= 1
+
+    def ctx_fits(self, c, load, need):
+        """Whether a request of `need` tokens fits the context budget this peer reported for the family, less what others
+        held there at the last look; load is this Mac's own context in flight there now (llmshare counts it as requests
+        start and end). A peer with nothing in flight, or one that reports no budget (an older hub), takes it; its own
+        gateway admits it again either way."""
+        fam, name = split(c)
+        with self.lock:
+            p = self.peers.get(name)
+            x = p.ctx.get(fam) if p else None
+        if not x: return True
+        budget, others = x
+        if not budget or others + load <= 0: return True
+        return others + load + need <= budget
 
     def target(self, c):
         """Where to send a request for a copy on a peer, and the headers that let it in: (url, {header: value})."""

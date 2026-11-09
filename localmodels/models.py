@@ -30,7 +30,7 @@ is not loaded at start again until the door starts again. While the login loader
 (com.local-models.load-at-login), the keeper leaves loading to it; `localmodels install` retires that loader once a
 family is loaded at start, so one loader runs, never two.
 """
-import json, os, re, subprocess, time, urllib.error, urllib.request
+import json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
 from . import crashes, errors, llmshare, maint, peers, recycle
 
@@ -62,15 +62,41 @@ def conditions():
     return (m, mb)
 
 
+# Metal's own figure for what the GPU may hold (MTLDevice.recommendedMaxWorkingSetSize), read in a process of its own so the
+# gateway never opens a Metal device itself; it follows iogpu.wired_limit_mb when that is set (measured on both Macs).
+METAL_PROBE = '''import ctypes, ctypes.util
+objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("objc"))
+metal = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Metal.framework/Metal")
+metal.MTLCreateSystemDefaultDevice.restype = ctypes.c_void_p
+objc.sel_registerName.restype, objc.sel_registerName.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+send = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+d = metal.MTLCreateSystemDefaultDevice()
+print(send(d, objc.sel_registerName(b"recommendedMaxWorkingSetSize")) if d else 0)'''
+_ws = {'mb': None, 'v': None}
+
+
+def working_set_gb(mb):
+    """What Metal says the GPU may hold, in GiB (read again only when iogpu.wired_limit_mb changes), or None."""
+    if _ws['mb'] == mb and _ws['v'] is not None: return _ws['v']
+    try:
+        out = subprocess.run([sys.executable, '-I', '-c', METAL_PROBE], capture_output=True, text=True, timeout=20).stdout.strip()
+        v = int(out) / 2**30 if out.isdigit() and int(out) > 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError): v = None
+    _ws.update(mb=mb, v=v)
+    return v
+
+
 def gpu():
-    """How much memory this Mac lets the GPU hold: {limit_gb, set (by iogpu.wired_limit_mb), total_gb} (read once a minute).
-    Unset, macOS lets it hold about three quarters of memory on a Mac of 36 GB or more, two thirds below."""
+    """How much memory this Mac lets the GPU hold: {limit_gb, set (by iogpu.wired_limit_mb), total_gb, boot} (read once a
+    minute): Metal's own figure, which follows iogpu.wired_limit_mb when that is set (measured: 107.5 GiB unset on a
+    128 GiB M5 Max, 84% of memory; 40 GiB on a 48 GiB M4 Pro set to 40960 MB); when Metal does not say, the setting, or
+    three quarters of memory on a Mac of 36 GB or more, two thirds below."""
     if time.time() - _gpu['at'] < 60 and _gpu['v']: return _gpu['v']
     total = mem_gb()
     try: mb = int(subprocess.run(['sysctl', '-n', 'iogpu.wired_limit_mb'], capture_output=True, text=True, timeout=5).stdout.strip() or 0)
     except (OSError, subprocess.SubprocessError, ValueError): mb = 0
-    v = dict(limit_gb=round(mb / 1024 if mb else total * (0.75 if total >= 36 else 2 / 3), 1), set=bool(mb), total_gb=round(total, 1),
-             boot=os.path.exists(GPU_DAEMON))
+    limit = working_set_gb(mb) or (mb / 1024 if mb else total * (0.75 if total >= 36 else 2 / 3))
+    v = dict(limit_gb=round(limit, 1), set=bool(mb), total_gb=round(total, 1), boot=os.path.exists(GPU_DAEMON))
     _gpu.update(at=time.time(), v=v)
     return v
 

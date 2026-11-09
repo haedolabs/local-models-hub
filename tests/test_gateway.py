@@ -10,7 +10,7 @@ loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_
 import http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from localmodels import crashes, gateway, llmshare, recycle
+from localmodels import admission, crashes, gateway, llmshare, recycle
 
 F, F2 = 'test/family', 'test/family:2'
 ok = []
@@ -34,6 +34,7 @@ SSE = {   # streams as LM Studio sends them: each ends with its own last event, 
 }
 SSE['anthropic-cut'] = SSE['anthropic'][:2]
 SSE['anthropic-error'] = SSE['anthropic'][:2] + [('error', dict(type='error', error=dict(type='api_error', message='The model has crashed')))]
+OOM = 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)'
 
 
 class Fake(http.server.BaseHTTPRequestHandler):
@@ -72,6 +73,8 @@ class Fake(http.server.BaseHTTPRequestHandler):
             out, code = json.dumps(dict(error='Error: The model has crashed without additional information. (Exit code: null)')).encode(), 400
         elif what == 'channel':                               # the generation thread died; the instance is still listed
             out, code = json.dumps(dict(error='Error: Channel Error')).encode(), 400
+        elif what in ('oom', 'oom500'):                       # the engine out of memory, as a 400 or a 500
+            out, code = json.dumps(dict(error=OOM)).encode(), 400 if what == 'oom' else 500
         elif what == 'bad':
             out, code = json.dumps(dict(error=dict(message="Invalid 'messages': must be an array", type='invalid_request_error'))).encode(), 400
         elif what == 'odd':
@@ -112,8 +115,9 @@ def run(box):
     gateway.UP, gateway.PORT = f'http://127.0.0.1:{up.server_address[1]}', door.server_address[1]
     url = f'http://localhost:{gateway.PORT}'
 
-    def ask(model=F, tag=None, kind='test', timeout=60, path='/v1/chat/completions', headers=None):
-        req = urllib.request.Request(url + path, data=json.dumps(dict(model=model, messages=[], tag=tag)).encode(),
+    def ask(model=F, tag=None, kind='test', timeout=60, path='/v1/chat/completions', headers=None, pad=0, max_tokens=None):
+        body = dict(model=model, messages=[{'role': 'user', 'content': 'x' * pad}] if pad else [], tag=tag, **({'max_tokens': max_tokens} if max_tokens else {}))
+        req = urllib.request.Request(url + path, data=json.dumps(body).encode(),
                                      headers={'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': kind, **(headers or {})})
         try: r = urllib.request.urlopen(req, timeout=timeout); return r.status, json.load(r), dict(r.headers)
         except urllib.error.HTTPError as e: return e.code, None, dict(e.headers)
@@ -152,6 +156,16 @@ def run(box):
           code == 200 and r and r['choices'][0]['message']['content'] == 'OK e' and [s[2] for s in Fake.seen] == ['channel', 'ok']
           and row_.get('tries') == 2 and row_.get('note') == 'LM Studio returned HTTP 400: engine failure (Channel Error)',
           (code, Fake.seen, {k: row_.get(k) for k in ('tries', 'note', 'status')}))
+        for what, n in (('oom', 400), ('oom500', 500)):
+            plan(what, 'ok')
+            code, r, h = ask(tag='o' + what)
+            row_ = rows_logged()[0]
+            t(f'Metal out of memory ({n} "[METAL] Command buffer execution failed: Insufficient Memory (...OutOfMemory)") with the instance still listed: resent, never passed through',
+              code == 200 and r and r['choices'][0]['message']['content'] == 'OK o' + what and [s[2] for s in Fake.seen] == [what, 'ok']
+              and row_.get('tries') == 2 and row_.get('note') == f'LM Studio returned HTTP {n}: engine failure (Insufficient Memory)',
+              (code, Fake.seen, {k: row_.get(k) for k in ('tries', 'note', 'status')}))
+        t('the gateway and the crash classifier read one list of engine-failure words', not hasattr(gateway, 'ENGINE') and crashes.ENGINE.search(OOM)
+          and crashes.engine_failure('Error: Channel Error') == 'Channel Error', crashes.engine_failure(OOM))
         plan('bad')
         code, r, h = ask(tag='c')
         t('a genuine 400 passes through once', code == 400 and len(Fake.seen) == 1, (code, Fake.seen))
@@ -404,6 +418,54 @@ def run(box):
         rows[:] = saved
         st_ = llmshare.waiting_here()
         t('nobody waits once the queue is empty', st_ == dict(people=0, others=0), st_)
+
+        print('admission by context size: an instance takes a request while its context in flight fits its budget')
+        real_par, real_set = llmshare.parallel_of, llmshare.settings
+        llmshare.parallel_of = lambda m: 2                         # two slots a copy, a budget of 10,000 tokens each
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2, context=16384, parallel=2, recycle=False, admit=dict(tokens=10000))},
+                                         batch_at_once=4, headroom_gb=1)
+        admission._ratio.update(at=time.time() + 3600, v=3.0)      # 3 bytes a token, as before any request of this Mac is on record
+        big, small = 21000, 600                                      # bytes of prompt: ~7,000 tokens and ~200, plus 100 of answer each
+        plan('slow', 'slow', 'slow', 'slow'); Fake.slow = 3.0
+        got, marks_seen = {}, {}
+        def go(tag, pad, delay):
+            time.sleep(delay); got[tag] = ask(tag=tag, kind='batch', pad=pad, max_tokens=100, headers={'X-Step': tag})
+        ths = [threading.Thread(target=go, args=a) for a in (('A', big, 0), ('B', big, 0.4), ('C', small, 0.8), ('D', big, 1.2))]
+        for x in ths: x.start()
+        time.sleep(2.0)
+        marks_seen = {m.get('step'): m for m in llmshare.inflight()}
+        for x in ths: x.join(30)
+        Fake.slow = 3.0
+        where = {s_[1]: s_[0] for s_ in Fake.seen}
+        logged = {r_.get('step'): r_ for r_ in rows_logged(4)}
+        t('a long request goes to the copy with room, though the first copy has a slot free; a short one fits beside it',
+          [s_[1] for s_ in Fake.seen][:3] == ['A', 'B', 'C'] and (where.get('A'), where.get('B'), where.get('C')) == (F, F2, F), (Fake.seen, got.get('A', [0])[0]))
+        d = marks_seen.get('D') or {}
+        t('one that fits no copy waits, and its in-flight marker says why: the context budget',
+          d.get('state') == 'queued' and 'context budget' in (d.get('wait_for') or '') and '10,000' in d.get('wait_for', ''), d)
+        t('...then runs as soon as a copy has room, and its row says what it waited for',
+          got.get('D', [0])[0] == 200 and where.get('D') == F and 'context budget' in (logged.get('D') or {}).get('wait_for', '') and (logged.get('D') or {}).get('waited', 0) >= 1,
+          (got.get('D', [0])[0], where.get('D'), {k: (logged.get('D') or {}).get(k) for k in ('waited', 'wait_for')}))
+        a = logged.get('A') or {}
+        t('each row keeps the request\'s size (body bytes, estimated context), never its content',
+          a.get('bytes', 0) > big and 7000 <= a.get('ctx', 0) <= 7300 and 'x' * 50 not in json.dumps(a), {k: a.get(k) for k in ('bytes', 'ctx')})
+        t('every room is given back when the requests end', llmshare.load_here() == {}, llmshare.load_here())
+
+        print('admission: a long request is never starved by short ones (backfilling, then a reservation)')
+        real_reserve, llmshare.RESERVE = llmshare.RESERVE, 1
+        llmshare.parallel_of = lambda m: 3
+        saved = list(rows); rows[:] = [row(F)]                      # one copy of 3 slots
+        plan('slow', 'slow', 'slow', 'slow')
+        s_pad, e_pad = 6000, 24000                                   # ~2,100 and ~8,100 tokens: a short one fits beside another, not beside the long one
+        ths = [threading.Thread(target=go, args=a) for a in (('S1', s_pad, 0), ('E', e_pad, 0.3), ('S2', s_pad, 0.6), ('S3', s_pad, 2.0))]
+        for x in ths: x.start()
+        for x in ths: x.join(40)
+        order = [s_[1] for s_ in Fake.seen]
+        t('a short request behind the long one takes the room it leaves (backfill); after RESERVE the long one keeps its place, so the next short one waits behind it',
+          order == ['S1', 'S2', 'E', 'S3'] and all(got.get(k, [0])[0] == 200 for k in ('S1', 'S2', 'E', 'S3')), (order, {k: got.get(k, [0])[0] for k in ('S1', 'S2', 'E', 'S3')}))
+        llmshare.RESERVE, llmshare.parallel_of, llmshare.settings = real_reserve, real_par, real_set
+        rows[:] = saved
+        admission._ratio.update(at=0.0, v=admission.RATIO)
 
         print('the icon: a PNG at the standard paths, drawn from the theme tokens')
         import struct, zlib

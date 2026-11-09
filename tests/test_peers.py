@@ -479,6 +479,13 @@ def test_link_rules(box):
         t('an answer in between starts the count again', p.state == 'up', p.state)
         L.failed(c, 502, "LM Studio's server is not answering")
         t('the third within a minute: backed off as if it were down, and said why', p.state == 'down' and '3 request failures' in p.why and not L.replicas(F), p.why)
+        print("the link: a request goes to a peer only while it fits the context budget the peer reported")
+        p.ctx = {F: (10000, 6000)}                                   # its budget, and what others than this Mac hold there
+        t('it fits the room left: sent; one token more, or beside this Mac\'s own 3,000 there: not',
+          L.ctx_fits(c, 0, 4000) and not L.ctx_fits(c, 0, 4001) and not L.ctx_fits(c, 3000, 2000))
+        p.ctx = {F: (10000, 0)}
+        t('a peer with nothing in flight takes any request; a peer that reports no budget (an older hub) too',
+          L.ctx_fits(c, 0, 50000) and not L.ctx_fits(c, 9000, 2000) and (setattr(p, 'ctx', {}) or L.ctx_fits(c, 9000, 50000)))
     finally: llmshare.settings = real
 
 
@@ -572,6 +579,10 @@ def test_two_doors(box):
         t("this Mac's look at the peer: up, the family matched, its 2 slots counted", v.get('state') == 'up' and fam.get('match') and fam.get('slots') == 2, v)
         t('LM Link\'s row on the peer (another Mac\'s model) is not taken for a copy there', 'test/other' not in (v.get('families') or {}), list((v.get('families') or {})))
         t('the screens read the same look from the shared state (link.json)', os.path.exists(peers.STATE) and peers.view()[0]['name'] == 'peer')
+        code, rep = link('/hub/peer')
+        cx = ((rep.get('families') or {}).get(F) or {}).get('ctx') or {}
+        t("the peer's report says the context its copies may hold in flight (one copy of 2 slots of 4,096: 8,192) and what they hold",
+          code == 200 and cx.get('budget') == 8192 and cx.get('load') == 0 and cx.get('by') == {} and L.peers['peer'].ctx.get(F) == (8192, 0), (code, cx, L.peers['peer'].ctx))
         mem = v.get('memory') or {}
         t("the peer reports its memory, and this Mac's look carries it (for the memory pool)",
           isinstance(mem.get('total'), (int, float)) and mem['total'] > 0 and 0 <= mem.get('used', -1) <= mem['total'] * 1.05, mem)
