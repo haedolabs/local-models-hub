@@ -21,8 +21,9 @@ text-generation-inference bounds the tokens a batch may hold (max_batch_total_to
   budget(copy)         the context an instance may hold in flight: the family's "admit": {"tokens": N} in models.json, or by
                        default its share of what this Mac has for its models (its memory less what other programs hold,
                        measured now, and headroom_gb; or the GPU's limit, whichever is less), less its weights and, when
-                       several instances are loaded, the KEPT cache, at per_token() bytes a token: never below LEAST,
-                       never above all its slots' context windows. "admit": false turns it off.
+                       several instances are loaded, the KEPT cache, at per_token() bytes a token (with the cache share
+                       beside a sibling): never below LEAST, never above all its slots' context windows. "admit": false
+                       turns it off.
   fits(copy, load, need)   an instance with nothing in flight takes any request, so every request the context window
                        allows can run; a busy one takes it while its load plus this request stays within its budget and,
                        while the Mac's free memory, less what this one will take (its tokens at per_token()), stays
@@ -121,22 +122,24 @@ def shape(config):
     return 2 * kv_heads * head_dim * full * 2, heads * 2 * STEP
 
 
-def per_token(row):
+def per_token(row, shared=True):
     """Bytes of memory a token of context in flight takes on this instance: its model's KV cache and attention scores
-    (from its config.json under LM Studio's models folder, found by the model's name and loaded variant) times
-    CACHE_SHARE; PER_TOKEN when its config cannot be found. (Qwen3.6-35B-A3B: 20 + 64 KiB x 1.4 = 118 KiB.)"""
+    (from its config.json under LM Studio's models folder, found by the model's name and loaded variant), times
+    CACHE_SHARE when it shares the Mac with another instance (shared: the buffers its engine keeps are then out of the
+    other's reach; an engine alone reclaims its own at the GPU limit); PER_TOKEN (shared) when its config cannot be
+    found. (Qwen3.6-35B-A3B: 20 + 64 = 84 KiB alone, x 1.4 = 118 KiB beside a sibling.)"""
     key, variant = str(row.get('key') or row.get('id') or ''), str(row.get('variant') or '')
-    if (key, variant) in _shapes: return _shapes[(key, variant)]
-    name, quant = key.split('/')[-1].lower(), variant.split('@')[-1].lower() if '@' in variant else ''
-    v = PER_TOKEN
-    for p in sorted(glob.glob(os.path.join(MODELS_DIR, '*', '*', 'config.json'))):
-        folder = os.path.basename(os.path.dirname(p)).lower()
-        if name and name in folder and (not quant or quant in folder):
-            try: s = shape(json.load(open(p)))
-            except (OSError, ValueError): s = None
-            if s: v = int(sum(s) * CACHE_SHARE); break
-    _shapes[(key, variant)] = v
-    return v
+    if (key, variant) not in _shapes:
+        name, quant = key.split('/')[-1].lower(), variant.split('@')[-1].lower() if '@' in variant else ''
+        v = None
+        for p in sorted(glob.glob(os.path.join(MODELS_DIR, '*', '*', 'config.json'))):
+            folder = os.path.basename(os.path.dirname(p)).lower()
+            if name and name in folder and (not quant or quant in folder):
+                try: s = shape(json.load(open(p)))
+                except (OSError, ValueError): s = None
+                if s: v = sum(s); break
+        _shapes[(key, variant)] = v or PER_TOKEN / CACHE_SHARE
+    return int(_shapes[(key, variant)] * (CACHE_SHARE if shared else 1))
 
 
 _libc = None
@@ -218,8 +221,8 @@ def default_budget(copy, rows=None, memory=None):
     shares = [(total - others - headroom()) / n] if total else []
     if limit: shares.append((limit - OTHER_GPU) / n)
     if not shares: return win * slots
-    room = min(shares) - models.gb(row.get('size')) - (KEPT if n > 1 else 0)
-    return min(win * slots, max(LEAST, int(room * 2**30 / per_token(row))))   # all its slots' windows bound it, LEAST below that
+    room = min(shares) - models.gb(row.get('size')) - (KEPT if n > 1 else 0)    # beside a sibling, the cache its engine keeps
+    return min(win * slots, max(LEAST, int(room * 2**30 / per_token(row, n > 1))))   # all its slots' windows bound it, LEAST below that
 
 
 def budget(copy, rows=None):
@@ -245,7 +248,7 @@ def row_of(copy):
 
 def need_gib(copy, need):
     """The memory, in GiB, a request of `need` tokens takes on this instance (per_token of its model)."""
-    return need * per_token(row_of(copy)) / 2**30
+    return need * per_token(row_of(copy), len(llmshare.listed()) > 1) / 2**30
 
 
 def fits(copy, load, need):
