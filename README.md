@@ -273,7 +273,7 @@ The file is re-read when its modification time changes. A file that fails to par
 
 **Reads:**
 - peer-process metadata, for attribution: `lsof` for the socket's peer, `proc_pidinfo` for its working directory and parent, `KERN_PROCARGS2` for its arguments and environment;
-- for the dashboard, Claude Code's session files and the first lines of its transcripts (working directory and title only);
+- for the dashboard, Claude Code's session files and the first lines of its transcripts (working directory, title and model; of subagents and workflows only how many run, never a description or label), and `ps` and `ioreg` for the Mac's load;
 - LM Studio's server logs, for crash detection.
 
 **Writes** (in `~/Library/Application Support/LocalModels/`): `requests.jsonl` and `waits.jsonl` (rotated at 20 MB), `crashes.jsonl`, `keeper.json`, `maintenance.json`, `link.json` (the front's view of its peers), `peer-token`, `errors.jsonl` (exception types, messages and code locations; rolled over at 1 MB), `names.json` and `present.json` (display names and screenshot mode), and the `leases/`, `slots/` and `inflight/` directories. These hold metadata and token counts, never a prompt or a completion. The local agents' job logs under `~/Library/Logs/LocalModels/agents/` are the only place content is stored, as each project's own record; `localmodels prune` deletes old ones.

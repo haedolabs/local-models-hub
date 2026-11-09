@@ -374,7 +374,7 @@ def running(s=None):
     s = s or snapshot()
     rows, work = [], [c for c in s['claude'] if c['working']]
     for c in work:
-        extra = (f" · {len(c['subagents'])} subagent{'s' if len(c['subagents']) != 1 else ''}" if c['subagents'] else '') + \
+        extra = (f" · {c['subagents']} subagent{'s' if c['subagents'] != 1 else ''}" if c['subagents'] else '') + \
                 ''.join(f" · workflow {w['finished']} of {w['agents']} done" for w in c['workflows'] if w['live'] and w['running'])
         rows.append(dict(kind='claude', what=f"{c['project']} · {c['title'][:40]}{extra}", since=c['last'], pct=None, left=None))
     if not work:
@@ -484,7 +484,7 @@ def show(s, w=80, h=24):
          f" · {len(cs) - len(work)} idle · last 3 hours"]
     for c in cs[:8]:
         st = k('working'.ljust(9), 'm', 'B') if c['working'] else k(f"idle {ago(c['last'])}".ljust(9), 'd')
-        bits = (f" · {len(c['subagents'])} subagent{'s' if len(c['subagents']) != 1 else ''}" if c['subagents'] else '') + \
+        bits = (f" · {c['subagents']} subagent{'s' if c['subagents'] != 1 else ''}" if c['subagents'] else '') + \
                ''.join(f" · workflow {x['finished']}/{x['agents']}" for x in c['workflows'] if x['live'] and x['running']) + \
                (k(' · uses a local model', 'y') if c['id'] in uses else '')
         L.append(f"  {k(c['project'][:14].ljust(14), 'B')} {st} {c['title'][:36]}{bits}")

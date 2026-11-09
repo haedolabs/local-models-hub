@@ -123,7 +123,7 @@ def _snapshot():
                recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10])),
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],
                claude=[dict(c, uses=any(u.get('session') == c['id'] for u in users)) for c in cs],
-               mac=dash.mac(), top=dash.every('top', 5, dash.top), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
+               mac=dash.mac(), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
     out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
     except Exception as e: out['maintenance'] = None; errors.record('snapshot: maintenance', e)

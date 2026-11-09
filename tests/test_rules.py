@@ -871,6 +871,25 @@ def test_progress(box):
     t('the status line for one with it: done about a time', 'done about' in cli.track_words('batch', b), cli.track_words('batch', b))
 
 
+def test_sessions(box):
+    print("Claude Code's records: of subagents and workflows, only how many; never a description or an agent's label")
+    from localmodels import sessions
+    real = sessions.CLAUDE, sessions.DESKTOP
+    sessions.CLAUDE, sessions.DESKTOP = os.path.join(box, 'claude-projects'), os.path.join(box, 'claude-desktop')
+    sdir = os.path.join(sessions.CLAUDE, '-Users-x-Documents-proj', 'sid1')
+    os.makedirs(os.path.join(sdir, 'subagents', 'workflows', 'wf'))
+    open(sdir + '.jsonl', 'w').write(json.dumps(dict(cwd='/Users/x/Documents/proj')) + '\n')
+    open(os.path.join(sdir, 'subagents', 'agent-1.meta.json'), 'w').write(json.dumps(dict(description='a secret description')))
+    open(os.path.join(sdir, 'subagents', 'agent-1.jsonl'), 'w').write('{}\n')
+    open(os.path.join(sdir, 'subagents', 'workflows', 'wf', 'journal.jsonl'), 'w').write(
+        '\n'.join(json.dumps(e) for e in (dict(type='started', agentId='a', label='secret label one'), dict(type='started', agentId='b', label='secret label two'),
+                                             dict(type='result', agentId='a'))) + '\n')
+    try: r = sessions.recent()
+    finally: sessions.CLAUDE, sessions.DESKTOP = real
+    t('a session with one subagent and a workflow of two agents, one done: the counts, and no free text',
+      r and r[0]['subagents'] == 1 and r[0]['workflows'][0]['running'] == 1 and r[0]['workflows'][0]['agents'] == 2 and 'secret' not in json.dumps(r), r)
+
+
 def test_names(box):
     print('names: what every screen calls a project, its batches and jobs, set by the person; private shows only those')
     from localmodels import llmshare as L, names
@@ -945,6 +964,7 @@ def test_names(box):
     except Exception as e: snap = {'error': repr(e)}
     web.errors.summary = real
     t('the error banner keeps its count, never the details', snap.get('errors') == dict(count=2, minutes=10), snap.get('errors'))
+    t("the dashboard's data carries no list of this Mac's busiest programs (the page never drew it)", 'top' not in snap, sorted(snap))
     with open(names._present_file(), 'w') as f: json.dump(dict(until=time.time() - 1, keep=['research']), f)
     names._present['checked'] = 0.0
     t('at its end it is off by itself: names as set again', names.project('folder-123') == 'folder-123' and names.presenting() is None)
@@ -972,6 +992,7 @@ def main():
         test_privacy_check(box)
         test_about(box)
         test_progress(box)
+        test_sessions(box)
         test_names(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
