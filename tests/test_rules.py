@@ -195,9 +195,9 @@ def test_admission(box):
     d = os.path.join(box, 'lms-models', 'lmstudio-community', 'Qwen3.6-35B-A3B-MLX-8bit'); os.makedirs(d)
     json.dump(qwen, open(os.path.join(d, 'config.json'), 'w'))
     admission.MODELS_DIR = os.path.join(box, 'lms-models'); admission._shapes.clear()
-    pt = admission.per_token(dict(id=B, key=B, variant=B + '@8bit'))
-    t('...found by the model and its loaded variant under LM Studio\'s models folder; a model it cannot find counts PER_TOKEN',
-      pt == int((20480 + 65536) * admission.CACHE_SHARE) and admission.per_token(dict(id='x/other', key='x/other')) == admission.PER_TOKEN, pt)
+    pt, alone = admission.per_token(dict(id=B, key=B, variant=B + '@8bit')), admission.per_token(dict(id=B, key=B, variant=B + '@8bit'), False)
+    t('...found by the model and its loaded variant under LM Studio\'s models folder, times the cache share beside a sibling; a model it cannot find counts PER_TOKEN',
+      pt == int((20480 + 65536) * admission.CACHE_SHARE) and alone == 20480 + 65536 and admission.per_token(dict(id='x/other', key='x/other')) == admission.PER_TOKEN, (pt, alone))
     two = [dict(row(B), variant=B + '@8bit', size='35.16 GB'), dict(row(C2), variant=B + '@8bit', size='35.16 GB')]
     want = int((((128 - 22.4 - 8) / 2) - 35.16 - admission.KEPT) * 2**30 / pt)
     b2 = admission.default_budget(C2, two, memory=(128.0, 22.4, 107.5))
@@ -206,9 +206,9 @@ def test_admission(box):
     fam[B]['copies'] = 1
     llmshare.settings = lambda: dict(families=fam, batch_at_once=4, headroom_gb=4)
     one = two[:1]
-    want1 = int((min(48 - 5.4 - 4, 40 - admission.OTHER_GPU) - 35.16) * 2**30 / pt)
+    want1 = int((min(48 - 5.4 - 4, 40 - admission.OTHER_GPU) - 35.16) * 2**30 / alone)
     b1 = admission.default_budget(B, one, memory=(48.0, 5.4, 40.0))
-    t('the M4 Pro peer: one instance, the lesser of memory and the GPU limit, no sibling cache to keep', b1 == want1 and 25000 < b1 < 35000, (b1, want1))
+    t('the M4 Pro peer: one instance, the lesser of memory and the GPU limit, no sibling\'s cache to count', b1 == want1 and 30000 < b1 < 40000, (b1, want1))
     t('...never below LEAST, never above every slot\'s window', admission.default_budget(B, one, memory=(40.0, 5.4, 36.0)) == admission.LEAST
       and admission.default_budget(B, one, memory=(1024.0, 5.4, 900.0)) == 65536 * 4)
     fam[B]['copies'] = 2
@@ -222,12 +222,14 @@ def test_admission(box):
     t('an instance with nothing in flight takes any request; a busy one, while its load and the request fit the budget',
       admission.fits(C2, 0, 60000) and admission.fits(C2, 30000, 20000) and not admission.fits(C2, 30001, 20000))
     free['v'] = 12.0
+    real_listed, llmshare.listed = llmshare.listed, (lambda: list(two))      # two instances: each counts the sibling-shared cost
     g20, g40 = admission.need_gib(C2, 20000), admission.need_gib(C2, 40000)
     t('a busy instance takes a request while free memory, less what the request takes at its model\'s cost a token, stays above headroom_gb',
       admission.fits(C2, 10000, 20000) and not admission.fits(C2, 10000, 40000) and admission.fits(C2, 0, 40000)
       and 2.2 < g20 < 2.3 and 12 - g40 < 8 < 12 - g20, (round(g20, 2), round(g40, 2)))
     w = admission.why_waiting([C2], {C2: 10000}, 40000)
     t('...and says so', 'memory headroom: 12.0 GiB free' in (w or '') and '~4.5 GiB for this request' in w and 'headroom_gb 8' in w, w)
+    llmshare.listed = real_listed
     marks = [dict(copy=C2, state='answering', ctx=7000), dict(copy=C2, state='answering', ctx=3000), dict(copy=C2, state='queued', ctx=9000), dict(copy=B, state='answering')]
     t('the context in flight per instance, from the in-flight markers: answering requests only', admission.in_flight(marks) == {C2: 10000}, admission.in_flight(marks))
     llmshare.settings, admission.MODELS_DIR, admission.free_gib, _ = real
