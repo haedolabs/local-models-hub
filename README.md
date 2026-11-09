@@ -267,7 +267,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
 | `hooks/hooks.json` | the plugin's maintenance hook |
 | `tests/` | sandbox tests against a fake LM Studio on an ephemeral port (no model is ever loaded or unloaded), and two gateways with a fake LM Studio each for peers; run by `localmodels check` and `publish` |
-| `tools/` | `thinkbench.py` (thinking on versus off), `loadbench.py` (long prompts and long structured completions, one instance versus two) |
+| `tools/` | `thinkbench.py` (thinking on versus off), `loadbench.py` (long prompts and long structured completions, one instance versus two; `--memory`: an instance's footprint against the context it holds) |
 
 ## Data, privacy and trust model
 

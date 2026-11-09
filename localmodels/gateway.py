@@ -423,7 +423,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         code, usage, waited, chosen, held, note, tries, peer = 0, {}, 0.0, model, 0.0, None, 0, None
         sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
         sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
-        need, room = admission.estimate(body, j, admission.window(model)), [None]   # its context in tokens; why it last waited for room
+        need, room = admission.estimate(body, j, admission.window(model), not path.split('?')[0].rstrip('/').endswith('embeddings')), [None]   # its context; why it last waited for room
 
         def waiting(unfit):                                # admission: the copies it waits on for room, not for a slot
             words = admission.why_waiting(unfit, llmshare.load_here(), need) if unfit else None
