@@ -80,7 +80,7 @@ Every host runs its own hub; the one the clients use (the front) lists peer gate
 
 ### Maintenance windows
 `localmodels maintenance in 15m | at HH:MM | now | after-batches [for 30m] [reason]`.
-- **Announced:** every response carries `X-Hub-Maintenance` (phase, ISO 8601 start and end, reason), and `/hub/health`, the dashboard, the `status` tool and a Claude Code hook (`SessionStart` and `UserPromptSubmit`, about 50 ms, silent unless a window is set) all report it.
+- **Announced:** every response carries `X-Hub-Maintenance` (phase, ISO 8601 start and end, reason), and `/hub/health`, the dashboard, the `status` tool and a Claude Code hook (`SessionStart` and `UserPromptSubmit`, about 50 ms, silent unless a window is set; it exits 0 whatever happens, even with the hub's installed copy gone, so it never refuses a prompt) all report it.
 - **Active:** new requests get `503` with `Retry-After` set to the window's end (`overloaded_error` on `/v1/messages`). In-flight requests complete, and queued ones are refused when dequeued. The instance manager performs no loads, reloads, recycles or server starts.
 - **`off`:** the engine log written during the window is skipped, so restarts are not recorded as crashes, and the families loaded at the window's start are reloaded.
 
