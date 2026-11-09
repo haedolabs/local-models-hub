@@ -21,15 +21,18 @@ requests and scoring, two cells (one instance, --at-once requests at a time, thi
 so the numbers compare with the one-instance cells of a run through the gateway.
 
   python3 tools/loadbench.py --memory [--copy <id>] [--sizes 16000,32000,48000] [--at-once-list 1,2,4] [--answer 256]
-                             [--floor 12] [--anyway]
+                             [--floor 12] [--max-context 140000] [--direct] [--anyway]
                              the memory an instance takes for the context it holds: for each prompt size and number at
                              once (fresh memos, so no prompt cache serves them; thinking off; a short answer), pinned to
                              one instance (the family's second replica by default), its engine's physical footprint every
                              0.5 s (proc_pid_rusage, which does not stop the process) against its footprint at rest, with
                              the Mac's free memory; cells in order of the context they hold, and none started once free
-                             memory has fallen below --floor GiB. Report: ~/Library/Logs/LocalModels/loadbench-memory-<time>.json.
+                             memory has fallen below --floor GiB, nor any holding more than --max-context tokens. --direct
+                             sends them to LM Studio itself (each holding one of the hub's slot locks), for a maintenance
+                             window, when the gateway refuses new requests and the instance manager recycles nothing.
+                             Report: ~/Library/Logs/LocalModels/loadbench-memory-<time>.json.
 """
-import argparse, concurrent.futures as cf, json, os, random, re, statistics, subprocess, sys, threading, time, urllib.error, urllib.request
+import argparse, concurrent.futures as cf, contextlib, json, os, random, re, statistics, subprocess, sys, threading, time, urllib.error, urllib.request
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HOME)
@@ -207,7 +210,8 @@ def memory(a):
     if not pid: sys.exit(f'the engine process of {copy} could not be told apart (keeper.json has no load time for it near any engine\'s start)')
     weights = models.gb(next((r['size'] for r in llmshare.loaded() if r['id'] == copy), '0 GB'))
     sizes = [int(x) for x in a.sizes.split(',') if x.strip()]
-    cells = sorted(((s, n) for s in sizes for n in (int(x) for x in a.at_once_list.split(',') if x.strip())), key=lambda c: (c[0] * c[1], c[1]))
+    cells = sorted(((s, n) for s in sizes for n in (int(x) for x in a.at_once_list.split(',') if x.strip()) if s * n <= a.max_context),
+                   key=lambda c: (c[0] * c[1], c[1]))
     print(f'{copy}: engine pid {pid}, {foot / 2**30:.2f} GiB now ({weights:.2f} GiB of weights); cells {cells}; stop below {a.floor} GiB free')
     out, run_id, seed = [], int(time.time()), 50_000
 
@@ -232,10 +236,13 @@ def memory(a):
             def one(k):
                 body = dict(model=copy, max_tokens=a.answer, **agent.SAMPLING, **agent.THINK_OFF,
                             messages=[{'role': 'system', 'content': 'Summarize the memo in three sentences.'}, {'role': 'user', 'content': texts[k]}])
-                req = urllib.request.Request(llmshare.HUB + '/v1/chat/completions', data=json.dumps(body).encode(), headers={
+                req = urllib.request.Request((llmshare.LMSTUDIO if a.direct else llmshare.HUB) + '/v1/chat/completions', data=json.dumps(body).encode(), headers={
                     'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test', 'X-Session': f'loadbench-memory-{run_id}'})
                 t0 = time.time()
-                try: r = json.load(urllib.request.urlopen(req, timeout=3600)); u = r.get('usage') or {}; err = None
+                try:
+                    with (llmshare.slot(copy) if a.direct else contextlib.nullcontext()):   # straight to LM Studio: one of the hub's slots
+                        r = json.load(urllib.request.urlopen(req, timeout=3600))
+                    u, err = r.get('usage') or {}, None
                 except (OSError, ValueError) as e: u, err = {}, f'{type(e).__name__}: {e}'
                 results[k] = dict(prompt=u.get('prompt_tokens') or 0, completion=u.get('completion_tokens') or 0, seconds=round(time.time() - t0, 1), error=err)
 
@@ -278,6 +285,7 @@ def main():
     ap.add_argument('--think', default='both', choices=['both', 'on', 'off'], help='with --url: which thinking cells to run')
     ap.add_argument('--memory', action='store_true'); ap.add_argument('--copy'); ap.add_argument('--sizes', default='16000,32000,48000')
     ap.add_argument('--at-once-list', default='1,2,4'); ap.add_argument('--answer', type=int, default=256); ap.add_argument('--floor', type=float, default=12.0)
+    ap.add_argument('--max-context', type=int, default=140000); ap.add_argument('--direct', action='store_true')
     a = ap.parse_args()
     if a.url: return straight(a)
     if not llmshare.hub_up(fresh=True): sys.exit("gateway down: localmodels start")
