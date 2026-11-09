@@ -144,6 +144,7 @@ def batch(log_dir):
         now.append(dict(job=os.path.basename(r)[:-8], since=since, step=info.get('step'), pct=pct,
                         left=max(0, int(typical - (time.time() - since))) if typical else None))
     return dict(name=os.path.basename(log_dir.rstrip('/')), done=len(done), total=total, left=int(left) if left else None,
+                finish=time.time() + int(left) if left else None,     # as runs.py gives it: every progress with a time left has its finish
                 pct=int(100 * len(done) / total) if total else None, now=sorted(now, key=lambda x: x['since']))
 
 

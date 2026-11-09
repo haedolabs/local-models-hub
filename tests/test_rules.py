@@ -718,6 +718,21 @@ def test_about(box):
     t('with neither file (an old install), the version alone', web.about(os.path.join(box, 'nowhere')) == dict(name=NAME, version=VERSION, license=None, copyright=None, copyright_url=None, source=None))
 
 
+def test_progress(box):
+    print("progress words: a batch folder's time left and finish; the status line never needs a key a progress may lack")
+    from localmodels import cli, dash
+    d = os.path.join(box, 'progress-batch'); os.makedirs(d)
+    open(os.path.join(d, 'plan.json'), 'w').write(json.dumps(dict(jobs=[dict(id=i) for i in range(6)], parallel=2)))
+    for i in range(2): open(os.path.join(d, f'job{i}.json'), 'w').write(json.dumps(dict(seconds=60)))
+    b = dash.batch(d)
+    t('a batch folder: done, total and time left', b['done'] == 2 and b['total'] == 6 and b['left'] == 120, b)
+    t('a batch folder: the finish time is now plus the time left', bool(b.get('finish')) and abs(b['finish'] - (time.time() + 120)) < 5, b)
+    try: words = cli.track_words('batch', dict(name='x', done=2, total=6, left=120))
+    except KeyError as e: words = f'KeyError: {e}'
+    t('the status line for a progress without a finish time: the time left, no crash', 'left' in words and 'done about' not in words and 'KeyError' not in words, words)
+    t('the status line for one with it: done about a time', 'done about' in cli.track_words('batch', b), cli.track_words('batch', b))
+
+
 def test_names(box):
     print('names: what every screen calls a project, its batches and jobs, set by the person; private shows only those')
     from localmodels import llmshare as L, names
@@ -812,6 +827,7 @@ def main():
         test_maintenance(box)
         test_privacy_check(box)
         test_about(box)
+        test_progress(box)
         test_names(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     print(f'{sum(ok)} of {len(ok)} ok')

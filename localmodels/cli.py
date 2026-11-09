@@ -98,7 +98,8 @@ def finish_words(t):
 def track_words(word, p):
     """'batch nightly: 109 of 150, 47 min left, done about 20:41'."""
     if not p or not p.get('total'): return ''
-    when = (f"{ago_left(p['left'])} left, done about {finish_words(p['finish'])}" if p.get('left') else 'finishing') if p.get('left') is not None \
+    when = (f"{ago_left(p['left'])} left" + (f", done about {finish_words(p['finish'])}" if p.get('finish') else '') if p.get('left') else 'finishing') \
+        if p.get('left') is not None \
         else 'estimating the time left' if p['done'] < p['total'] else 'done'
     return f" · {word}{' ' + p['name'] if p.get('name') else ''}: {p['done']} of {p['total']}, {when}"
 
