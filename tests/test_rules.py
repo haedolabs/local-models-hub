@@ -611,6 +611,12 @@ def test_install_dry(box):
       [h['command'] for e in new['hooks']['UserPromptSubmit'] for h in e['hooks']] == ['echo mine', cli.hook_command()], new['hooks']['UserPromptSubmit'])
     t("the plugin's hook command cannot fail either", all('|| true' in h['command'] for ev in json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'hooks', 'hooks.json')))['hooks'].values()
                                                        for e in ev for h in e['hooks']))
+    import inspect                                           # never run for real here: install and uninstall act on this Mac's LaunchAgent and Claude Code settings
+    w = cli.sandboxed()
+    t('a shell with LOCALMODELS_STATE set and no LOCALMODELS_LABEL (this sandbox) is named: install, uninstall, stop and restart would act on the real LaunchAgent',
+      w and 'LOCALMODELS_LABEL' in w and 'LOCALMODELS_STATE' in w, w)
+    first = {f.__name__: [l.strip() for l in inspect.getsource(f).split('\n')[1:] if l.strip() and not l.strip().startswith(('"""', '#'))][:2] for f in (cli.install, cli.uninstall, cli.door)}
+    t('install, uninstall and door check it before they do anything', all(any('sandboxed()' in l for l in ls) for ls in first.values()), first)
     L.LMS = os.path.join(box, 'no-such-lms')
     t('a missing lms is noticed', cli.lms_found() is False)
     cli.PLIST, L.MODELS, L.LMS = real

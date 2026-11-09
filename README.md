@@ -224,8 +224,8 @@ The file is re-read when its modification time changes. A file that fails to par
 | `LOCALMODELS_PORT` | gateway port (default `1235`) |
 | `LMSTUDIO_URL` | LM Studio's server (default `http://localhost:1234`) |
 | `LMSTUDIO_LOGS` | LM Studio's server logs, for crash detection |
-| `LOCALMODELS_STATE` | shared state directory |
-| `LOCALMODELS_LABEL` | the LaunchAgent label |
+| `LOCALMODELS_STATE` | shared state directory (with it set, `install`, `uninstall`, `start`, `stop` and `restart` refuse unless `LOCALMODELS_LABEL` is set too, so a sandbox shell never acts on the real LaunchAgent) |
+| `LOCALMODELS_LABEL` | the LaunchAgent label (a second instance of the hub needs its own) |
 | `LMS` | the `lms` binary, when it is not at `~/.lmstudio/bin/lms` |
 | `LOCALMODELS_PRIVATE_WORDS` | the privacy-check word list for `publish` |
 | `LOCALMODELS_HOME` | where project code that imports `llmshare` finds the repo |
