@@ -38,7 +38,7 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import VERSION, admission, crashes, errors, icon, llmshare, maint, peers, recycle, runs, web, whois
+from . import HOME, VERSION, admission, crashes, dash, errors, icon, llmshare, maint, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
@@ -69,6 +69,7 @@ ICONS = {'/favicon.ico': 64, '/favicon.png': 64, '/apple-touch-icon.png': 180, '
 ANTHROPIC_ERROR = {400: 'invalid_request_error', 403: 'permission_error', 404: 'not_found_error', 409: 'invalid_request_error', 503: 'overloaded_error'}
 _n, _lock, _live = itertools.count(1), threading.Lock(), {}
 _start = {'at': 0.0, 'since': time.time(), 'lock': threading.Lock()}
+CODE = dash.digest(HOME, pages=False)                 # the code this process loaded (the page is read per request)
 
 
 # ---------------------------------------------------------------- the hub's records
@@ -656,7 +657,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/health':
             m = maint.read()
             return self._send(200, dict(ok=True, hub='local-models', version=VERSION, pid=os.getpid(), port=PORT,
-                                        since=round(_start['since']), lmstudio=UP, write_problem=llmshare.write_problem(),
+                                        since=round(_start['since']), lmstudio=UP, write_problem=llmshare.write_problem(), code=CODE,
                                         maintenance=dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), why=m.get('why'), words=maint.words(m)) if m else None))
         q = urllib.parse.parse_qs(path.partition('?')[2])
         try:

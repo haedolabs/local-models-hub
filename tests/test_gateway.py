@@ -513,6 +513,15 @@ def run(box):
         rows[:] = saved
         admission._ratio.update(at=0.0, v=admission.RATIO)
 
+        print('which code the gateway runs: its digest in /hub/health, compared by every caller')
+        from localmodels import dash
+        health = json.load(urllib.request.urlopen(url + '/hub/health', timeout=5))
+        t('/hub/health carries the digest of the code the gateway loaded', health.get('code') == dash.digest(gateway.HOME, pages=False), health.get('code'))
+        real_get = llmshare._hub.get('health'); llmshare._hub.update(health=dict(health, code='0' * 12), at=time.time(), up=True)
+        real_up = llmshare.hub_up; llmshare.hub_up = lambda fresh=False: True; dash._cache.pop('stale', None)
+        try: d = dash.door()
+        finally: llmshare.hub_up = real_up; llmshare._hub['health'] = real_get; dash._cache.pop('stale', None)
+        t('a gateway that runs other code than the caller reads as stale, by its own digest', d['stale'] is True, d)
         print('a second gateway on the same port: it leaves the running one alone')
         os.makedirs(llmshare.INFLIGHT, exist_ok=True)
         mine = os.path.join(llmshare.INFLIGHT, 'running-gateway-1.json'); llmshare._write(mine, dict(hub_pid=os.getpid(), since=time.time(), state='answering'))

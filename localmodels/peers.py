@@ -823,4 +823,5 @@ def words(p):
         n = len(f.get('copies') or [])
         bits.append(f"{b}: {n} instance{'s' if n != 1 else ''}, {f.get('free_here')}/{f.get('slots')} slots free for this gateway ({f.get('busy')} busy, {f.get('here')} from this gateway)")
     warn = [w for w in (p.get('route_words'), p.get('address_words')) if w] + list((p.get('keeper') or {}).get('warnings') or [])
+    if p.get('version') and p['version'] != VERSION: warn.append(f"runs release {p['version']}, this host {VERSION}")
     return f"peer {name}: reachable{link} · " + ('; '.join(bits) or 'no model loaded') + (' · ' + '; '.join(warn) if warn else '')

@@ -76,7 +76,9 @@ def status():
     s = dict(time=time.strftime('%H:%M:%S'), door=dash.door(), lmstudio=dash.lmstudio(), users=dash.users(),
              claude=dash.claude(), last_hour=dash.last_hour())
     lm = s['lmstudio']
-    out = dict(ok=True, hub=('gateway listening' if s['door']['up'] else 'gateway down') + f" on {llmshare.HUB}", dashboard=f'{llmshare.HUB}/',
+    out = dict(ok=True, hub=('gateway listening' if s['door']['up'] else 'gateway down') + f" on {llmshare.HUB}"
+               + (' · it runs other code than this session\'s hub: localmodels install (or /local-models:setup after a plugin update)' if s['door'].get('stale') else ''),
+               dashboard=f'{llmshare.HUB}/',
                lmstudio=f"server {lm['server']}; " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded'),
                at_once=llmshare.at_once() if lm['families'] or _peers_up() else 0, using_now=[],
                claude_sessions=dict(working=sum(c['working'] for c in s['claude']), idle=sum(not c['working'] for c in s['claude'])),
