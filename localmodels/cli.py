@@ -724,8 +724,19 @@ def _fitted_words(s):
                      for k, f in s['families'].items())
 
 
+def sandboxed():
+    """Words when this shell points the hub at another state folder (LOCALMODELS_STATE) without a LaunchAgent label of
+    its own (LOCALMODELS_LABEL): an install, uninstall, start, stop or restart from it would act on this Mac's real
+    LaunchAgent and Claude Code settings with that folder written into them. None otherwise."""
+    if os.environ.get('LOCALMODELS_STATE') and not os.environ.get('LOCALMODELS_LABEL'):
+        return (f"LOCALMODELS_STATE is set ({llmshare.SHARED}) and LOCALMODELS_LABEL is not: this would act on the LaunchAgent {LABEL} "
+                'and the Claude Code settings with that state folder. Set LOCALMODELS_LABEL too, or unset LOCALMODELS_STATE')
+    return None
+
+
 def install(wait=90, plugin=False, dry=False, no_claude=False):
     uid = f'gui/{os.getuid()}'
+    if not dry and sandboxed(): print(f'nothing installed: {sandboxed()}'); return 2
     if dry:
         if os.path.exists(llmshare.MODELS): print(f'would keep the settings: {llmshare.MODELS}')
         else: print(f'would write the settings file {llmshare.MODELS}, fitted to this Mac: {_fitted_words(_fitted())}')
@@ -767,8 +778,13 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
             deploy()
             print(f'1. gateway code copied to {INSTALLED} ({digest(INSTALLED)})')
             plist = _plist()
-            try: changed = plistlib.load(open(PLIST, 'rb')) != plist
-            except (OSError, ValueError): changed = True
+            try: was = plistlib.load(open(PLIST, 'rb'))
+            except (OSError, ValueError): was = {}
+            changed = was != plist
+            env, before = plist.get('EnvironmentVariables') or {}, was.get('EnvironmentVariables') or {}
+            print('   the LaunchAgent environment: ' + ', '.join(f'{k}={v}' for k, v in env.items() if k != 'PATH') if len(env) > 1 else
+                  '   the LaunchAgent environment: the defaults (PATH only)')
+            for k in sorted(set(before) - set(env)): print(f'   note: {k}={before[k]} was in the LaunchAgent and is not any more (it is not set in this shell)')
             os.makedirs(os.path.dirname(PLIST), exist_ok=True)
             with open(PLIST, 'wb') as f: plistlib.dump(plist, f)
             if _loaded() and changed: _launchctl('bootout', f'{uid}/{LABEL}'); time.sleep(1); r = _launchctl('bootstrap', uid, PLIST)
@@ -823,6 +839,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
 
 
 def uninstall():
+    if sandboxed(): print(f'nothing uninstalled: {sandboxed()}'); return 2
     print('0. ' + set_hook(False))                         # first: a hook left pointing at removed code would refuse every prompt
     uid = f'gui/{os.getuid()}'
     for label in (LABEL,) + OLD_LABELS:
@@ -1051,6 +1068,7 @@ def maintenance_cmd(a):
 
 def door(verb):
     uid = f'gui/{os.getuid()}'
+    if sandboxed(): print(f'nothing done: {sandboxed()}'); return 2
     if verb == 'start' and _loaded() and llmshare.hub_up(fresh=True): print(f'gateway already listening on {llmshare.HUB}'); return 0
     if verb in ('stop', 'restart') and _loaded() and not quiet():
         print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle')
