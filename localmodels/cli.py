@@ -1055,11 +1055,17 @@ def door(verb):
     if verb in ('stop', 'restart') and _loaded() and not quiet():
         print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle')
         return 3
-    if verb == 'stop':
-        r = _launchctl('bootout', f'{uid}/{LABEL}'); print('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()); return r.returncode
-    if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
-    if verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
-    else: r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)
+    if verb in ('stop', 'restart') and _loaded():          # never under a load or a recycle half done (install does the same)
+        with llmshare.swapping(wait=120) as got:
+            if not got: print('a swap or a reload is under way: gateway left running; retry in a moment'); return 3
+            if verb == 'stop':
+                r = _launchctl('bootout', f'{uid}/{LABEL}'); print('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()); return r.returncode
+            if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
+            r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}')
+    elif verb == 'stop': print('gateway not running'); return 0
+    elif not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
+    elif verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
+    else: r = _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
     print(f"gateway {'listening on ' + llmshare.HUB if up else 'not responding: see ' + os.path.join(LOGS, 'gateway.log')}")
     return 0 if up else 1

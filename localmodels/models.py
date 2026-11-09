@@ -455,6 +455,12 @@ def _recycle(job, fams):
     f = fams.get(base) or {}
     key, context, parallel = f.get('key') or base, f.get('context') or 32768, f.get('parallel') or 4
     recycle.reloading(copy)
+    listed = _listed()
+    if listed is not None and copy not in listed:          # resumed after a cut between the unload and the load: only the load is
+        ok, out = load(key, copy, context, parallel)       # left (an unload by its name would take a sibling of that model key)
+        ensure_server()
+        recycle.done(copy, ok, time.time() - t0, '' if ok else refused(out) or out)
+        return [f'{copy} loaded to finish its recycle in {time.time() - t0:.0f} s: {job["why"]}' if ok else f'{copy}: reload after recycle failed: {refused(out) or out[-200:]}']
     uok, uwords, gone = unload_exactly(copy)
     wrong = [i for i in gone if i != copy]
     if wrong or copy not in gone:                            # another instance went (its requests are resent), or none did
