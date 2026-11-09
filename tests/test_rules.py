@@ -220,11 +220,13 @@ def test_admission(box):
     admission.free_gib = lambda: free['v']
     t('an instance with nothing in flight takes any request; a busy one, while its load and the request fit the budget',
       admission.fits(C2, 0, 60000) and admission.fits(C2, 30000, 20000) and not admission.fits(C2, 30001, 20000))
-    free['v'] = 6.0
-    t('below headroom_gb free, a long request waits for an idle instance; a short one still starts',
-      not admission.fits(C2, 10000, admission.LONG) and admission.fits(C2, 10000, admission.LONG - 1) and admission.fits(C2, 0, admission.LONG))
-    w = admission.why_waiting([C2], {C2: 10000}, admission.LONG)
-    t('...and says so', 'memory headroom' in (w or '') and '6.0 GiB free' in w, w)
+    free['v'] = 12.0
+    g20, g40 = admission.need_gib(C2, 20000), admission.need_gib(C2, 40000)
+    t('a busy instance takes a request while free memory, less what the request takes at its model\'s cost a token, stays above headroom_gb',
+      admission.fits(C2, 10000, 20000) and not admission.fits(C2, 10000, 40000) and admission.fits(C2, 0, 40000)
+      and 2.2 < g20 < 2.3 and 12 - g40 < 8 < 12 - g20, (round(g20, 2), round(g40, 2)))
+    w = admission.why_waiting([C2], {C2: 10000}, 40000)
+    t('...and says so', 'memory headroom: 12.0 GiB free' in (w or '') and '~4.5 GiB for this request' in w and 'headroom_gb 8' in w, w)
     marks = [dict(copy=C2, state='answering', ctx=7000), dict(copy=C2, state='answering', ctx=3000), dict(copy=C2, state='queued', ctx=9000), dict(copy=B, state='answering')]
     t('the context in flight per instance, from the in-flight markers: answering requests only', admission.in_flight(marks) == {C2: 10000}, admission.in_flight(marks))
     llmshare.settings, admission.MODELS_DIR, admission.free_gib, _ = real

@@ -25,8 +25,10 @@ text-generation-inference bounds the tokens a batch may hold (max_batch_total_to
                        never above all its slots' context windows. "admit": false turns it off.
   fits(copy, load, need)   an instance with nothing in flight takes any request, so every request the context window
                        allows can run; a busy one takes it while its load plus this request stays within its budget and,
-                       for a long request (LONG tokens or more), while the Mac has headroom_gb free. A peer's instance is
-                       admitted by the room that peer reported (peers.Link.ctx_fits), and again by its own gateway.
+                       while the Mac's free memory, less what this one will take (its tokens at per_token()), stays
+                       above headroom_gb. A peer's
+                       instance is admitted by the room that peer reported (peers.Link.ctx_fits), and again by its own
+                       gateway.
 llmshare.slot_any applies fits under one lock with the slot it takes and keeps each instance's load, so two requests never
 both take the last room. A request that fits no busy instance waits while shorter ones behind it take the room there is
 (backfilling, as batch schedulers do), and after llmshare.RESERVE seconds it keeps its place on every instance it wants
@@ -38,7 +40,6 @@ import ctypes, ctypes.util, glob, json, os, re, subprocess, threading, time
 
 from . import llmshare
 
-LONG = 16_384             # tokens: a long request, which waits while the Mac is short of memory (unless an instance is idle)
 ANSWER = 4_096            # tokens of answer counted per request: its max_tokens, at most this
 LEAST = 16_384            # tokens: the smallest budget, so a few short requests always run side by side
 RATIO = 3.0               # bytes of request body per prompt token until this Mac's own requests say (real ones: 3.4 to 4.5)
@@ -237,6 +238,16 @@ def budget(copy, rows=None):
     return v
 
 
+def row_of(copy):
+    """This instance's row in the last listing in hand, or a bare one."""
+    return next((r for r in llmshare.listed() if r['id'] == copy), dict(id=copy, key=llmshare.family(copy)))
+
+
+def need_gib(copy, need):
+    """The memory, in GiB, a request of `need` tokens takes on this instance (per_token of its model)."""
+    return need * per_token(row_of(copy)) / 2**30
+
+
 def fits(copy, load, need):
     """Whether this instance may take a request of `need` tokens now, holding `load` tokens of requests in flight."""
     if ' on ' in str(copy):                                # a peer's instance: by the room that peer reported
@@ -245,10 +256,8 @@ def fits(copy, load, need):
     if load <= 0: return True                              # nothing in flight: it takes it, whatever its size
     b = budget(copy)
     if b and load + need > b: return False
-    if need >= LONG:
-        free = free_gib()
-        if free is not None and free < headroom(): return False
-    return True
+    free = free_gib()
+    return free is None or free - need_gib(copy, need) >= headroom()
 
 
 def why_waiting(copies, loads, need):
@@ -260,9 +269,9 @@ def why_waiting(copies, loads, need):
         if load <= 0: continue
         b = budget(c)
         if b and load + need > b: return f'context budget: ~{need:,} tokens + {load:,} in flight > {b:,} on {c}'
-        free = free_gib()
-        if need >= LONG and free is not None and free < headroom():
-            return f'memory headroom: {free:.1f} GiB free < headroom_gb {headroom():g} for a request of ~{need:,} tokens'
+        free, mine = free_gib(), need_gib(c, need)
+        if free is not None and free - mine < headroom():
+            return f'memory headroom: {free:.1f} GiB free; ~{mine:.1f} GiB for this request would leave less than headroom_gb {headroom():g}'
     return None
 
 
