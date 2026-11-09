@@ -232,6 +232,12 @@ def run(box):
     crashes.watch([row(B), row(C2)]); hour_passes()
     llmshare.loaded, llmshare.parallel_of = real
 
+    print('the crash record rolls over, and its readers read both files')
+    open(crashes.RECORD + '.1', 'w').write(json.dumps(dict(at=time.time() - 3 * 86400, event='crash', model=B, family=B, cause='rolled')) + '\n')
+    t('a crash in the rolled-over file is still read', any(r.get('cause') == 'rolled' for r in crashes.records(7)), len(crashes.records(7)))
+    t('the record rolls over past its size', crashes.ROLL_AT and crashes.ROLL_AT <= 4_000_000, getattr(crashes, 'ROLL_AT', None))
+    os.remove(crashes.RECORD + '.1')
+
     print("the door's hold")
     class Fake(http.server.BaseHTTPRequestHandler):
         status = 200

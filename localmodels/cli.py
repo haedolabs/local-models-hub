@@ -533,7 +533,7 @@ def prune(days=30, root=None):
     from . import mcp_server
     root = root or mcp_server.AGENTS
     cutoff, folders, files, size = time.time() - days * 86400, 0, 0, 0
-    for p in glob.glob(os.path.join(root, '*', '*')):
+    for p in glob.glob(os.path.join(root, '*', '*')) + glob.glob(os.path.join(root, '*.json')):   # a run_job log can sit at the root
         try: m = os.path.getmtime(p)
         except OSError: continue
         if m >= cutoff: continue
