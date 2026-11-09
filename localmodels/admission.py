@@ -89,7 +89,7 @@ def estimate(body, j=None, window=0, answer=True):
     j = j if isinstance(j, dict) else {}
     out = next((j[k] for k in ('max_tokens', 'max_completion_tokens', 'max_output_tokens') if j.get(k) is not None), None)
     try: out = int(out)
-    except (TypeError, ValueError): out = ANSWER
+    except (TypeError, ValueError, OverflowError): out = ANSWER       # OverflowError: Infinity or 1e999
     n = int(prompt_bytes(body) / ratio()) + ((min(out, ANSWER) if out > 0 else ANSWER) if answer else 0)
     return min(n, int(window)) if window else n
 
