@@ -203,6 +203,13 @@ def known(model):
     return base in {llmshare.family(i) for i in (crashes._read().get('seen') or {})}
 
 
+def _listed():
+    """The instance ids LM Studio's server lists now (its REST API, read fresh), or None when it does not answer."""
+    llmshare._api['at'] = 0.0
+    ids = llmshare.api_models()
+    return set(ids) if ids is not None else None
+
+
 def _keepalive(sock):
     """TCP keepalive on a connection to a peer: a link that dies during a long answer is noticed in about 25 s (the
     peer's system answers the probes even while its model is busy), not after the hour a read may take."""
@@ -340,6 +347,12 @@ class Door(http.server.BaseHTTPRequestHandler):
             why = llmshare.swap_blockers(names or [r['id'] for r in llmshare.loaded(fresh=True)])
             if why: return self._send(409, dict(error='swap refused: ' + '; '.join(why) + '. Retry when it finishes.'))
         if method == 'POST' and GEN.search(route): return self.generate(path, body, j, project)
+        if method == 'POST' and route.endswith('/unload'):            # gone on purpose: the watcher must not read it as a crash
+            before = _listed()
+            self.forward(method, path, body, False)
+            after = _listed()
+            if before is not None and after is not None and before - after: crashes.unloaded_now(sorted(before - after))
+            return
         return self.forward(method, path, body, False)
 
     def over_link(self, method):

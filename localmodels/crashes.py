@@ -390,6 +390,17 @@ def loaded_now(ids):
             st.get('missing', {}).pop(i, None)
 
 
+def unloaded_now(ids):
+    """These copies were unloaded on purpose this moment (a swap, an unload through the gateway): LM Studio's REST API
+    logs no unload line, so without this the watcher would read them as gone with no unload, a crash."""
+    with _state() as st:
+        for i in ids:
+            if i in st.get('seen', {}): st['seen'][i]['loaded'] = False
+            st.get('missing', {}).pop(i, None)
+            for d in (st.get('down') or {}).values():
+                if i in (d.get('models') or []): d['models'].remove(i)
+
+
 def swapped(to):
     """A swap (localmodels use) ends any wait to load a crashed model again: the person chose."""
     with _state() as st:

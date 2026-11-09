@@ -497,6 +497,7 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         add = [c for c in want if c not in have or c in drop]
         if dry: return 0, f"would unload {', '.join(drop) or 'nothing'}; would load {', '.join(add) or 'nothing'}"
         drop = sorted(drop, key=lambda i: llmshare.family(i) == i)   # <id>:N first: a bare id (a model key) is unambiguous once its siblings are gone
+        asked = list(drop)
         for _ in range(2):                                   # what is still listed is unloaded again, once
             for i in drop: unload(i)
             now = _listed()
@@ -504,6 +505,7 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
             drop = [i for i in drop if i in now]
             if not drop: break
         now = _listed()
+        if now is not None: crashes.unloaded_now([i for i in asked if i not in now])   # gone on purpose, not crashed
         if now is not None: add = [c for c in want if c not in now or c in drop]   # a wanted one that went is loaded back
         for c in add:
             ok, out = load(key, c, context, parallel)

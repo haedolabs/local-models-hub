@@ -40,13 +40,14 @@ OOM = 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memor
 
 class Fake(http.server.BaseHTTPRequestHandler):
     """A pretend LM Studio: answers by a plan ('ok', 'crash', 'bad', 'odd', 'slow', 'reset'), and remembers who asked, in order."""
-    plan, seen, slow, on_odd = [], [], 3.0, None
+    plan, seen, slow, on_odd, on_unload = [], [], 3.0, None, None
     lock = threading.Lock()
 
     def log_message(self, *a): pass
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path.lower().endswith('/unload') and Fake.on_unload: Fake.on_unload(body)   # the instance leaves the listing
         with Fake.lock:
             what = Fake.plan.pop(0) if Fake.plan else 'ok'
             Fake.seen.append((body.get('model'), body.get('tag'), what))
@@ -337,6 +338,22 @@ def run(box):
             try: urllib.request.urlopen(req, timeout=5); code = 200
             except urllib.error.HTTPError as e: code = e.code
         t('an unload sent through the door, in any case, naming the copy another run uses: refused (409)', code == 409, code)
+        for f in os.listdir(llmshare.LEASES): os.remove(os.path.join(llmshare.LEASES, f))   # no run uses the models now (this suite's own leases too)
+        plan(); saved_rows = list(rows); rows[:] = [row(F), row(F2)]
+        with crashes._state() as st: st.setdefault('seen', {})[F2] = dict(loaded=True, since=time.time() - 60, at=time.time())
+        Fake.on_unload = lambda b: [rows.remove(r) for r in list(rows) if r['id'] == b.get('instance_id')]
+        ps_ok, llmshare._ps['ok'] = llmshare._ps['ok'], True       # the listing in `rows` stands for a good `lms ps`
+        req = urllib.request.Request(url + '/api/v1/models/unload', data=json.dumps(dict(instance_id=F2)).encode(), headers={'Content-Type': 'application/json'})
+        try: code = urllib.request.urlopen(req, timeout=5).status
+        except urllib.error.HTTPError as e: code = e.code
+        finally: llmshare._ps['ok'] = ps_ok
+        for _ in range(20):                                  # the door marks it after it has answered the program
+            st = crashes._read(fresh=True)
+            if not (st.get('seen') or {}).get(F2, {}).get('loaded'): break
+            time.sleep(0.1)
+        t('an unload sent through the door: the instance it took is marked unloaded on purpose (LM Studio logs no unload line for it), never read as a crash',
+          code == 200 and not (st.get('seen') or {}).get(F2, {}).get('loaded') and F2 not in (st.get('missing') or {}), (code, (st.get('seen') or {}).get(F2)))
+        Fake.on_unload = None; rows[:] = saved_rows
 
         plan()
         code, r, h = ask(tag='run', headers={'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '17', 'X-Step': 'extract 18 of 420'})
