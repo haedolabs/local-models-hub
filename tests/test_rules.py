@@ -674,31 +674,96 @@ def test_maintenance(box):
 
 
 def test_privacy_check(box):
-    print('publish: the privacy check reads what is new since the last release against a word list kept outside the repo')
+    print('publish: the privacy check reads every commit the push sends against a word list kept outside the repo')
     import subprocess
     from localmodels import cli
-    repo = os.path.join(box, 'repo'); os.makedirs(repo)
+    repo, origin = os.path.join(box, 'repo'), os.path.join(box, 'origin.git'); os.makedirs(repo)
     g = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout
-    g('init', '-q'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T')
+    subprocess.run(['git', 'init', '-q', '--bare', origin], check=True)
+    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T'); g('config', 'commit.gpgsign', 'false')
     open(os.path.join(repo, 'a.txt'), 'w').write('old line written by Pat Sample\n')
-    g('add', '.'); g('commit', '-q', '-m', 'first'); g('tag', '-a', 'v1.0.0', '-m', 'release')
+    g('add', '.'); g('commit', '-q', '-m', 'first')
     words = os.path.join(box, 'words.txt')
     open(words, 'w').write('# a comment\npat\nsample\n\\bzephyr\\b\nproject-x\nallow: zephyr-free\nallow: sample\\.org/pat\n')
+    r = cli.private_check(repo, words)
+    t('before the first push every commit is read (the push sends them all)', r['status'] == 'hits' and r['since'] is None
+      and any('old line' in h[1] for h in r['hits']), {k: r[k] for k in ('status', 'since', 'hits')})
+    g('remote', 'add', 'origin', origin); g('push', '-q', 'origin', 'main'); g('tag', '-a', 'v1.0.0', '-m', 'release')
     with open(os.path.join(repo, 'a.txt'), 'a') as f: f.write('this is zephyr-free and fine\nthe zephyr notes\nsee sample.org/pat for more\n')
     open(os.path.join(repo, 'project-x-notes.md'), 'w').write('nothing here\n')
     g('add', '.'); g('commit', '-q', '-m', 'notes for Pat')
     r = cli.private_check(repo, words)
     where, texts = [h[0] for h in r['hits']], [h[1] for h in r['hits']]
-    t('a line from before the last release is not read again', not any('old line' in x for x in texts), r['hits'])
+    t('a line already on origin is not read again', not any('old line' in x for x in texts), r['hits'])
     t('a new line holding a word is caught', any('the zephyr notes' in x for x in texts), r['hits'])
     t('an allowed phrase and an allowed address pass', not any('zephyr-free' in x or 'sample.org/pat' in x for x in texts), r['hits'])
     t('a new file whose name holds a word is caught', any('project-x-notes.md' in w for w in where), where)
     t('a commit message is read too (it goes public with the history)', any(w.startswith('commit ') for w in where), where)
-    t('it says what it read: since the last release tag, so many lines, files and messages',
-      r['status'] == 'hits' and r['since'] == 'v1.0.0' and r['lines'] == 4 and r['files'] == 1 and r['commits'] == 1, {k: r[k] for k in ('status', 'since', 'lines', 'files', 'commits')})
+    t('it says what it read: the commits not on origin, so many lines, files and messages',
+      r['status'] == 'hits' and r['since'] == 'origin' and r['lines'] == 4 and r['files'] == 1 and r['commits'] == 1, {k: r[k] for k in ('status', 'since', 'lines', 'files', 'commits')})
     t('no word list: it says the check was skipped, never a silent pass', cli.private_check(repo, os.path.join(box, 'none.txt'))['status'] == 'skipped')
+
+    print('publish: a word stays in the commit that added it; a later commit does not clear it')
+    g('reset', '-q', '--hard', 'origin/main')
+    open(os.path.join(repo, 'b.txt'), 'w').write('zephyr in one commit\n')
+    g('add', '.'); g('commit', '-q', '-m', 'add')
+    first = g('rev-parse', '--short=7', 'HEAD').strip()
+    open(os.path.join(repo, 'b.txt'), 'w').write('replaced in the next\n')
+    g('commit', '-q', '-am', 'replace')
+    r = cli.private_check(repo, words)
+    t('a word added in one commit and replaced in the next is still a hit, named by the commit that holds it',
+      any(h[0].startswith(first) and 'b.txt:1' in h[0] for h in r['hits']), r['hits'])
+    open(os.path.join(repo, 'project-x.md'), 'w').write('a\n')
+    g('add', '.'); g('commit', '-q', '-m', 'file'); g('mv', 'project-x.md', 'plain.md'); g('commit', '-q', '-m', 'rename')
+    r = cli.private_check(repo, words)
+    t('a file added under a listed name and renamed later is still a hit', any('project-x.md' in h[0] for h in r['hits']), r['hits'])
+    g('tag', 'handmade')
+    t('a tag at HEAD does not empty what is read', cli.private_check(repo, words)['hits'] == r['hits'], cli.private_check(repo, words)['hits'])
+
+    print('publish: what the diff parser must not skip')
+    g('reset', '-q', '--hard', 'origin/main')
+    open(os.path.join(repo, 'résumé "q".txt'), 'w').write('zephyr in a quoted name\n')
+    open(os.path.join(repo, 'p.txt'), 'w').write('++ a line that looks like a header\nzephyr after it\n')
+    g('add', '.'); g('commit', '-q', '-m', 'names')
+    r = cli.private_check(repo, words)
+    texts = [h[1] for h in r['hits']]
+    t('a file whose name git quotes is read', 'zephyr in a quoted name' in texts, r['hits'])
+    t("an added line that begins '++ ' does not hide the lines after it", 'zephyr after it' in texts, r['hits'])
+    g('checkout', '-q', '-b', 'side', 'origin/main'); open(os.path.join(repo, 's.txt'), 'w').write('one\n'); g('add', '.'); g('commit', '-q', '-m', 'side')
+    g('checkout', '-q', 'main'); g('merge', '-q', '--no-ff', '--no-commit', 'side')
+    open(os.path.join(repo, 'merged.txt'), 'w').write('zephyr written in the merge\n'); g('add', '.'); g('commit', '-q', '-m', 'merge')
+    r = cli.private_check(repo, words)
+    t('a line added in a merge commit itself is read', 'zephyr written in the merge' in [h[1] for h in r['hits']], r['hits'])
+    g('tag', '-a', 'v9', '-m', 'release for Pat')
+    t("an annotated tag's message is read (the push sends it with --follow-tags)", any(h[0] == 'tag v9' for h in cli.private_check(repo, words)['hits']),
+      cli.private_check(repo, words)['hits'])
+    os.makedirs(os.path.join(box, 'not-a-repo'), exist_ok=True)
+    try: bad = cli.private_check(os.path.join(box, 'not-a-repo'), words)['status']
+    except RuntimeError: bad = 'refused'
+    t('a git command that fails is never a clean check', bad == 'refused', bad)
     open(words, 'w').write('nothing-matches-this\n[unclosed\n')
     t('nothing new holds a word: clean (a line that is not a valid pattern is read as plain text)', cli.private_check(repo, words)['status'] == 'clean')
+
+    print('publish: the release commit holds the version stamp alone, on the commit the checks read')
+    os.makedirs(os.path.join(repo, 'localmodels'), exist_ok=True); os.makedirs(os.path.join(repo, '.claude-plugin'), exist_ok=True)
+    open(os.path.join(repo, 'localmodels', '__init__.py'), 'w').write("VERSION = '1.0.0'\n")
+    open(os.path.join(repo, '.claude-plugin', 'plugin.json'), 'w').write(json.dumps(dict(name='x', version='1.0.0')) + '\n')
+    g('add', '.'); g('commit', '-q', '-m', 'code')
+    head = g('rev-parse', 'HEAD').strip()
+    open(os.path.join(repo, 'other.txt'), 'w').write('staged by someone else\n'); g('add', 'other.txt')
+    try: sha = cli.stamp(repo, '1.0.1', head)
+    except RuntimeError as e: sha = f'refused: {e}'
+    t('something else staged after the checks: refused, nothing stamped', str(sha).startswith('refused') and g('rev-parse', 'HEAD').strip() == head
+      and "'1.0.0'" in open(os.path.join(repo, 'localmodels', '__init__.py')).read(), sha)
+    g('reset', '-q', 'other.txt'); os.remove(os.path.join(repo, 'other.txt'))
+    try: sha = cli.stamp(repo, '1.0.1', head)
+    except RuntimeError as e: sha = f'refused: {e}'
+    files = g('show', '--name-only', '--format=', 'HEAD').split()
+    t('the release commit holds the two stamped files and nothing else', sha == g('rev-parse', 'HEAD').strip()
+      and sorted(files) == ['.claude-plugin/plugin.json', 'localmodels/__init__.py'], (sha, files))
+    try: moved = cli.stamp(repo, '1.0.2', head)
+    except RuntimeError as e: moved = f'refused: {e}'
+    t('HEAD moved since the checks: refused', str(moved).startswith('refused'), moved)
 
 
 def test_about(box):

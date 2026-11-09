@@ -1109,7 +1109,7 @@ def _git(*args, check=True):
 
 
 PRIVATE_WORDS = os.environ.get('LOCALMODELS_PRIVATE_WORDS') or os.path.join(llmshare.SHARED, 'private-words.txt')
-EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'     # git's empty tree: "since the start" when nothing is tagged
+STAMPED = ('localmodels/__init__.py', '.claude-plugin/plugin.json')   # the files a release commit changes, and nothing else
 
 
 def read_words(path):
@@ -1130,42 +1130,107 @@ def read_words(path):
     return words, allows
 
 
-def private_check(repo, words_file):
-    """What would go public in the next push, read against the private word list: every line added since the last
-    release tag, the names of files added, and the commit messages. -> {status ('skipped', 'clean' or 'hits'), since,
-    lines, files, commits, hits: [(where, text)]}."""
+def _unquote(path):
+    """A file name as git prints it: in double quotes, with C escapes, when it holds a quote, a backslash or a control
+    character (core.quotePath=false leaves other characters as they are)."""
+    if not (path.startswith('"') and path.endswith('"')): return path
+    esc = dict(n='\n', t='\t', a='\a', b='\b', f='\f', r='\r', v='\v')
+    return re.sub(r'\\([0-7]{3}|.)', lambda m: chr(int(m.group(1), 8)) if len(m.group(1)) == 3 else esc.get(m.group(1), m.group(1)), path[1:-1])
+
+
+_SHA = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?$')
+_HUNK = re.compile(r'@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+
+
+def private_check(repo, words_file, tip='HEAD'):
+    """What the next push to origin makes public, read against the private word list: every commit on `tip` that no
+    origin ref holds (all of them before the first push), each on its own: the lines it adds (a merge against each
+    parent), the names of the files it adds or renames, its message, and the message of each annotated tag on it
+    (`--follow-tags` sends those). A word a later commit replaced is still in the commit that added it. ->
+    {status ('skipped', 'clean' or 'hits'), since ('origin', or None before the first push), lines, files, commits,
+    hits: [(where, text)]}; RuntimeError when a git command fails, so a failure never reads as clean."""
     out = dict(status='skipped', since=None, lines=0, files=0, commits=0, hits=[])
     wl = read_words(words_file)
     if wl is None: return out
     words, allows = wl
-    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True).stdout
-    tag = git('describe', '--tags', '--abbrev=0').strip() or None
-    base, out['since'] = tag or EMPTY_TREE, tag
+
+    def git(*a, stdin=None):
+        r = subprocess.run(['git', '-C', repo, '-c', 'core.quotePath=false', *a], input=stdin, capture_output=True,
+                           encoding='utf-8', errors='replace')
+        if r.returncode: raise RuntimeError(f"git {a[0]}: {(r.stderr or r.stdout).strip()[:300]}")
+        return r.stdout
 
     def held(text):
         for a in allows: text = a.sub(' ', text)
         return any(w.search(text) for w in words)
-    path, n = None, 0
-    for line in git('diff', '--unified=0', '--no-color', '--no-ext-diff', f'{base}..HEAD').split('\n'):
-        if line.startswith('+++ '): path = line[6:] if line.startswith('+++ b/') else None; continue
-        if line.startswith('@@'):
-            m = re.search(r'\+(\d+)', line); n = int(m.group(1)) if m else 0; continue
-        if line.startswith('+') and path:
-            out['lines'] += 1
-            if held(line[1:]): out['hits'].append((f'{path}:{n}', line[1:].strip()[:160]))
-            n += 1
-    for f in git('diff', '--name-only', '--diff-filter=AR', f'{base}..HEAD').split('\n'):
-        if not f: continue
-        out['files'] += 1
-        if held(f): out['hits'].append((f'file name {f}', f))
-    for rec in git('log', '--format=%h%x00%B%x1e', f'{base}..HEAD' if tag else 'HEAD').split('\x1e'):
-        if '\x00' not in rec: continue
-        sha, body = rec.strip().split('\x00', 1)
-        out['commits'] += 1
-        for line in body.split('\n'):
-            if held(line): out['hits'].append((f'commit {sha}', line.strip()[:160]))
+
+    seen = set()
+
+    def hit(where, text, key):                         # once, under the oldest commit that has it (a merge repeats its parents' lines)
+        if key not in seen: seen.add(key); out['hits'].append((where, text))
+    out['since'] = 'origin' if git('for-each-ref', '--count=1', 'refs/remotes/origin').strip() else None
+    shas = git('rev-list', '--reverse', tip, '--not', '--remotes=origin').split()
+    sha, path, n, old, new, names = '', '', 0, 0, 0, set()
+    patch = git('diff-tree', '--stdin', '--patch-with-raw', '-m', '-r', '--root', '-M', '--unified=0', '--no-color', '--no-ext-diff',
+                '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', stdin=''.join(s + '\n' for s in shas)) if shas else ''
+    for line in patch.split('\n'):
+        if old > 0 or new > 0:                         # inside a hunk, whose header counts its lines: nothing in it is a header
+            if line.startswith('+'):
+                new -= 1; out['lines'] += 1
+                if held(line[1:]): hit(f'{sha[:7]} {path}:{n}', line[1:].strip()[:160], (path, line[1:]))
+                n += 1
+            elif line.startswith('-'): old -= 1
+            elif line.startswith(' '): old, new, n = old - 1, new - 1, n + 1
+            continue
+        if _SHA.match(line): sha = line; continue      # the commit whose diff follows (a merge's comes once per parent)
+        if line.startswith(':') and '\t' in line:     # a raw line: the status and the file names
+            f = line.split('\t')
+            if f[0].split()[-1][:1] in ('A', 'R'):
+                name = _unquote(f[-1])
+                if name not in names: names.add(name); out['files'] += 1
+                if held(name): hit(f'{sha[:7]} file name {name}', name, ('name', name))
+        elif line.startswith('+++ '):
+            p = _unquote(line[4:].rstrip('\t'))
+            path = p[2:] if p.startswith('b/') else p
+        else:
+            m = _HUNK.match(line)
+            if m: old, n, new = int(m.group(1) or 1), int(m.group(2)), int(m.group(3) or 1)
+    if shas:
+        for rec in git('log', '--stdin', '--no-walk=unsorted', '--no-show-signature', '--format=%h%x00%B%x1e', stdin=''.join(s + '\n' for s in shas)).split('\x1e'):
+            if '\x00' not in rec: continue
+            short, body = rec.strip().split('\x00', 1)
+            out['commits'] += 1
+            for line in body.split('\n'):
+                if held(line): hit(f'commit {short}', line.strip()[:160], ('commit', short, line))
+        sent = set(shas)
+        for rec in git('for-each-ref', '--format=%(objecttype)%00%(*objectname)%00%(refname:short)%00%(contents)%1e', 'refs/tags').split('\x1e'):
+            kind, target, name, body = (rec.lstrip('\n').split('\x00', 3) + ['', '', '', ''])[:4]
+            if kind != 'tag' or target not in sent: continue
+            for line in body.split('\n'):
+                if held(line): hit(f'tag {name}', line.strip()[:160], ('tag', name, line))
     out['status'] = 'hits' if out['hits'] else 'clean'
     return out
+
+
+def stamp(repo, want, head):
+    """The version `want` stamped into the code and the plugin manifest and committed on its own, on `head`, the commit
+    the checks read. -> the release commit's sha; RuntimeError when HEAD has moved since the checks or anything is
+    staged or changed, so nothing goes into the release that was not read."""
+    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
+    now = git('rev-parse', 'HEAD').stdout.strip()
+    if now != head: raise RuntimeError(f'HEAD moved since the checks ({head[:7]} to {now[:7]}): run publish again')
+    if git('status', '--porcelain').stdout.strip(): raise RuntimeError('the working tree or the index changed since the checks: run publish again')
+    init = os.path.join(repo, 'localmodels', '__init__.py')
+    text = open(init).read()
+    new = re.sub(r"VERSION = '[^']*'", f"VERSION = '{want}'", text, count=1)
+    if new == text: raise RuntimeError('could not find VERSION in localmodels/__init__.py')
+    p = os.path.join(repo, STAMPED[1])
+    d = json.load(open(p)); d['version'] = want
+    open(init, 'w').write(new)
+    open(p, 'w').write(json.dumps(d, indent=2) + '\n')
+    r = git('commit', '-q', '-m', f'Release {want}', '--', *STAMPED)
+    if r.returncode: raise RuntimeError((r.stderr or r.stdout).strip())
+    return git('rev-parse', 'HEAD').stdout.strip()
 
 
 def publish(a):
@@ -1173,8 +1238,9 @@ def publish(a):
     until the push, and the push needs a remote (--remote URL the first time, or set up by hand)."""
     try:
         if _git('status', '--porcelain'): print('the working tree has changes: commit or stash them first (git status)'); return 2
-        branch = _git('rev-parse', '--abbrev-ref', 'HEAD')
+        branch, head = _git('rev-parse', '--abbrev-ref', 'HEAD'), _git('rev-parse', 'HEAD')
     except RuntimeError as e: print(f'git: {e}'); return 2
+    if branch == 'HEAD': print('HEAD is detached: check out the branch to release first'); return 2
     print('1. the sandbox tests:')
     bad = False
     for name, good, note in run_tests():
@@ -1191,38 +1257,30 @@ def publish(a):
         print('   claude plugin validate: passed' + (' with warnings' if 'warning' in (r.stdout + r.stderr).lower() else ''))
     else: print('   the claude command is not on PATH: not checked')
     print('3. the privacy check:')
-    pc = private_check(HOME, PRIVATE_WORDS)
+    try: pc = private_check(HOME, PRIVATE_WORDS, tip=head)
+    except RuntimeError as e: print(f'   could not read what the push sends ({e}); nothing published'); return 1
     if pc['status'] == 'skipped':
         print(f'   no private word list at {PRIVATE_WORDS}: not checked (one word or pattern a line, `allow: <pattern>` for what may')
         print('   appear, # for notes; then every release is read against it before anything is pushed)')
     elif pc['status'] == 'hits':
         for where, text in pc['hits'][:30]: print(f'   {where}: {text}')
         if len(pc['hits']) > 30: print(f"   ... and {len(pc['hits']) - 30} more")
-        print(f"   nothing published: change these, or add an `allow:` line to {PRIVATE_WORDS} for what is fine to make public"); return 1
+        print('   nothing published. A hit stays in the commit named before it: a later commit does not remove it, so amend,')
+        print(f"   squash or rebase that commit (none of these is on origin yet), or add an `allow:` line to {PRIVATE_WORDS}")
+        print('   for text that is fine to make public'); return 1
     else:
-        print(f"   clean: {pc['lines']} new lines, {pc['files']} new files and {pc['commits']} commit messages since {pc['since'] or 'the start'}")
+        print(f"   clean: {pc['lines']} added lines, {pc['files']} new file names and {pc['commits']} commit messages, in "
+              + ('the commits not yet on origin' if pc['since'] else 'every commit (nothing is on origin yet)'))
     if '--dry' in a: print('--dry: the checks only; nothing stamped, committed or pushed'); return 0
     cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
     want = opt(a, '--version')
     if not want:
         x, y, z = (int(p) for p in cur.split('.')); want = f'{x}.{y}.{z + 1}'
     if not re.match(r'^\d+\.\d+\.\d+$', want): print(f'{want!r} is not a version like 1.2.3'); return 2
-    init = os.path.join(HOME, 'localmodels', '__init__.py')
-    text = open(init).read()
-    new = re.sub(r"VERSION = '[^']*'", f"VERSION = '{want}'", text, count=1)
-    if new == text: print('could not find VERSION in localmodels/__init__.py'); return 2
-    open(init, 'w').write(new)
-    for mf in ('.claude-plugin/plugin.json',):
-        p = os.path.join(HOME, mf)
-        try:
-            d = json.load(open(p)); d['version'] = want
-            open(p, 'w').write(json.dumps(d, indent=2) + '\n')
-        except (OSError, ValueError) as e: print(f'   {mf}: {e}')
     try:
-        _git('add', 'localmodels/__init__.py', '.claude-plugin/plugin.json')
-        _git('commit', '-q', '-m', f'Release {want}')
-        _git('tag', '-a', f'v{want}', '-m', f'Release {want}')
-    except RuntimeError as e: print(f'git: {e}'); return 1
+        release = stamp(HOME, want, head)
+        _git('tag', '-a', f'v{want}', '-m', f'Release {want}', release)
+    except (RuntimeError, OSError, ValueError) as e: print(f'nothing published: {e}'); return 1
     print(f'4. version {want} stamped, committed and tagged (v{want}) on {branch}')
     remote = opt(a, '--remote')
     try:
@@ -1232,7 +1290,7 @@ def publish(a):
                   f'   localmodels publish --remote git@github.com:<owner>/<repo>.git   (next time; this release is committed and tagged)\n'
                   '   or: git remote add origin <url> && git push -u origin main --follow-tags')
             return 0
-        _git('push', 'origin', branch, '--follow-tags')
+        _git('push', 'origin', f'{release}:refs/heads/{branch}', '--follow-tags')    # the commit checked and its release commit, whatever the branch holds by now
         url = _git('remote', 'get-url', 'origin')
     except RuntimeError as e: print(f'5. push failed: {e}'); return 1
     m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', url)
