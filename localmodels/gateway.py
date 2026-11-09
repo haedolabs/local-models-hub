@@ -26,7 +26,8 @@ model again (crashes.py) and recycles copies before the crash band (recycle.py);
 holds the Mac awake (caffeinate). Loading or unloading a model through the door is refused while another run is using
 it (rule 3). Everything else passes straight through. If LM Studio's server is off, the door starts it (never when it is
 already up: that restarts it) and tries once more.
-Serves this Mac only (127.0.0.1 and ::1) and refuses web pages from other sites (Host and Origin are checked).
+Serves this Mac only (127.0.0.1 and ::1) and refuses web pages from other sites (Host, Origin and Sec-Fetch-Site are
+checked: a browser's request from another site or port is refused, except a link that opens the dashboard page).
 
 Peers (peers.py): a family a peer Mac has loaded with the same fingerprint is one more copy, after this Mac's own: the
 next request goes to a peer only when every slot here is busy, never more than the peer said it has free for this Mac,
@@ -273,10 +274,18 @@ class Door(http.server.BaseHTTPRequestHandler):
         return code, {}
 
     def _allowed(self):
+        """A loopback Host; an Origin, if any, that is the gateway's own; and from a browser (Sec-Fetch-Site, which
+        programs do not send) only the dashboard's own requests or an address typed in. A browser sends no Origin on a
+        cross-site <img>, <script>, <iframe> or link, so the Origin alone lets those through; of them only a top-level
+        navigation to the dashboard page is served, so a link to it from another site still opens it."""
         host = (self.headers.get('Host') or '').lower()
         if host not in (f'localhost:{PORT}', f'127.0.0.1:{PORT}', f'[::1]:{PORT}'): return False
         o = self.headers.get('Origin')
-        return not o or bool(re.match(rf'^https?://(localhost|127\.0\.0\.1|\[::1\]):{PORT}$', o))
+        if o and not re.match(rf'^https?://(localhost|127\.0\.0\.1|\[::1\]):{PORT}$', o): return False
+        site = (self.headers.get('Sec-Fetch-Site') or '').lower()
+        if site in ('', 'same-origin', 'none'): return True
+        return (self.command == 'GET' and self.path.split('?')[0] == '/' and (self.headers.get('Sec-Fetch-Mode') or '').lower() == 'navigate'
+                and (self.headers.get('Sec-Fetch-Dest') or '').lower() == 'document')
 
     def _body(self):
         """The request body: by Content-Length, or chunked (some HTTP libraries send it so)."""

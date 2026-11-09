@@ -314,6 +314,23 @@ def run(box):
         try: urllib.request.urlopen(req, timeout=5); code = 200
         except urllib.error.HTTPError as e: code = e.code
         t("a web page from another local port is refused", code == 403, code)
+
+        def get(path, site=None, mode=None, dest=None):
+            h = {k: v for k, v in (('Sec-Fetch-Site', site), ('Sec-Fetch-Mode', mode), ('Sec-Fetch-Dest', dest)) if v}
+            try: return urllib.request.urlopen(urllib.request.Request(url + path, headers=h), timeout=10).status
+            except urllib.error.HTTPError as e: return e.code
+        codes = [get(p, 'cross-site', 'no-cors', d) for p, d in (('/hub/errors?minutes=x', 'image'), ('/v1/models', 'script'), ('/favicon.png', 'image'))]
+        t("a browser's cross-site GET, which carries no Origin (an <img>, a <script>), is refused", codes == [403, 403, 403], codes)
+        t('so is a page on another local port (same-site), and the dashboard framed by another site',
+          (get('/hub/health', 'same-site', 'no-cors', 'script'), get('/', 'cross-site', 'navigate', 'iframe')) == (403, 403))
+        t('a link from another site opens the dashboard; a navigation from another site to any other route is refused',
+          (get('/', 'cross-site', 'navigate', 'document'), get('/hub/errors?minutes=x', 'cross-site', 'navigate', 'document')) == (200, 403))
+        codes = (get('/hub/health', 'same-origin', 'cors', 'empty'), get('/', 'none', 'navigate', 'document'), get('/hub/health'))
+        t("the dashboard's own requests (same-origin), an address typed in (none) and a program (no such header) are served", codes == (200, 200, 200), codes)
+        from localmodels import errors
+        codes = [get(p) for p in ('/hub/errors?minutes=x', '/hub/history?minutes=x', '/hub/recent?n=x')]
+        t('a window or a count that is not a number falls back to the default: answered, and nothing recorded as an error',
+          codes == [200, 200, 200] and not [r for r in errors.recent(5) if r['where'].startswith('GET /hub/')], (codes, errors.recent(5)[:1]))
         req = urllib.request.Request(url + '/api/v1/models/Unload', data=json.dumps(dict(instance_id=F2, model='other/x')).encode(), headers={'Content-Type': 'application/json'})
         with llmshare.lease('someone', [F2], 'batch'):
             llmshare._write(os.path.join(llmshare.LEASES, 'someone-1-1.json'), dict(v=2, project='someone', pid=1, models=[F2], kind='batch', since=time.time(), beat=time.time()))
