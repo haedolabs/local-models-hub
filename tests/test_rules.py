@@ -886,7 +886,12 @@ def test_names(box):
     t('two names seen (a folder and a header) show as one project, their counts together', list(by) == ['casework'] and by['casework']['requests'] == 2, by)
     names.set_private('casework', True)
     s = names.session(dict(id='s1', project='folder-123', title='Secret title'))
-    t('private: no Claude session title', s['project'] == 'casework' and s['title'] is None, s)
+    t('private: no Claude session title, only the words every screen can print', s['project'] == 'casework' and s['title'] == 'a Claude Code session', s)
+    from localmodels import dash
+    sess = dict(s, id='s1', working=True, last=time.time(), subagents=0, workflows=[])
+    try: rows = dash.running(dict(claude=[sess], users=[], extra={})); err = None
+    except Exception as e: rows, err = [], e
+    t("the terminal dash's rows render a private project's session", err is None and any('a Claude Code session' in r['what'] for r in rows), repr(err) if err else rows)
     t('private: a step in free words is hidden; one that counts keeps only its count', names.step('folder-123', 'reading notes.pdf') is None
       and names.step('casework', 'extract files 8 of 360') == '8 of 360', (names.step('folder-123', 'reading notes.pdf'), names.step('casework', 'extract files 8 of 360')))
     names.set_label('casework', 'extract files', 'Exhibit text')

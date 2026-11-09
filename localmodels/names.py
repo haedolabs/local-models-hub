@@ -130,10 +130,10 @@ def request(rec):
 
 
 def session(c):
-    """A Claude Code session for a screen: the project as shown; no title when the project is private, and none at all in
-    screenshot mode (titles are free text)."""
+    """A Claude Code session for a screen: the project as shown; its title only while the project is not private and
+    screenshot mode is off (titles are free text), else the same plain words, so every screen has a string to print."""
     raw = c.get('project') or '?'
-    return dict(c, project=project(raw), title='a Claude Code session' if presenting() else None if private(raw) else c.get('title'))
+    return dict(c, project=project(raw), title='a Claude Code session' if presenting() or private(raw) else c.get('title'))
 
 
 def user(r):
