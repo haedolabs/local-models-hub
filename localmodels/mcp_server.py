@@ -5,7 +5,7 @@ per line; tool calls run in threads, so a long `ask` never blocks a session's ot
 
   localmodels mcp              # started by Claude Code, which talks to it over stdin/stdout
 
-Tools: status, guide, ask, batch, job_status, swap_check. ask and batch run local agents on the loaded model with
+Tools: status, guide, ask, batch, job_status, name, swap_check. ask and batch run local agents on the loaded model with
 tools that only read the session's own project folder; they run as their own process (a session that ends does not
 stop them) and go through the hub like everything else.
 """
