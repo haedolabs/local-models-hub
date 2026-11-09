@@ -224,11 +224,11 @@ def confirm_missing(ids, rows, busy=None):
         return _confirm_missing(st, ids, {r['id'] for r in rows}, llmshare.api_models(), busy or {}, time.time())
 
 
-def watch(rows, listed_at=None, busy=None):
+def watch(rows, listed_at=None, busy=None, now=None):
     """One look. rows: what LM Studio holds now (`lms ps`, read just before; listed_at: when that read began); busy: the
-    slots held per copy. -> the models to load again now: [{base, ids, key, context, parallel, size}] (models.keep loads
-    them under the swap lock)."""
-    now, have, busy = time.time(), {r['id']: r for r in rows}, busy or {}
+    slots held per copy; now: the time of the look (a test moves it). -> the models to load again now: [{base, ids, key,
+    context, parallel, size}] (models.keep loads them under the swap lock)."""
+    now, have, busy = now or time.time(), {r['id']: r for r in rows}, busy or {}
     listed_at = listed_at or now
     api = llmshare.api_models()
     fams = llmshare.settings().get('families') or {}
@@ -278,20 +278,21 @@ def watch(rows, listed_at=None, busy=None):
         for base, d in list(down.items()):
             ids, key, context, parallel, size = _how(base, d, seen)
             if listed_at <= d['crashed'] + 2 and not d.get('gone'): continue    # the listing in hand predates the crash: decide on the next one
-            if all(i in have for i in ids):                                       # a listing begun after the crash shows every copy
+            d['models'] = [i for i in d.get('models') or [] if i not in have]     # a crashed copy listed again serves at once; a sibling
+            if not d['models'] or all(i in have for i in ids):                    # still missing is the replica path's (models.keep)
                 if not d.get('keeper'): _record(dict(event='back', family=base, by='someone else'))
                 del down[base]; continue
             if d['state'] == 'left down':
                 if now - d.get('since', now) > 86400: del down[base]; continue   # on the dash for a day, then only in the record
                 if now - d.get('retry_at', d.get('since', now)) < RETRY_LEFT: continue
-                d.update(state='loading again', why='hourly retry', retry_at=now, fails=0)
+                d.update(state='loading again', why='hourly retry', retry_at=now, fails=0, clock=now)   # a new hour to load it in
             reloads = st.setdefault('reloads', {})                              # reloads that worked, per copy
             tries = max([len([t for t in reloads.get(i) or [] if t > now - WINDOW]) for i in (d.get('models') or ids)] or [0])
             why = ('its load parameters were never observed, so it cannot be reloaded with the same settings' if not key else
                    f'crashed again after {tries} reloads of one instance within an hour' if tries >= CAP else
-                   'not reloaded within an hour' if now - d['crashed'] > GIVE_UP else None)
+                   'not reloaded within an hour' if now - d.get('clock', d['crashed']) > GIVE_UP else None)
             if why:
-                d.update(state='left down', why=why, since=now, retry_at=now)
+                d.update(state='left down', why=why, since=d.get('since', now), retry_at=now)     # since: when it was first left down
                 _record(dict(event='left down', family=base, why=why)); continue
             if d.get('next_try', 0) > now: continue                            # the last load failed: a pause before the next
             jobs.append(dict(base=base, ids=[i for i in ids if i not in have], key=key, context=context, parallel=parallel, size=size))
@@ -320,7 +321,8 @@ def waiting(base, why):
 
 
 def loaded(base, ids, ok, seconds, words=''):
-    """What the keeper's load came to: when every copy is back, the door stops holding requests at once. A reload that
+    """What the keeper's load came to: a copy back serves at once, and when every copy the crash took is back the crash is
+    over (a sibling that never fitted is the replica path's). A reload that
     worked counts toward the 3 an hour; one that failed is tried again after a pause (1, 2, then 5 minutes). A copy that
     crashed while it drained for a recycle comes back fresh: the reload was its recycle, so that job ends here (recorded as
     'recycle given up', with why) instead of unloading the fresh copy again."""
@@ -329,7 +331,9 @@ def loaded(base, ids, ok, seconds, words=''):
         if ok:
             _record(dict(event='loaded again', family=base, models=ids, seconds=round(seconds, 1), by='the hub'))
             for i in ids: st.setdefault('reloads', {}).setdefault(i, []).append(time.time())
-            if d: del st['down'][base]
+            if d:                                            # the crash is over when every copy it took is back
+                d['models'] = [m for m in d.get('models') or [] if m not in ids]
+                if not d['models']: del st['down'][base]
             for i in ids: st.setdefault('seen', {}).setdefault(i, {}).update(loaded=True, since=time.time(), at=time.time())
             st.get('missing', {}).pop(base, None)
             r = st.get('recycle') or {}

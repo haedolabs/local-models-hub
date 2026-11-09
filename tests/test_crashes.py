@@ -194,6 +194,42 @@ def run(box):
     open(log, 'a').write(f'[{stamp(1000)}][INFO] Server started.\n')
     jobs = crashes.watch([row(B)])
     t("LM Studio restarted and a copy of a family is not back: loaded again", jobs and jobs[0]['ids'] == [C2], jobs)
+
+    print('the keeper: a family where only one replica fits')
+    crashes.swapped(B); hour_passes()
+    with crashes._state() as st: st['seen'].setdefault(C2, {})['loaded'] = False             # copy 2 never fitted beside copy 1
+    crash([B]); jobs = fresh([])
+    free[0] = 50.0; done.clear(); load_was = models.load
+    models.load = lambda key, ident, context, parallel: (done.append((ident, context, parallel)), free.__setitem__(0, free[0] - 46), (True, 'ok'))[2]
+    models._again(jobs[0], 8)
+    t('the crashed replica is loaded again and serves at once, though the other replica still has no room',
+      [x[0] for x in done] == [B] and crashes.down_copies(B) == set() and not crashes.reloading(B), (done, crashes._read(fresh=True).get('down')))
+    models.load, free[0] = load_was, 100.0
+    crashes.watch([row(B)]); hour_passes()
+    crash([B]); jobs = fresh([row(B)])
+    t('a crashed replica loaded again by someone else: the crash is closed, though its sibling is not loaded',
+      jobs == [] and not crashes._read(fresh=True).get('down') and crashes.records(1)[-1].get('event') == 'back', (jobs, crashes._read(fresh=True).get('down')))
+
+    print('the keeper: a family left down is tried again every hour, and leaves the dash a day after it was first left down')
+    hour_passes()
+    crash([B]); t0 = time.time(); jobs = fresh([])
+    free[0] = 20.0; done.clear(); models._again(jobs[0], 8)                                  # no room: it waits
+    jobs = crashes.watch([], now=t0 + 3700)
+    first = crashes._read(fresh=True)['down'][B]
+    t('not loaded within an hour: left down', jobs == [] and first['state'] == 'left down', first)
+    jobs = crashes.watch([], now=t0 + 3700 + 3601)
+    t('an hour later it is tried once more: a reload, not left down again in the same look',
+      jobs and jobs[0]['ids'] == [B, C2] and crashes._read(fresh=True)['down'][B]['state'] == 'loading again', (jobs, crashes._read(fresh=True)['down'][B].get('state')))
+    jobs = crashes.watch([], now=t0 + 3700 + 3601 + 60)
+    t('...and that try has its own hour', jobs and crashes._read(fresh=True)['down'][B]['state'] == 'loading again', crashes._read(fresh=True)['down'][B].get('state'))
+    jobs = crashes.watch([], now=t0 + 3700 + 3601 + 3700)
+    d = crashes._read(fresh=True)['down'][B]
+    t('not loaded in that hour either: left down again, its day counted from the first time', d['state'] == 'left down' and d['since'] == first['since'], (d.get('state'), d.get('since'), first['since']))
+    crashes.watch([], now=first['since'] + 86401)
+    t('a day after it was first left down: off the dash, only in the record', B not in (crashes._read(fresh=True).get('down') or {}))
+    free[0] = 100.0
+    with crashes._state() as st: st['down'] = {}
+    crashes.watch([row(B), row(C2)]); hour_passes()
     llmshare.loaded, llmshare.parallel_of = real
 
     print("the door's hold")
