@@ -127,7 +127,7 @@ Since admission by context size, the status also prints each instance's context 
 
 Also disable **just-in-time model loading** in LM Studio's developer settings; the gateway never needs it.
 
-**The short way:** in Claude Code, say *"Set up the local-models hub from github.com/matthaedo/local-models-hub."* Claude reads the next section and does the rest.
+**The short way:** in Claude Code, say *"Set up the local-models hub from github.com/haedolabs/local-models-hub."* Claude reads the next section and does the rest.
 
 **If you are Claude Code setting this up for someone:**
 1. Check the requirements: `uname -m` prints `arm64`; `~/.lmstudio/bin/lms ls` lists at least one model (if `lms` is missing, ask the person to open LM Studio once and run `~/.lmstudio/bin/lms bootstrap`); `python3 --version` is 3.9 or later. Stop and report anything missing rather than working around it.
@@ -141,16 +141,16 @@ Also disable **just-in-time model loading** in LM Studio's developer settings; t
 **With Claude Code** (the repo is a Claude Code plugin and its own marketplace), in any session:
 
 ```
-/plugin install local-models --marketplace matthaedo/local-models-hub
+/plugin install local-models --marketplace haedolabs/local-models-hub
 /local-models:setup
 ```
 
-The first line installs the plugin (the MCP server, a skill with the client contract, and the maintenance hook); the second has Claude install the gateway on this Mac and run the self-test. On Claude Code before 2.1.275: `/plugin marketplace add matthaedo/local-models-hub`, then `/plugin install local-models@local-models-hub`.
+The first line installs the plugin (the MCP server, a skill with the client contract, and the maintenance hook); the second has Claude install the gateway on this Mac and run the self-test. On Claude Code before 2.1.275: `/plugin marketplace add haedolabs/local-models-hub`, then `/plugin install local-models@local-models-hub`.
 
 **Without Claude Code**, in a terminal:
 
 ```bash
-git clone https://github.com/matthaedo/local-models-hub.git ~/local-models
+git clone https://github.com/haedolabs/local-models-hub.git ~/local-models
 ~/local-models/bin/localmodels install
 ```
 
