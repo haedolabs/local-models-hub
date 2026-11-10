@@ -126,17 +126,22 @@ def families(models):
 def batch(log_dir):
     """A batch folder's progress (plan.json, one .running file per job at work, one .json per job done)."""
     if not log_dir or not os.path.isdir(log_dir): return None
-    plan = _file(os.path.join(log_dir, 'plan.json'), lambda p: json.load(open(p))) or {}
+    plan = _file(os.path.join(log_dir, 'plan.json'), lambda p: json.load(open(p)))
+    plan = plan if isinstance(plan, dict) else {}         # a client's file: a shape it did not mean is no plan, never an exception
     done = [f for f in glob.glob(os.path.join(log_dir, '*.json')) if os.path.basename(f) not in ('summary.json', 'plan.json', 'jobs.json', 'runner.json')]
     times = []
     for f in done:
         r = _file(f, lambda p: json.load(open(p)))
         if isinstance(r, dict): times.append(r.get('seconds') or 0)
-    total = len(plan.get('jobs', [])) or None
+    jobs = plan.get('jobs')
+    total = len(jobs) if isinstance(jobs, list) and jobs else None
     typical = sorted(times)[len(times) // 2] if times else None
-    left = (total - len(done)) * (sum(times) / len(times)) / max(1, plan.get('parallel', 1)) if total and times else None
+    running = glob.glob(os.path.join(log_dir, '*.running'))
+    parallel = plan.get('parallel')                        # a number, or a word ("hub slots"): then the jobs running now stand for it
+    parallel = parallel if isinstance(parallel, int) and not isinstance(parallel, bool) and parallel > 0 else max(1, len(running))
+    left = (total - len(done)) * (sum(times) / len(times)) / parallel if total and times and total > len(done) else None
     now = []
-    for r in glob.glob(os.path.join(log_dir, '*.running')):
+    for r in running:
         try:
             raw = open(r).read(); info = json.loads(raw) if raw.startswith('{') else dict(since=float(raw or time.time()))
         except (OSError, ValueError): info = {}
@@ -200,7 +205,10 @@ def users(shown=True):
         r['models'] += [m for m in d.get('models') or [] if m not in r['models']]
         r['since'] = min(r['since'], d.get('since') or time.time())
         for f in ('session', 'host_session', 'app', 'step'): r[f] = r[f] or d.get(f)
-        if d.get('log_dir'): r['batch'] = batch(d['log_dir'])
+        if d.get('log_dir'):
+            try: r['batch'] = batch(d['log_dir'])          # a client's folder: progress that cannot be read is recorded, the row stays
+            except Exception as e:
+                from . import errors; errors.record('dash: batch progress', e)
         elif d.get('total'): r['batch'] = dict(name='', done=d.get('done', 0), total=d['total'], pct=int(100 * d.get('done', 0) / max(1, d['total'])), left=None, now=[])
     for f in llmshare.inflight():
         r = row(('link', f['from'], f.get('project')) if f.get('from') else f.get('pid') or ('hub', f.get('project')), f.get('project'))

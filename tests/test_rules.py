@@ -1032,6 +1032,16 @@ def test_progress(box):
     except KeyError as e: words = f'KeyError: {e}'
     t('the status line for a progress without a finish time: the time left, no crash', 'left' in words and 'done about' not in words and 'KeyError' not in words, words)
     t('the status line for one with it: done about a time', 'done about' in cli.track_words('batch', b), cli.track_words('batch', b))
+    open(os.path.join(d, 'plan.json'), 'w').write(json.dumps(dict(jobs=[dict(id=i) for i in range(6)], parallel='hub slots')))
+    for i in range(2): open(os.path.join(d, f'job{i + 2}.running'), 'w').write(json.dumps(dict(since=time.time())))
+    try: b = dash.batch(d)
+    except Exception as e: b = f'{type(e).__name__}: {e}'
+    t("a plan whose parallel is a word: no exception; the jobs running now stand for it", isinstance(b, dict) and b['total'] == 6 and b['left'] == 120, b)
+    for bad in ('[1, 2]', '{"jobs": 3, "parallel": null}', 'not json'):
+        open(os.path.join(d, 'plan.json'), 'w').write(bad)
+        try: b = dash.batch(d)
+        except Exception as e: b = f'{type(e).__name__}: {e}'
+        t(f'a plan.json of the wrong shape ({bad}): no exception, no total', isinstance(b, dict) and b['total'] is None, b)
 
 
 def test_sessions(box):
