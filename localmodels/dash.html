@@ -211,7 +211,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
     <div class="chips"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
+      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><button class="btn" id="power" style="display:none"></button><span id="clock" class="muted"></span>
       <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
   </header>
   <div>
@@ -581,7 +581,15 @@ function renderNow() {
   }
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
-  if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
+  if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.off ? 'var(--other)' : mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
+  const pw = $('power'), off = !!(mt && mt.off);
+  pw.style.display = '';
+  if (!pw.disabled) {
+    pw.textContent = off ? 'turn models on' : 'turn models off';
+    pw.dataset.off = off ? '1' : '';
+    pw.title = off ? 'Load the families that were loaded when switched off (POST /hub/on); the instance manager adds the other replicas'
+      : 'Unload every instance once the requests in flight finish; until turned on, requests get 503 and nothing is loaded, reloaded or started (POST /hub/off)';
+  }
   // stat tiles
   const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
   let busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
@@ -929,6 +937,19 @@ $('poll-now').addEventListener('click', async () => {          // the gateway lo
   const b = $('poll-now'); b.disabled = true; b.textContent = 'polling…';
   try { await fetch('/hub/link', {method: 'POST'}); } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
   finally { b.disabled = false; b.textContent = 'poll now'; tickNow(); }
+});
+$('power').addEventListener('click', async () => {             // switch the local models off or on; the next snapshot shows the state
+  const b = $('power'), on = b.dataset.off === '1';
+  b.disabled = true; b.textContent = on ? 'turning on…' : 'turning off…';
+  try {
+    let r = await fetch(on ? '/hub/on' : '/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+    if (r.status === 409) {
+      const j = await r.json();
+      if (confirm(`In use: ${(j.blockers || []).join('; ')}.\nSwitch the local models off anyway?`))
+        r = await fetch('/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"force": true}'});
+    }
+  } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
+  finally { b.disabled = false; tickNow(); }
 });
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];

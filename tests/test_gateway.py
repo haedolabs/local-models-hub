@@ -420,6 +420,29 @@ def run(box):
         t('a request still waiting for its turn when maintenance starts is refused at its turn, never sent',
           got.get('code') == 503 and 'queued' not in [s_[1] for s_ in Fake.seen], (got.get('code'), Fake.seen))
 
+        print('the door: switched off (POST /hub/off) and on again (POST /hub/on)')
+        maint.OFF = os.path.join(box, 'off.json')
+        def hub_post(route, body):
+            try: r = urllib.request.urlopen(urllib.request.Request(url + route, data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}), timeout=10); return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
+        code, body = hub_post('/hub/off', {})
+        if code == 409: code, body = hub_post('/hub/off', {'force': True})        # the sandbox's lms cannot list: a blocker until forced
+        t('switched off: 200, and the record says so', code == 200 and maint.switched_off(), (code, body))
+        plan()
+        code, r, h = ask(tag='switched-off')
+        t('switched off: a request gets 503 with the header naming it, Retry-After 300 s, nothing forwarded',
+          code == 503 and int(h.get('Retry-After') or 0) == maint.OFF_RETRY and 'switched-off' in (h.get('X-Hub-Maintenance') or '') and 'switched-off' not in [s_[1] for s_ in Fake.seen], (code, h.get('X-Hub-Maintenance'), h.get('Retry-After')))
+        health = json.loads(urllib.request.urlopen(url + '/hub/health', timeout=5).read())
+        t('the health page says it', 'switched off' in ((health.get('maintenance') or {}).get('words') or ''), health.get('maintenance'))
+        t("switched off: the door never starts LM Studio's server", gateway.start_lmstudio('test') is False)
+        code, body = hub_post('/hub/on', {})
+        end = time.time() + 20
+        while maint.switched_off() and time.time() < end: time.sleep(0.2)
+        t('on: 202, and the record goes', code == 202 and maint.switched_off() is None, (code, body))
+        plan()
+        code, r, h = ask(tag='switched-on')
+        t('on: answered again', code == 200, (code, r))
+
         print("the door: every API LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, LM Studio's own)")
         def streamed(what, path):
             plan(what); crashes.WAKE.clear(); crashes._seen_state['nudged'] = 0

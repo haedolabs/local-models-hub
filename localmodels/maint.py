@@ -11,22 +11,70 @@ while, then stands down until it is over.
   off         end() clears it; models.after_maintenance() loads again what was loaded before.
 The record lives in maintenance.json in the hub's shared folder. It holds times, minutes and a few words of why; nothing
 else.
+
+Switched off (`localmodels off`, the dashboard's "turn models off"): a standing state with no end, kept in off.json until
+`localmodels on` or the dashboard's "turn models on". read() reports it as maintenance that is on (phase "on", off=True),
+so every rule above applies: requests get 503, the gateway never starts LM Studio's server, the instance manager loads,
+reloads and recycles nothing, and a front skips this Mac as a peer. In addition the instance manager unloads every
+instance once no request is in flight (models.off_pass), once; a model a person loads by hand afterwards is left alone.
+The Claude Code hook says nothing while switched off (one line on every prompt for days would be noise); a refused request
+says why.
 """
 import json, os, re, time
 
 from . import llmshare
 
 FILE = os.path.join(llmshare.SHARED, 'maintenance.json')
+OFF = os.path.join(llmshare.SHARED, 'off.json')
 QUIET_FOR = 120          # "after the batches": no batch request for this long, then it starts
+OFF_RETRY = 300          # Retry-After while switched off: there is no scheduled end
 _cache = {'mtime': None, 'rec': None}
+_off_cache = {'mtime': None, 'rec': None}
 
 
-def _write(rec):
-    os.makedirs(os.path.dirname(FILE), exist_ok=True)
-    tmp = f'{FILE}.{os.getpid()}.tmp'
+def _write(rec, path=None):
+    path = path or FILE
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.{os.getpid()}.tmp'
     with open(tmp, 'w') as f: json.dump(rec, f)
-    os.replace(tmp, FILE)
-    _cache['mtime'] = None
+    os.replace(tmp, path)
+    _cache['mtime'] = _off_cache['mtime'] = None
+
+
+def switched_off():
+    """The off record ({at, why, before, unloaded}) while the local models are switched off, else None."""
+    try: m = os.path.getmtime(OFF)
+    except OSError: return None
+    if m != _off_cache['mtime']:
+        try: rec = json.load(open(OFF))
+        except (OSError, ValueError): rec = None
+        _off_cache.update(mtime=m, rec=rec if isinstance(rec, dict) and rec.get('at') else None)
+    return _off_cache['rec']
+
+
+def switch_off(before, why='', now=None):
+    """Switch the local models off: `before` is the families loaded now (loaded again by switch_on). -> the record.
+    Already off: the record as it is."""
+    rec = switched_off()
+    if rec: return rec
+    rec = dict(v=1, at=now or time.time(), why=llmshare.clean(why, 120) or '', before=sorted(set(before or [])), unloaded=None)
+    _write(rec, OFF)
+    return rec
+
+
+def off_done(at, words=''):
+    """The instance manager unloaded everything for the off record set at `at` (not a newer one, not after switch_on)."""
+    rec = switched_off()
+    if rec and rec.get('at') == at and not rec.get('unloaded'): _write(dict(rec, unloaded=time.time(), unload_words=str(words)[:300]), OFF)
+
+
+def switch_on():
+    """Clear the off record. -> the record as it was (with `before`), or None when the models were not switched off."""
+    rec = switched_off()
+    try: os.remove(OFF)
+    except OSError: pass
+    _off_cache['mtime'] = None
+    return rec
 
 
 def _raw():
@@ -40,7 +88,11 @@ def _raw():
 
 
 def read(now=None):
-    """The maintenance record with its phase ('waiting', 'announced' or 'on') and expected end, or None."""
+    """The maintenance record with its phase ('waiting', 'announced' or 'on') and expected end, or None. Switched off
+    reads as maintenance that is on, with no end (off=True)."""
+    off = switched_off()
+    if off: return dict(v=1, off=True, phase='on', set_at=off['at'], start=off['at'], end=None, minutes=0, why=off.get('why') or '',
+                        unloaded=off.get('unloaded'), before=off.get('before') or [])
     rec = _raw()
     if not rec: return None
     now = now or time.time()
@@ -105,6 +157,7 @@ def on(now=None):
 def retry_after(m, now=None):
     """Seconds a refused program should wait: to the expected end, or a minute when it runs over."""
     now = now or time.time()
+    if m and m.get('off'): return OFF_RETRY
     return max(60, int(m['end'] - now)) if m and m.get('end') else 60
 
 
@@ -119,6 +172,9 @@ def words(m, now=None):
     if not m: return ''
     now = now or time.time()
     why = f": {m['why']}" if m.get('why') else ''
+    if m.get('off'):
+        return (f"local models switched off since {_clock(m['start'])}{why}"
+                + ('' if m.get('unloaded') else ' (unloading once the requests in flight finish)') + '; turn on: localmodels on')
     if m['phase'] == 'waiting': return f"maintenance pending: starts once batch traffic drains, est. {_stretch(m['minutes'])}{why}"
     if m['phase'] == 'announced': return f"maintenance scheduled at {_clock(m['start'])} (in {_stretch(max(1, round((m['start'] - now) / 60)))}), est. {_stretch(m['minutes'])}{why}"
     if now > m['end']: return f"in maintenance since {_clock(m['start'])}, overrunning (scheduled end {_clock(m['end'])}){why}"
@@ -129,6 +185,7 @@ def header(m, now=None):
     """The X-Hub-Maintenance header: 'announced; starts=...; until=...; why=...' (ISO local times), or None."""
     if not m: return None
     iso = lambda t: time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(t))
+    if m.get('off'): return f"on; switched-off; since={iso(m['start'])}; why=local models switched off"
     parts = ['after-batches' if m['phase'] == 'waiting' else m['phase']]
     if m.get('start') is not None and m['phase'] == 'announced': parts.append(f"starts={iso(m['start'])}")
     if m.get('end'): parts.append(f"until={iso(m['end'])}")
@@ -140,13 +197,14 @@ def header(m, now=None):
 def view(now=None):
     """What the screens show: {phase, start, end, minutes, why, words}, or None."""
     m = read(now=now)
-    return dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), minutes=m['minutes'], why=m.get('why'), words=words(m, now)) if m else None
+    return dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), minutes=m['minutes'], why=m.get('why'), words=words(m, now),
+                off=bool(m.get('off')), unloaded=m.get('unloaded')) if m else None
 
 
 def notice(now=None):
     """The line the Claude Code hook adds to a session, or '' when there is nothing to say."""
     m = read(now=now)
-    if not m: return ''
+    if not m or m.get('off'): return ''
     then = {'waiting': 'Do not start a new local-model batch; one running now may finish.',
             'announced': 'Finish or pause local-model work before it starts; do not start a batch that would run past it.',
             'on': 'Do not send requests to the local models until it is over.'}[m['phase']]

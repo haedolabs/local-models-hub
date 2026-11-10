@@ -287,6 +287,8 @@ def keep():
     try:
         if maint.tick(llmshare.inflight(), llmshare.requests_log(0.1)): did.append('maintenance begins: no batch requests in flight')
     except Exception as e: did.append(f'maintenance check failed: {type(e).__name__}: {e}'); errors.record('instance manager: maintenance check', e)
+    off = maint.switched_off()
+    if off: return did + off_pass(off)                       # switched off: unload once, then nothing at all
     if maint.on():                                           # the person is working on LM Studio: note what is loaded, do nothing
         rows = llmshare.loaded(fresh=True)
         if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
@@ -410,20 +412,82 @@ def end_maintenance():
     crashes.after_maintenance(rows)                          # before the record goes, so no keeper pass reads the restart as crashes
     prev = maint.end()
     if not prev: return ['no maintenance was set']
-    have = {r['id'] for r in rows}
-    todo = [b for b in prev.get('before') or [] if b not in have]
-    if not todo: return ['maintenance is over; what was loaded before is loaded']
+    return _load_back(prev.get('before') or [], {r['id'] for r in rows}, 'maintenance')
+
+
+def _load_back(families, have, after):
+    """Load each family's first copy again (the keeper adds the other copies on its next pass). -> words."""
+    todo = [b for b in families if b not in have]
+    if not todo: return [f'{after} is over; what was loaded before is loaded']
     fams, did = llmshare.settings().get('families') or {}, []
-    ensure_server('after maintenance')
+    ensure_server(f'after {after}')
     with llmshare.swapping(wait=120) as got:
-        if not got: return [f"maintenance ended during a model swap: load {', '.join(todo)} manually (localmodels use <model>)"]
+        if not got: return [f"{after} ended during a model swap: load {', '.join(todo)} manually (localmodels use <model>)"]
         for b in todo:
             f = fams.get(b)
-            if not f: did.append(f'{b} was loaded before maintenance but is not in settings: load it manually (localmodels use {b})'); continue
+            if not f: did.append(f'{b} was loaded before {after} but is not in settings: load it manually (localmodels use {b})'); continue
             ok, out = load(f.get('key') or b, b, f.get('context') or 32768, f.get('parallel') or 4)
-            did.append(f'{b} reloaded after maintenance' if ok else f'{b}: reload after maintenance failed: {out[-200:]}')
+            did.append(f'{b} reloaded after {after}' if ok else f'{b}: reload after {after} failed: {out[-200:]}')
     llmshare.loaded(fresh=True)
     return did
+
+
+def switch_off(force=False, why=''):
+    """Switch the local models off (POST /hub/off, localmodels off): refused (409) while a run holds a lease on a loaded
+    model, unless forced. -> (HTTP code, body)."""
+    if maint.switched_off(): return 200, dict(ok=True, note='already switched off', maintenance=maint.view())
+    rows = llmshare.loaded(fresh=True)
+    ids = [r['id'] for r in rows]
+    blockers = llmshare.swap_blockers(ids) if ids else []
+    if blockers and not force:
+        return 409, dict(ok=False, blockers=blockers, error='in use: ' + '; '.join(blockers) + ' (force to switch off anyway)')
+    fams = set((llmshare.settings().get('families') or {}).keys())
+    maint.switch_off(sorted({llmshare.family(i) for i in ids} & fams), why=why)
+    crashes.nudge()                                          # in the gateway: the instance manager unloads now, not in 20 s
+    return 200, dict(ok=True, note='switched off: new requests get 503; every instance is unloaded once the requests in flight finish',
+                     maintenance=maint.view())
+
+
+def off_pass(off):
+    """Switched off (maint.switch_off): once no request is in flight, unload every instance LM Studio lists, under the swap
+    lock, and see it gone from LM Studio's own listing; then record it done, so a model a person loads by hand afterwards
+    is left alone. Until then each pass tries again. -> words."""
+    if off.get('unloaded'): return ['switched off: instance manager paused (no loads, reloads, recycles or server starts)']
+    n = len(llmshare.inflight())
+    if n: return [f'switching off: waiting for {n} request{"s" if n != 1 else ""} in flight to finish before unloading']
+    if not server_up():
+        maint.off_done(off['at'], "LM Studio's server is not running: nothing loaded"); return ["switched off: LM Studio's server is not running, nothing to unload"]
+    did = []
+    with llmshare.swapping(wait=0) as got:
+        if not got: return ['switching off: a swap is under way; the unload is tried on the next pass']
+        for _ in range(12):
+            now = _listed()
+            if now is None: return did + ["switching off: LM Studio's listing did not answer; the unload is tried on the next pass"]
+            if not now: break
+            ident = sorted(now, key=lambda i: (':' not in i, i))[0]   # :N replicas first: a bare id names the oldest instance of its key
+            ok, words, gone = unload_exactly(ident)
+            did.append(f"{ident} unloaded" + (f" (LM Studio unloaded {', '.join(gone)})" if gone and gone != [ident] else '') if gone else f'{ident}: unload failed: {words[-160:]}')
+        left = _listed()
+        if left == set():
+            maint.off_done(off['at'], '; '.join(did))
+            did.append("switched off: no instance listed by LM Studio")
+        else: did.append(f"switching off: still listed: {', '.join(sorted(left or [])) or 'listing unavailable'}; tried again on the next pass")
+    llmshare.loaded(fresh=True)
+    return did
+
+
+def switch_on():
+    """Switched on again: skip what LM Studio logged while off (the unloads), clear the off record, then load each family
+    that was loaded when it was switched off (every family in the settings when none was). -> words."""
+    rec = maint.switched_off()
+    if not rec: return ['the local models were not switched off']
+    with llmshare.swapping(wait=120) as got:                 # an unload under way finishes first; then no pass reads the record
+        if not got: return ['a swap or an unload is under way: retry in a moment (localmodels on)']
+        rows = llmshare.loaded(fresh=True, force=True)
+        crashes.after_maintenance(rows)
+        maint.switch_on()
+    fams = list(rec.get('before') or (llmshare.settings().get('families') or {}).keys())
+    return ['switched on: requests are admitted and the instance manager resumes'] + _load_back(fams, {r['id'] for r in rows}, 'switch-off')
 
 
 def _again(job, room):
