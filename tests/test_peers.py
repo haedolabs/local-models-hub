@@ -699,13 +699,13 @@ def test_two_doors(box):
         code, r, h = ask('a1')
         t('one request with this Mac\'s slots free is answered here', code == 200 and [s[1] for s in A.seen] == ['a1'] and not B.seen, (code, A.seen, B.seen))
         plan(A, 'slow', 'slow'); plan(B, 'slow', 'slow'); A.slow = B.slow = 2.0
-        out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}))
+        out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}), stagger=0.4)   # in order even when a request takes longer to reach the queue
         t("a batch, four at once: this Mac's first copy, then the peer's (its own GPU), then this Mac's second copy; all answered",
           all(out[k][0] == 200 for k in out) and [s[1] for s in A.seen] == ['b1', 'b4'] and sorted(s[1] for s in B.seen) == ['b2', 'b3'],
           ({k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
         t('the answer from the peer names the model asked for', out['b2'][1].get('model') == F, out['b2'][1])
         plan(A, 'slow', 'slow'); plan(B, 'slow'); A.slow = B.slow = 2.0
-        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')))
+        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')), stagger=0.4)
         t("a person waiting gets this Mac's second copy before the peer (the fastest free slot); the batch after it goes to the peer",
           [s[1] for s in A.seen] == ['h1', 'h2'] and [s[1] for s in B.seen] == ['h3'] and all(v_[0] == 200 for v_ in out.values()), (A.seen, B.seen))
         mine = [x for x in logged(llmshare.REQUESTS, 9) if x.get('peer') == 'peer']
