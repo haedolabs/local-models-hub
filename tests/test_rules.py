@@ -834,6 +834,66 @@ def test_maintenance(box):
     L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, crashes.MISS, L.SWAP_LOCK, L.read_ok = real
 
 
+def test_switch_off(box):
+    print('switched off: requests refused, every instance unloaded once idle, nothing loaded or started, then on again')
+    from localmodels import llmshare as L, maint, models
+    maint.OFF = os.path.join(box, 'off.json')
+    real = (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
+            models.server_up, crashes.MISS, L.SWAP_LOCK, L.read_ok, L.inflight, L.swap_blockers)
+    L.read_ok = lambda: True
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False)}
+    L.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
+    L.SWAP_LOCK = os.path.join(box, 'swap3.lock'); crashes.MISS = 0.3
+    api = {'ids': {B: 65536, C2: 65536}}
+    L.loaded = lambda fresh=False, force=False: [row(i) for i in api['ids']]
+    L.api_models = lambda timeout=3: dict(api['ids'])
+    L.busy_slots = lambda: {}
+    flight, held = [dict(kind='batch', since=time.time())], {'by': []}
+    L.inflight = lambda: list(flight)
+    L.swap_blockers = lambda ids: list(held['by'])
+    loads, unloads, starts = [], [], []
+    def fake_load(key, ident, context, parallel):
+        loads.append(ident); crashes.loaded_now([ident]); api['ids'] = dict(api['ids'], **{ident: 65536}); return True, 'ok'
+    def fake_unload(ident):                                   # LM Studio resolves a bare model key to its oldest instance
+        unloads.append(ident); took = C2 if ident == B and C2 in api['ids'] else ident
+        api['ids'] = {k: v for k, v in api['ids'].items() if k != took}; return True, ''
+    models.load, models.unload = fake_load, fake_unload
+    models._lms, models.free_gb, models.server_up = (lambda *a, **k: (True, '')), (lambda: 100.0), (lambda *a, **k: True)
+    models.ensure_server = lambda *a, **k: starts.append(1) or True
+    reset(time.time() - 600)
+    crashes_before = sum(1 for l in open(crashes.RECORD) if '"crash"' in l) if os.path.exists(crashes.RECORD) else 0
+
+    held['by'] = ['analysis holds a lease on qwen/qwen3.6-35b-a3b']
+    code, body = models.switch_off()
+    t('a run holds a lease: refused (409) and nothing changes', code == 409 and 'analysis' in body['error'] and maint.switched_off() is None, (code, body))
+    code, body = models.switch_off(force=True)
+    m = maint.read()
+    t('forced: switched off, read as maintenance on with no end, 503 for 5 minutes, the header a front reads as maintenance',
+      code == 200 and m['off'] and m['phase'] == 'on' and maint.on() and maint.retry_after(m) == maint.OFF_RETRY
+      and maint.header(m).startswith('on') and 'switched off' in maint.words(m) and maint.read()['before'] == [B], (code, m))
+    t('the Claude Code hook stays silent while switched off', maint.notice() == '')
+    words = models.keep()
+    t('a request in flight: nothing unloaded yet, and it says so', not unloads and any('waiting for 1 request' in w for w in words), words)
+    flight.clear()
+    words = models.keep()
+    t('idle: every instance unloaded (replica 2 first), seen gone from the listing, recorded done',
+      unloads[0] == C2 and not api['ids'] and maint.switched_off().get('unloaded') and any('no instance listed' in w for w in words), (unloads, words))
+    api['ids'] = {B: 65536}                                     # a person loads one by hand while switched off
+    unloads.clear(); words = models.keep(); time.sleep(0.4); words = models.keep()
+    t('then: a model loaded by hand is left alone, no replica is added, nothing started', not unloads and not loads and not starts, (unloads, loads, words))
+    api['ids'] = {}
+    models.keep(); time.sleep(0.4); words = models.keep()
+    t('an instance that goes away while off is not reloaded as a crash', not loads and not starts, (loads, words))
+    t('switching off twice keeps the first record', models.switch_off()[1].get('note') == 'already switched off')
+    words = models.switch_on()
+    t('on: the record goes, the families loaded before are loaded (first replica), the server started first',
+      maint.switched_off() is None and maint.read() is None and loads == [B] and starts and any('switched on' in w for w in words), (loads, words))
+    crashes_after = sum(1 for l in open(crashes.RECORD) if '"crash"' in l) if os.path.exists(crashes.RECORD) else 0
+    t('nothing unloaded while off is recorded as a crash', crashes_after == crashes_before, (crashes_before, crashes_after))
+    t('on when not off: says so, loads nothing', models.switch_on() == ['the local models were not switched off'] and loads == [B])
+    (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
+     models.server_up, crashes.MISS, L.SWAP_LOCK, L.read_ok, L.inflight, L.swap_blockers) = real
+
 def test_privacy_check(box):
     print('publish: the privacy check reads every commit the push sends against a word list kept outside the repo')
     import subprocess
@@ -1095,6 +1155,7 @@ def main():
         test_first_settings()
         test_runs()
         test_maintenance(box)
+        test_switch_off(box)
         test_privacy_check(box)
         test_about(box)
         test_progress(box)

@@ -13,6 +13,11 @@
                                  announce a maintenance window (X-Hub-Maintenance, dashboard, MCP status, Claude Code
                                  hook); while active, new requests get 503 + Retry-After and the instance manager pauses;
                                  off reloads the families loaded at its start. No arguments: the window and overlapping runs
+  localmodels off [--force] [reason ...]   switch the local models off: new requests get 503, every instance is unloaded
+                                 once the requests in flight finish, and nothing is loaded, reloaded or started (crash
+                                 recovery, load_at_start, LM Studio's server) until `localmodels on`; kept across restarts.
+                                 Refused while a run holds a lease on a loaded model, unless --force
+  localmodels on                 switch them on again: the families loaded when switched off are loaded (all replicas)
   localmodels name               each project as seen and as shown on every screen, with its batches, jobs and scripts
   localmodels name project <as seen> <shown>            what every screen calls a project (a folder or an X-Project)
   localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
@@ -126,7 +131,7 @@ def status():
     d, lm, users, cs = dash.door(), dash.lmstudio(), dash.users(), dash.claude()
     from . import maint
     mt = maint.view()
-    if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + (' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
+    if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + ('' if mt.get('off') else ' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
     print(f"gateway: {'listening on ' + llmshare.HUB if d['up'] else 'down (localmodels start)'}"
           + (' · stale code: localmodels install' if d['up'] and d['stale'] else ''))
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
@@ -1075,6 +1080,36 @@ def maintenance_cmd(a):
     return 0
 
 
+def off_cmd(a):
+    """localmodels off [--force] [reason ...]: switch off, then wait (up to 10 min) for the instance manager's unload."""
+    from . import maint, models
+    code, body = models.switch_off('--force' in a, ' '.join(x for x in a if not x.startswith('--')))
+    if code != 200: print(f"nothing switched off: {body.get('error')}"); return 3
+    print(maint.words(maint.read()))
+    end, last = time.time() + 600, None
+    while time.time() < end:
+        off = maint.switched_off()
+        if not off: print('switched on again meanwhile'); return 0
+        if off.get('unloaded'): break
+        did = models.off_pass(off)                           # the gateway's instance manager does the same; the swap lock keeps one at a time
+        if did and did != last: print('  ' + '; '.join(did)); last = did
+        if (maint.switched_off() or {}).get('unloaded'): break
+        time.sleep(2)
+    off = maint.switched_off() or {}
+    rows = llmshare.loaded(fresh=True, force=True)
+    print('switched off: ' + (f"still listed: {', '.join(r['id'] for r in rows)}" if rows else 'no instance loaded')
+          + ('' if off.get('unloaded') else ' (the unload is still pending: the instance manager keeps trying)') + '. Turn on: localmodels on')
+    return 0
+
+
+def on_cmd():
+    from . import models
+    for line in models.switch_on(): print(line)
+    rows = llmshare.loaded(fresh=True, force=True)
+    print('loaded now: ' + (', '.join(r['id'] for r in rows) or 'nothing') + ' (the instance manager adds the other replicas within 20 s)')
+    return 0
+
+
 def door(verb):
     uid = f'gui/{os.getuid()}'
     if sandboxed(): print(f'nothing done: {sandboxed()}'); return 2
@@ -1411,7 +1446,7 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
-    'restart': ((), ()), 'mcp': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force',)), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 
@@ -1466,6 +1501,8 @@ def main(argv):
     if verb == 'keep': return keep()
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
+    if verb == 'off': return off_cmd(a)
+    if verb == 'on': return on_cmd()
     if verb == 'present': return present_cmd(a)
     if verb == 'demo': return demo_cmd(a)
     if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)

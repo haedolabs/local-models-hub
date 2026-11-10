@@ -135,6 +135,13 @@ def server_up(timeout=3):
     except OSError: return True
 
 
+def _switch_on():
+    from . import models
+    try:
+        for w in models.switch_on(): print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {w}", flush=True)
+    except Exception as e: errors.record('switch on', e)
+
+
 def start_lmstudio(why='a request could not connect'):
     if maint.on(): return False                              # maintenance: the person is working on LM Studio
     """LM Studio's server, started only when it is down (starting a running one restarts it and cuts every request in
@@ -684,6 +691,16 @@ class Door(http.server.BaseHTTPRequestHandler):
                 fam = recycle.fresh_start(model) if model else None
                 crashes.nudge()
                 return self._send(200, dict(ok=bool(fam), family=fam, note='an instance past half its recycle threshold is recycled before the batch starts' if fam else 'unknown family, or recycling is disabled for it'))
+            if route == '/hub/off' and method == 'POST':                              # switch the local models off (the dashboard's button)
+                body = self._body()
+                try: j = json.loads(body) if body else {}
+                except ValueError: j = {}
+                from . import models
+                return self._send(*models.switch_off(bool(isinstance(j, dict) and j.get('force'))))
+            if route == '/hub/on' and method == 'POST':                               # and on again: the reload runs in the background
+                if not maint.switched_off(): return self._send(200, dict(ok=True, note='not switched off', maintenance=maint.view()))
+                threading.Thread(target=_switch_on, name='switch-on', daemon=True).start()
+                return self._send(202, dict(ok=True, note='switching on: the families loaded before are being loaded'))
             if route == '/hub/errors':                                              # what the error record holds (localmodels errors)
                 return self._send(200, dict(errors=errors.recent((q.get('minutes') or [1440])[0], 200)))
             if route == '/hub/client-error' and method == 'POST':                     # the dashboard's own render errors
@@ -700,7 +717,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
-        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, POST /hub/recycle, POST /hub/client-error'))
+        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/client-error'))
 
 
 class Server(http.server.ThreadingHTTPServer):
