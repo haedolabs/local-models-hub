@@ -78,7 +78,7 @@ def unimported_siblings():
 KEYWORDS = {'if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'new', 'await', 'async', 'do', 'else', 'in',
             'of', 'instanceof', 'void', 'delete', 'throw', 'yield', 'super', 'import', 'case'}
 GLOBALS = {'Math', 'JSON', 'Date', 'Number', 'String', 'Array', 'Object', 'Promise', 'Set', 'Map', 'WeakMap', 'Error', 'TypeError',
-           'RangeError', 'Boolean', 'Symbol', 'Intl', 'URL', 'URLSearchParams', 'AbortController', 'fetch', 'confirm', 'alert', 'setTimeout', 'setInterval',
+           'RangeError', 'Boolean', 'Symbol', 'Intl', 'URL', 'URLSearchParams', 'AbortController', 'AbortSignal', 'fetch', 'confirm', 'alert', 'setTimeout', 'setInterval',
            'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'matchMedia',
            'encodeURIComponent', 'decodeURIComponent', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'console', 'window', 'document',
            'localStorage', 'navigator', 'location', 'performance', 'structuredClone', 'queueMicrotask'}

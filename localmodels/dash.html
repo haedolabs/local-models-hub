@@ -104,6 +104,14 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .key-rect { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 .key-line { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
+.key-line.dash { width: 15px; }                                  /* a marker drawn dashed on the chart: its key is dashed too */
+#clock.stale { color: var(--warning); }                          /* no fresh snapshot: the age says how old the page is */
+#recent table { table-layout: fixed; }                          /* every column visible in the card: the step gives way, its text is the tooltip */
+#recent th, #recent td { padding-left: 5px; padding-right: 5px; max-width: none; }
+#recent th:nth-child(1) { width: 90px; } #recent th:nth-child(2) { width: 80px; } #recent th:nth-child(4) { width: 56px; }
+#recent th:nth-child(5) { width: 44px; } #recent th:nth-child(6) { width: 52px; } #recent th:nth-child(7) { width: 52px; }
+#recent td > div { overflow: hidden; text-overflow: ellipsis; }
+.fam-note { color: var(--ink-2); font-size: 11.5px; margin-bottom: calc(6px * var(--mk, 1)); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
 svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
 #models-body { --mk: 1; padding-top: var(--lead, 0px); }   /* fitModels(): --mk scales the boxes, spacing and bars; text keeps its size */
@@ -246,7 +254,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
 
   <section class="row b">
     <article class="card"><div class="card-head"><div><h2>Throughput</h2><div class="hint">completion tokens/s, all projects (completed requests)</div></div><button class="btn" data-table="tok">table</button></div>
-      <div class="chart" id="tok"></div></article>
+      <div class="legend" id="tok-legend"></div><div class="chart" id="tok"></div></article>
     <article class="card"><div class="card-head"><div><h2>Requests by project</h2><div class="hint" id="req-hint"></div></div><button class="btn" data-table="req">table</button></div>
       <div class="legend" id="req-legend"></div><div class="chart" id="req"></div></article>
     <article class="card"><div class="card-head"><div><h2>Memory used</h2><div class="hint" id="mem-hint">sampled every 15 s</div></div><button class="btn" data-table="mem">table</button></div>
@@ -378,7 +386,8 @@ function crosshair(f, xs, onAt) {
   f.svg.append(line, hit);
 }
 function legend(box, items) {                              // an empty legend takes no space
-  box.replaceChildren(...items.map(it => el('span', {}, el('i', {class: it.line ? 'key-line' : 'key-rect', style: `background:${it.color}`}), it.name)));
+  box.replaceChildren(...items.map(it => el('span', {}, el('i', {class: it.dash ? 'key-line dash' : it.line ? 'key-line' : 'key-rect',
+    style: it.dash ? `background:repeating-linear-gradient(90deg, ${it.color} 0 3px, transparent 3px 6px)` : `background:${it.color}`}), it.name)));
   box.style.display = items.length ? '' : 'none';
 }
 function tableView(box, head, rows) {
@@ -404,14 +413,32 @@ function markEvents(f, t0, t1) {
   }
 }
 function crashIn(a, b) { return crashList().find(c => c.at >= a && c.at < b); }
+function recycleIn(a, b) { return recycleList().find(r => r.event === 'recycled' && r.at >= a && r.at < b); }
+function eventKeys(t0, t1) {       // the dashed rules a chart draws, named in its legend (only those in the window)
+  const out = [];
+  if (crashList().some(c => c.at >= t0 && c.at <= t1)) out.push({name: 'crash', color: 'var(--critical)', dash: true});
+  if (recycleList().some(r => r.event === 'recycled' && r.at >= t0 && r.at <= t1)) out.push({name: 'recycle', color: 'var(--warning)', dash: true});
+  return out;
+}
+function eventRows(a, b) {         // the same markers in the crosshair's tooltip, at the minute hovered
+  const c = crashIn(a, b), r = recycleIn(a, b);
+  return [].concat(c ? [{name: `crash, ${c.which}`, color: 'var(--critical)', line: true, value: clockS(c.at)}] : [],
+                   r ? [{name: `recycle${r.model ? ', ' + short(r.model) : ''}`, color: 'var(--warning)', line: true, value: clockS(r.at)}] : []);
+}
+function emptyNote(f, words) {     // a chart with nothing in its window says so in its plot area (the axes and reference lines stay)
+  const tx = sv('text', {x: (f.P.l + f.W - f.P.r) / 2, y: f.P.t + f.height / 2, 'text-anchor': 'middle'}); tx.textContent = words; f.svg.append(tx);
+}
+function capLine(f, yy, label) {   // a reference line (capacity): dashed and muted, never mistaken for a series; labeled at its right end
+  f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '4 3'}));
+  const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = label; f.svg.append(tx);
+}
 
 // ---------------------------------------------------------------- charts
 function renderAnswering() {
   const box = $('ans'); if (!H) return;
   const names = projectsIn(H.answering).filter(p => H.answering[p].some(v => v > 0.001));
-  const items = names.map(p => ({name: p, color: color(p)})).concat([{name: 'queued', color: 'var(--ink-2)', line: true}]);
-  legend($('ans-legend'), items);
   const t = i => H.start + (i + 0.5) * H.step, n = H.n;
+  legend($('ans-legend'), names.map(p => ({name: p, color: color(p)})).concat([{name: 'queued', color: 'var(--ink-2)', line: true}], eventKeys(H.start, H.start + n * H.step)));
   if (tables.ans) {
     const rows = [], per = Math.max(1, Math.round(60 / H.step));
     for (let i = 0; i < n; i += per) {
@@ -437,18 +464,15 @@ function renderAnswering() {
   });
   let w = ''; xs.forEach((x, i) => w += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(H.waiting[i]).toFixed(1));
   f.svg.append(sv('path', {d: w, fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 2, 'stroke-linejoin': 'round'}));
-  if (H.at_once) {
-    const yy = f.y(H.at_once);
-    f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
-    const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = `${H.at_once} slots`; f.svg.append(tx);
-  }
+  if (H.at_once) capLine(f, f.y(H.at_once), `${H.at_once} slots`);
+  if (!tot.some(v => v > 0.001) && !H.waiting.some(v => v > 0.001)) emptyNote(f, `No requests in the ${rangeWords()}`);
   markEvents(f, H.start, H.start + n * H.step);
   crosshair(f, xs, (i, cx, cy) => {
-    const c = crashIn(H.start + i * H.step - H.step, H.start + (i + 1) * H.step);
     showTip(cx, cy, clockS(H.start + i * H.step) + ' – ' + clockS(H.start + (i + 1) * H.step),
       names.map(p => ({name: p, color: color(p), value: H.answering[p][i].toFixed(1)})).concat(
-        [{name: 'all active', color: 'var(--s1)', value: tot[i].toFixed(1)}, {name: 'queued', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)}],
-        c ? [{name: `crash, ${c.which}`, color: 'var(--critical)', line: true, value: clockS(c.at)}] : []));
+        [{name: 'all projects', color: 'var(--ink-2)', value: tot[i].toFixed(1)}, {name: 'queued', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)},
+         {name: 'slots', color: 'var(--muted)', line: true, value: String(H.at_once || 0)}],
+        eventRows(H.start + i * H.step - H.step, H.start + (i + 1) * H.step)));
   });
   box.replaceChildren(f.svg);
 }
@@ -461,8 +485,10 @@ function renderTokens() {
     for (let i = 0; i < n; i += per) rows.push([clock(H.start + i * H.step), full(H.tokens.slice(i, i + per).reduce((s, v) => s + v, 0) / Math.min(per, n - i))]);
     return tableView(box, ['minute', 'tokens/s'], rows.reverse());
   }
+  legend($('tok-legend'), eventKeys(H.start, H.start + n * H.step));
   const ymax = niceMax(Math.max(...H.tokens, 10));
   const f = frame(box, H.start, H.start + n * H.step, ymax);
+  if (!H.tokens.some(v => v > 0)) emptyNote(f, `No completed requests in the ${rangeWords()}`);
   const xs = Array.from({length: n}, (_, i) => f.x(t(i)));
   let d = '', a = '';
   xs.forEach((x, i) => { d += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(H.tokens[i]).toFixed(1); });
@@ -473,7 +499,8 @@ function renderTokens() {
   f.svg.append(sv('circle', {cx: xs[n - 1], cy: f.y(last), r: 4, fill: 'var(--s1)', stroke: 'var(--surface)', 'stroke-width': 2}));
   const tx = sv('text', {x: xs[n - 1] + 8, y: f.y(last) + 4}); tx.textContent = full(last) + '/s'; tx.style.fill = 'var(--ink-2)'; f.svg.append(tx);
   markEvents(f, H.start, H.start + n * H.step);
-  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(H.start + i * H.step), [{name: 'tokens a second', color: 'var(--s1)', line: true, value: full(H.tokens[i])}]));
+  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(H.start + i * H.step), [{name: 'tokens/s', color: 'var(--s1)', line: true, value: full(H.tokens[i])}]
+    .concat(eventRows(H.start + i * H.step - H.step, H.start + (i + 1) * H.step))));
   box.replaceChildren(f.svg);
 }
 
@@ -490,6 +517,7 @@ function renderRequests() {
   const tot = Array.from({length: Q.n}, (_, i) => names.reduce((s, p) => s + Q.by[p][i], 0));
   const ymax = niceMax(Math.max(...tot, 4));
   const f = frame(box, Q.start, Q.start + Q.n * Q.step, ymax, v => full(v));
+  if (!tot.some(v => v > 0)) emptyNote(f, `No requests in the ${rangeWords()}`);
   const band = (f.W - f.P.l - f.P.r) / Q.n, bw = Math.max(2, Math.min(24, band - 2));
   for (let i = 0; i < Q.n; i++) {
     let acc = 0;
@@ -537,14 +565,14 @@ function renderMemory() {                    // this Mac, and each peer stacked 
     base = hi;
   }
   const li = M.t.length - 1, flat = cap.every(c => c === cap[li]), yy = f.y(cap[li]);
-  if (flat) f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
-  else f.svg.append(sv('path', {d: line(cap), fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 1}));
-  const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${cap[li]} GB`; f.svg.append(lt);
+  if (flat) capLine(f, yy, `${cap[li]} GB`);
+  else { f.svg.append(sv('path', {d: line(cap), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '4 3'}));
+         const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${cap[li]} GB`; f.svg.append(lt); }
   f.svg.append(sv('circle', {cx: xs[li], cy: f.y(sum[li]), r: 4, fill: series[series.length - 1].color, stroke: 'var(--surface)', 'stroke-width': 2}));
   const vt = sv('text', {x: xs[li] + 8, y: f.y(sum[li]) + 4}); vt.textContent = sum[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
   crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(M.t[i]), stacked
-    ? series.map(s => ({name: s.name, color: s.color, value: gb(s.v[i])})).concat([{name: 'total', color: 'var(--ink-2)', line: true, value: `${gb(sum[i])} of ${cap[i]} GB`}])
-    : [{name: 'memory used', color: 'var(--s1)', line: true, value: gb(M.used[i])}]));
+    ? series.map(s => ({name: s.name, color: s.color, value: gb(s.v[i])})).concat([{name: 'total', color: 'var(--muted)', line: true, value: `${gb(sum[i])} of ${cap[i]} GB`}])
+    : [{name: 'memory used', color: 'var(--s1)', line: true, value: `${gb(M.used[i])} of ${cap[i]} GB`}]));
   box.replaceChildren(f.svg);
 }
 
@@ -590,7 +618,7 @@ function renderNow() {
   }
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
-  if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.off ? 'var(--other)' : mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
+  if (mt) { mc.querySelector('span').textContent = mt.off ? mt.words.replace(/; turn on: localmodels on$/, '') : mt.words; mc.querySelector('i').style.background = mt.off ? 'var(--other)' : mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
   const pw = $('power'), off = !!(mt && mt.off);
   pw.style.display = '';
   if (!pw.disabled) {
@@ -630,7 +658,7 @@ function renderNow() {
     : answering.length ? [...new Set(answering)].join(', ') : 'idle';
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
-  $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${S.waits7.waits} waits > 2 s · ${Math.round(S.waits7.minutes)} min`;
+  $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${full(S.waits7.waits)} waits > 2 s · ${S.waits7.minutes >= 120 ? Math.round(S.waits7.minutes / 60) + ' h' : span(S.waits7.minutes * 60)}`;
   const m = S.mac, P = S.pool || {used: m.used, total: m.total, hosts: [{name: 'this Mac', used: m.used, total: m.total}]};
   const fill = h => h.used / Math.max(1, h.total), share = fill(P), worst = Math.max(...P.hosts.map(fill));   // color: the fullest host
   const hue = v => v > 0.92 ? 'var(--critical)' : v > 0.85 ? 'var(--warning)' : '';
@@ -645,8 +673,22 @@ function renderNow() {
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
   guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
   guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('tiles (cut lines)', tipCut);
+  guard('title', () => renderTitle(busy, cap, waiting));
 }
 
+const TITLE = document.title;
+function renderTitle(busy, cap, waiting) {    // a background tab still tells the state: active of slots, queued, switched off, alerts
+  const n = $('alerts').children.length, off = S.maintenance && S.maintenance.off;
+  document.title = [off ? 'off' : `${busy}/${cap} active`, waiting ? `${waiting} queued` : '', n ? `${n} alert${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ') + ' – ' + TITLE;
+}
+let fresh = 0;                                // when the last snapshot arrived (this browser's clock)
+function staleness() {
+  const c = $('clock'); if (!S || !fresh) return;
+  const age = (Date.now() - fresh) / 1000, old = age > 10;
+  c.classList.toggle('stale', old);
+  c.textContent = 'updated ' + S.clock + (old ? ` · ${span(age)} ago, not current` : '');
+  if (old) document.title = 'not current – ' + TITLE;
+}
 function tipCut() {      // a tile line too long for its column ends in an ellipsis (never a second line): its whole text is its tooltip
   for (const e of document.querySelectorAll('.kpis .value, .kpis .minor, .kpis .foot')) {
     const cut = e.scrollWidth > e.clientWidth + 1;
@@ -724,8 +766,11 @@ function renderModels() {
   const box = $('models-body'), fams = S.lmstudio.families;
   const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
     el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.label || d.state}`))));
-  const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id)));
-  if (!fams.length) { box.replaceChildren(...down, down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
+  const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id))), mt = S.maintenance;
+  const why = mt && mt.off ? `This Mac: local models switched off since ${clock(mt.start)}` + (mt.unloaded ? ', no instance loaded' : ', unloading once the requests in flight finish')
+    : mt && mt.phase === 'on' ? `This Mac: in maintenance; the instance manager loads nothing until it ends` : '';
+  if (why) down.unshift(el('div', {class: 'fam-note'}, why + (there.length || fams.length ? '' : '.')));
+  if (!fams.length) { box.replaceChildren(...down, why || down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
     legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)}))); return; }
   box.replaceChildren(...down, ...fams.map(f => {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
@@ -913,17 +958,20 @@ function renderClaude() {
 function renderRecent() {
   const box = $('recent');
   if (!R.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No requests through the gateway yet.')); return; }
-  const head = ['time', 'project', 'kind/step', 'instance', 's', 'queued s', 'out', ''].map((h, i) => el('th', {class: i >= 4 && i <= 6 ? 'num' : ''}, h));
-  const rows = R.map(r => el('tr', {},
+  const tips = {s: 'seconds from the request to its last token', queued: 'seconds held in the admission queue before a slot', tokens: 'completion tokens',
+    instance: 'the instance that answered: #N on this Mac, or the peer'};
+  const head = ['time', 'project', 'kind / step', 'instance', 's', 'queued', 'tokens'].map((h, i) => el('th', {class: i >= 4 ? 'num' : '', title: tips[h] || ''}, h));
+  const status = r => r.status === 499 ? el('span', {class: 'badge', title: '499: the client closed the connection' + (r.note ? ' · ' + r.note : '')}, '499 closed') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
+    : r.tries > 1 ? el('span', {class: 'badge cycle', title: r.note || ''}, 'resent') : '';
+  const rows = R.map(r => { const peer = / on /.test(r.copy || '') ? String(r.copy).split(' on ')[1] : null, st = status(r);
+    return el('tr', {},
     el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
-    el('td', {}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
-    el('td', {title: r.step || ''}, kindWords(r.kind), r.step ? el('div', {class: 'muted'}, r.step) : ''),
-    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'peer ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? '#' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : '#1'),
+    el('td', {title: r.project || ''}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
+    el('td', {title: [r.kind, r.step, r.note].filter(Boolean).join(' · ')}, el('div', {}, kindWords(r.kind), st ? ' ' : '', st, r.step ? el('span', {class: 'muted'}, ' · ' + r.step) : '')),   // one line a request: more of them fit
+    el('td', {class: 'ink2', title: peer ? `peer ${peer}` : r.copy || ''}, peer || (r.copy && r.copy !== r.model ? '#' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : '#1')),
     el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
     el('td', {class: 'num'}, (+r.waited || 0) >= 0.1 ? (+r.waited).toFixed(1) : '–'),
-    el('td', {class: 'num'}, full(r.out_tokens)),
-    el('td', {}, r.status === 499 ? el('span', {class: 'badge', title: r.note || ''}, '499 client closed') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
-      : r.tries > 1 ? el('span', {class: 'badge cycle', title: r.note || ''}, 'resent, answered') : '')));
+    el('td', {class: 'num'}, full(r.out_tokens))); });
   tableIn(box, head, rows, 'localmodels log for the day');
 }
 
@@ -959,7 +1007,7 @@ function renderAbout() {                // the one footer line: version, license
 
 // ---------------------------------------------------------------- fetching, and holding the last picture while it reloads
 async function get(path) {      // throws with .status when the gateway answered with an error, without it when it could not be reached
-  const r = await fetch(path, {cache: 'no-store'});
+  const r = await fetch(path, {cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined});   // a hung request never stalls the updates
   if (!r.ok) { let said = ''; try { said = (await r.json()).error || ''; } catch (_) {} throw Object.assign(new Error(`${path.split('?')[0]}: HTTP ${r.status}${said ? ' ' + said : ''}`), {status: r.status}); }
   return r.json();
 }
@@ -977,7 +1025,7 @@ async function tick(name, fn) {                              // one fetch of eac
   inflight[name] = true;
   try { await fn(); } finally { inflight[name] = false; }
 }
-const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); } catch (e) { online(false, e); return; } online(true); guard('page', renderNow); });
+const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); } catch (e) { online(false, e); return; } fresh = Date.now(); online(true); guard('page', renderNow); });
 const tickHistory = () => tick('history', async () => { try { H = await get('/hub/history?minutes=' + RANGE); } catch (e) { if (e.status) report('history', e); return; } guard('charts', renderCharts); });
 const tickRecent = () => tick('recent', async () => { try { R = await get('/hub/recent?n=40'); } catch (e) { if (e.status) report('recent', e); return; } guard('Recent requests', renderRecent); });
 
@@ -1002,6 +1050,7 @@ $('poll-now').addEventListener('click', async () => {          // the gateway lo
 });
 $('power').addEventListener('click', async () => {             // switch the local models off or on; the next snapshot shows the state
   const b = $('power'), on = b.dataset.off === '1';
+  if (!on && !confirm("Switch this Mac's local models off?\nEvery instance is unloaded once the requests in flight finish; until turned on, requests here get 503 and nothing is loaded.")) return;
   b.disabled = true; b.textContent = on ? 'turning on…' : 'turning off…';
   try {
     let r = await fetch(on ? '/hub/on' : '/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
@@ -1009,7 +1058,7 @@ $('power').addEventListener('click', async () => {             // switch the loc
       const j = await r.json();
       if (confirm(`In use: ${(j.blockers || []).join('; ')}.\nSwitch the local models off anyway?`))
         r = await fetch('/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"force": true}'});
-    }
+    } else if (!r.ok) { const j = await r.json().catch(() => ({})); alert(`Nothing switched ${on ? 'on' : 'off'}: ${j.error || 'HTTP ' + r.status}`); }
   } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
   finally { b.disabled = false; tickNow(); }
 });
@@ -1018,6 +1067,7 @@ $('peer-power').addEventListener('click', async ev => {     // a peer's local mo
   if (!b || b.disabled) return;
   const name = b.dataset.peer, on = b.dataset.off === '1', post = body => fetch(on ? '/hub/link/on' : '/hub/link/off',
     {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({peer: name}, body))});
+  if (!on && !confirm(`Switch peer ${name}'s local models off?\nIt unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there.`)) return;
   b.disabled = true; b.textContent = on ? `turning ${name} on…` : `turning ${name} off…`;
   try {
     let r = await post({});
@@ -1039,7 +1089,7 @@ try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].inclu
 let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('Loaded models (fit)', fitModels); } guard('Recent requests', renderRecent); }, 150); });
 
 tickNow(); tickHistory(); tickRecent();
-setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000);
+setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000); setInterval(() => guard('clock', staleness), 1000);
 </script>
 </body>
 </html>
