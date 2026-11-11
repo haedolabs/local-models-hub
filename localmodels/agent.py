@@ -21,7 +21,7 @@ can never be empty says "nonempty": true and gets minItems: 1 on its lists from 
 answers). A request that fails because the model is down or LM Studio is not answering is tried again with growing pauses
 for up to "wait_down" seconds in all, so a crash in the night costs a job minutes, not its result.
 """
-import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, time, urllib.error
+import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, threading, time, urllib.error
 
 from . import llmshare
 
@@ -504,7 +504,8 @@ def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None,
     if kind == 'batch' and len(jobs) > 1: llmshare.hub_post('/hub/recycle', dict(model=model))
     t0, results = time.time(), []
     if run: plan_run(run, [dict(name=phase or 'all', items=len(jobs))], project)
-    more = (lambda: phase_headers(run, phase or 'all', len(jobs), len(results))) if run else None
+    finished, flock = [0], threading.Lock()             # counted in the worker, before it takes its next job: the
+    more = (lambda: phase_headers(run, phase or 'all', len(jobs), finished[0])) if run else None   # main thread's results lag behind it
     try:
         with llmshare.lease(project, [model], kind, log_dir=out_dir), cf.ThreadPoolExecutor(max_workers=max(1, int(parallel))) as ex:
             def once_more(j):                                   # a local model sometimes ends with no answer: one retry
@@ -512,6 +513,7 @@ def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None,
                     r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind, more)
                     if not r['ok'] and not r.get('error'): r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind, more); r['retried'] = True
                 except Exception as e: r = dict(label=label(j.get('label')), ok=False, error=f'{type(e).__name__}: {e}', seconds=0, turns=0, calls=[], usage={})   # not recorded: the job's result
+                with flock: finished[0] += 1
                 return r
             for f in cf.as_completed([ex.submit(once_more, j) for j in jobs]):
                 r = f.result(); results.append(r)
