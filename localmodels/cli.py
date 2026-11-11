@@ -35,6 +35,10 @@
   localmodels peer add <name> <address>   add a peer gateway by its Thunderbolt Bridge address (port 1235 by default)
   localmodels peer remove <name>
   localmodels peer serve <address> | off  serve as a peer: bind a link listener on that address (token required)
+  localmodels peer off <name> [--force] [reason ...]   switch a peer's local models off from this host (what
+                                 `localmodels off` does there: unloaded once its requests in flight finish, 503 until on;
+                                 refused while a run there holds a lease, unless --force); no request is routed to it
+  localmodels peer on <name>     switch them on again there: the families loaded when switched off are loaded
   localmodels peer log [--hours 24]   each change of a peer's state (up, down, refused, maintenance), with its reason
   localmodels peer token         create peer-token (0600) if missing; print the ssh command that copies it to another host
   localmodels peer gpu-limit     write the boot LaunchDaemon com.local-models.gpu-limit (iogpu.wired_limit_mb = total - 8 GiB)
@@ -413,9 +417,9 @@ def gpu_limit_cmd():
 
 
 def peer_cmd(a):
-    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model ...]."""
+    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | off <name> | on <name> | token | test [name] | gpu-limit | copy-model ...]."""
     from . import peers
-    w = [x for x in a if x != 'peer']
+    w = list(a)                                          # main() has taken the verb: a peer may be named "peer"
     verb = w[0] if w else ''
     if not verb:
         print(f'gateway name sent to peers: {peers.me()} (settings key "name")')
@@ -462,6 +466,18 @@ def peer_cmd(a):
         print('  ' + token_words())
         print('  the gateway binds it within 5 s (X-Hub-Token required); `localmodels peer` shows the listener state')
         return 0
+    if verb in ('off', 'on'):                            # a peer's local models off or on, as `localmodels off` / `on` there
+        names = [x for x in w[1:] if not x.startswith('--')]
+        if not names: print(f'localmodels peer {verb} <name>' + (' [--force] [reason ...]' if verb == 'off' else '')); return 2
+        name, why = names[0], ' '.join(names[1:])
+        code, j = peers.switch(name, verb == 'on', '--force' in a, why)
+        if code == 409 and j.get('blockers'): print(f"peer {name}: nothing switched off: in use: {'; '.join(j['blockers'])} (--force to switch off anyway)"); return 3
+        if code >= 300: print(f"peer {name}: nothing switched {verb}: {j.get('error') or f'HTTP {code}'}"); return 3 if code == 409 else 1
+        if llmshare.hub_up(fresh=True):                  # the gateway looks at the peer now, so routing follows at once
+            try: urllib.request.urlopen(urllib.request.Request(llmshare.HUB + '/hub/link', data=b'{}', headers={'Content-Type': 'application/json'}), timeout=10).read()
+            except OSError: pass
+        print(f"peer {name}: {j.get('note') or 'done'}" + ('' if verb == 'on' else f'. This gateway routes nothing there until: localmodels peer on {name}'))
+        return 0
     if verb == 'gpu-limit' and len(w) == 1: return gpu_limit_cmd()
     if verb == 'copy-model': return copy_model_cmd(w, '--dry' in a)
     if verb == 'log':                                    # each change of a peer's state, with its reason
@@ -502,7 +518,7 @@ def peer_cmd(a):
             bad += p['state'] != 'up'
         if d.get('serving'): print(f"link listener: {d.get('listening') or 'not bound yet'}")
         return 1 if bad else 0
-    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model <model> <user@peer>]')
+    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | off <name> | on <name> | token | test [name] | gpu-limit | copy-model <model> <user@peer>]')
     return 2
 
 
@@ -1459,7 +1475,7 @@ def publish(a):
 FLAGS = {   # verb: (options that take a value, options that stand alone); a verb not listed reads its own words
     'status': ((), ()), 'st': ((), ()), 'open': ((), ()), 'log': (('--hours',), ()), 'swapcheck': ((), ()),
     'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
-    'demo': (('--minutes',), ('--dry',)), 'peer': (('--hours',), ('--dry',)), 'peers': (('--hours',), ('--dry',)), 'crashes': (('--days',), ('--scan',)),
+    'demo': (('--minutes',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),

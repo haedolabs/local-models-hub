@@ -371,10 +371,16 @@ class Door(http.server.BaseHTTPRequestHandler):
             return
         return self.forward(method, path, body, False)
 
+    def _switch_on_now(self):
+        if not maint.switched_off(): return self._send(200, dict(ok=True, note='not switched off', maintenance=maint.view()))
+        threading.Thread(target=_switch_on, name='switch-on', daemon=True).start()
+        return self._send(202, dict(ok=True, note='switching on: the families loaded before are being loaded'))
+
     def over_link(self, method):
         """A request from a peer's hub (this Mac serves as a peer): only with the shared token, never from a web page, and
-        only what a front needs: a model's work, the model listing, and this Mac's report. Loads, unloads, recycles,
-        maintenance and the dashboard stay this Mac's own business."""
+        only what a front needs: a model's work, the model listing, this Mac's report, and switching its local models off
+        and on (what `localmodels off` / `on` does here, refused while a run here holds a lease unless forced). Loads,
+        unloads, recycles, maintenance windows and the dashboard stay this Mac's own business."""
         if self.headers.get('Origin'): return self._send(403, dict(error='forbidden: requests with an Origin header are not accepted on the peer link'))
         if not peers.token_ok(self.headers.get('X-Hub-Token')):
             return self._send(401, dict(error='unauthorized: missing or invalid X-Hub-Token (peer-token)'))
@@ -393,7 +399,16 @@ class Door(http.server.BaseHTTPRequestHandler):
             if not isinstance(j, dict): j = {}
             self._dialect = dialect(route)
             return self.generate(path.split('?')[0].rstrip('/') + ('?' + path.split('?', 1)[1] if '?' in path else ''), body, j, self.headers.get('X-Project'))
-        return self._send(403, dict(error='forbidden on the peer link: only inference endpoints, the model list, /hub/peer and /hub/health are served'))
+        if method == 'POST' and route in ('/hub/off', '/hub/on'):           # a front switches this Mac's local models off or on
+            try: j = json.loads(self._body() or b'{}')
+            except ValueError: j = {}
+            if not isinstance(j, dict): j = {}
+            from . import models
+            if route == '/hub/off':
+                why = llmshare.clean(j.get('why'), 100)
+                return self._send(*models.switch_off(bool(j.get('force')), f'from {self._link}' + (f': {why}' if why else '')))
+            return self._switch_on_now()
+        return self._send(403, dict(error='forbidden on the peer link: only inference endpoints, the model list, /hub/peer, /hub/health and POST /hub/off, /hub/on are served'))
 
     # ---- a request that makes a model work
     def _candidates(self, model, skip=(), kind=None):
@@ -704,10 +719,14 @@ class Door(http.server.BaseHTTPRequestHandler):
                 except ValueError: j = {}
                 from . import models
                 return self._send(*models.switch_off(bool(isinstance(j, dict) and j.get('force'))))
-            if route == '/hub/on' and method == 'POST':                               # and on again: the reload runs in the background
-                if not maint.switched_off(): return self._send(200, dict(ok=True, note='not switched off', maintenance=maint.view()))
-                threading.Thread(target=_switch_on, name='switch-on', daemon=True).start()
-                return self._send(202, dict(ok=True, note='switching on: the families loaded before are being loaded'))
+            if route == '/hub/on' and method == 'POST': return self._switch_on_now()     # and on again: the reload runs in the background
+            if route in ('/hub/link/off', '/hub/link/on') and method == 'POST':      # a peer's local models off or on (localmodels peer off|on)
+                try: j = json.loads(self._body() or b'{}')
+                except ValueError: j = {}
+                if not isinstance(j, dict) or not j.get('peer'): return self._send(400, dict(error='the body must be a JSON object: {"peer": <name>, "force"?, "why"?}'))
+                code, out = peers.switch(str(j['peer']), route.endswith('/on'), bool(j.get('force')), j.get('why') or '')
+                if code < 300: peers.LINK.poll(force=True)
+                return self._send(code, out)
             if route == '/hub/runs':                                                # the runs going on, each phase estimated (POST: declare a run's plan)
                 if method != 'POST': return self._send(200, dict(runs=[names.run(g) for g in sorted(dash.live_runs().values(), key=lambda g: -g['started'])]))
                 try: j = json.loads(self._body() or b'{}')
@@ -733,7 +752,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
-        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/client-error'))
+        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/link/off, POST /hub/link/on, POST /hub/client-error'))
 
 
 class Server(http.server.ThreadingHTTPServer):

@@ -3,7 +3,7 @@
 pretend LM Studio behind each, on random ports: this Mac's door in this process, the peer's door as its own process with
 its own state folder. Local slots first, then the peer's; never more in flight to the peer than it says it has free; the
 project, session, kind, step and run forwarded; the token refused when wrong or missing; web pages, swaps and the
-dashboard refused over the link; a peer in maintenance or gone skipped, and a request it could not take sent again here;
+dashboard refused over the link; a peer switched off and on from this Mac; a peer in maintenance or gone skipped, and a request it could not take sent again here;
 the network checks (the interface, the route, link-local addresses, macOS's Local Network permission); a model's identity
 across Macs (its variant, size and definition); LM Link's rows left out of the listing; and the peer's keeper, which
 says plainly when LM Studio's guardrail refuses a load, does not try again until something changed, and never recycles
@@ -778,6 +778,58 @@ def test_two_doors(box):
         os.remove(os.path.join(peer_dir, 'maintenance.json'))
         L.poll(force=True)
         t('maintenance over: up again', ({p['name']: p for p in peers.view()}.get('peer') or {}).get('state') == 'up')
+
+        print("two doors: the peer's models switched off and on from this Mac")
+        off_file = os.path.join(peer_dir, 'off.json')
+
+        def front(path, body):
+            req = urllib.request.Request(url + path, data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+            try: r = urllib.request.urlopen(req, timeout=15); return r.status, json.load(r)
+            except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
+        t('switch off over the link without the token: 401, nothing switched off', link('/hub/off', token=None, method='POST', body={})[0] == 401 and not os.path.exists(off_file))
+        t('switch off over the link from a web page (an Origin): 403', link('/hub/off', method='POST', body={}, headers={'Origin': 'http://example.com'})[0] == 403 and not os.path.exists(off_file))
+        code, j = front('/hub/link/off', dict(peer='nobody'))
+        t('a peer not in the settings: 404, in words', code == 404 and 'nobody' in (j.get('error') or ''), (code, j))
+        code, j = front('/hub/link/off', dict(peer='peer'))
+        t("a run on the peer holds a lease there: refused (409), naming it, nothing switched off",
+          code == 409 and j.get('blockers') and not os.path.exists(off_file), (code, j))
+        code, j = front('/hub/link/off', dict(peer='peer', force=True))
+        rec = json.load(open(off_file)) if os.path.exists(off_file) else {}
+        t("POST /hub/link/off, forced: the peer is switched off (its off.json), naming this Mac as the one that did it",
+          code == 200 and j.get('ok') and rec.get('before') == [F] and 'front' in (rec.get('why') or ''), (code, j, rec))
+        v = {p['name']: p for p in peers.view()}.get('peer') or {}
+        t('this Mac looks at once: the peer shows as switched off, excluded from routing',
+          v.get('state') == 'maintenance' and v.get('off') is True and 'switched off' in (v.get('words') or '') and not L.replicas(F), (v.get('state'), v.get('off'), v.get('words')))
+        code, j = front('/hub/link/off', dict(peer='peer'))
+        t('switching it off again: 200, already switched off', code == 200 and 'already' in (j.get('note') or ''), (code, j))
+        plan(A); plan(B)
+        code, r, h = ask('o1')
+        t('a request while the peer is switched off is answered here; its LM Studio never sees it', code == 200 and not B.seen and [s[1] for s in A.seen] == ['o1'], (code, A.seen, B.seen))
+        code, j = front('/hub/link/on', dict(peer='peer'))
+        for _ in range(50):
+            if not os.path.exists(off_file): break
+            time.sleep(0.1)
+        L.poll(force=True)
+        v = {p['name']: p for p in peers.view()}.get('peer') or {}
+        t('POST /hub/link/on: the peer is switched on (202), and this Mac routes to it again',
+          code == 202 and not os.path.exists(off_file) and v.get('state') == 'up' and not v.get('off') and L.replicas(F) == [peers.cid(F, 'peer')], (code, j, v.get('state')))
+        import contextlib, io
+        from localmodels import cli
+
+        def peer_cli(*a):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out): code_ = cli.peer_cmd(list(a))
+            return code_, out.getvalue()
+        code, out = peer_cli('off', 'peer', '--force', 'cooling', 'down')
+        rec = json.load(open(off_file)) if os.path.exists(off_file) else {}
+        t('localmodels peer off <name> [reason]: switched off there, with the reason', code == 0 and 'cooling down' in (rec.get('why') or '') and 'switched off' in out, (code, out, rec))
+        code, out = peer_cli('on', 'peer')
+        for _ in range(50):
+            if not os.path.exists(off_file): break
+            time.sleep(0.1)
+        t('localmodels peer on <name>: switched on there', code == 0 and not os.path.exists(off_file) and 'switching on' in out, (code, out))
+        t('localmodels peer off with no name: usage, exit 2', peer_cli('off')[0] == 2)
+        L.poll(force=True)
         proc.terminate(); proc.wait(10)
         plan(A, 'slow', 'slow', 'ok'); plan(B)
         out = together(('g1', {}), ('g2', {}), ('g3', {}))

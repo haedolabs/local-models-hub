@@ -5,7 +5,8 @@ Every Mac runs the same hub. The Mac the projects run on is the front: its setti
 ("peers": {"<name>": {"url": "http://<address>:1235"}}). A peer's settings say where it listens for the front
 ("serve": {"address": "<its Thunderbolt Bridge address>"}). Both hold the same token in peer-token (mode 0600, beside the
 settings; never in the repo or in models.json). Over the link a peer's door answers only requests with that token, never a
-web page, a load or unload, a recycle or the dashboard (gateway.Door.over_link).
+web page, a load or unload, a recycle or the dashboard (gateway.Door.over_link); the one control it takes is switching its
+local models off and on (POST /hub/off, /hub/on), which the front sends with `localmodels peer off|on <name>` (switch()).
 
   report()      what a peer tells a front (GET /hub/peer): each family loaded there with its copies, its slots, how many
                 are busy and how many of those a front's requests hold, its fingerprint, its maintenance, its keeper's
@@ -253,12 +254,13 @@ class LinkConnection(http.client.HTTPConnection):
         self.sock = s
 
 
-def fetch(url, path, headers, timeout=CONNECT):
-    """GET a path from a peer's door over a LinkConnection. -> (status, body); OSError when the peer cannot be reached."""
+def fetch(url, path, headers, timeout=CONNECT, method='GET', body=None):
+    """GET (or POST `body`) a path on a peer's door over a LinkConnection. -> (status, body); OSError when the peer cannot
+    be reached."""
     u = urllib.parse.urlsplit(url)
     c = LinkConnection(u.hostname, u.port or 80, timeout=timeout)
     try:
-        c.request('GET', path, headers=headers)
+        c.request(method, path, body=body, headers=dict(headers, **({'Content-Type': 'application/json'} if body is not None else {})))
         r = c.getresponse()
         return r.status, r.read(4_000_000)
     finally: c.close()
@@ -766,7 +768,7 @@ class Link:
                          rtt_ms=round(p.rtt * 1000, 1) if p.rtt is not None else None, route=dict(interface=p.route[0], port=p.route[1]),
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
                          address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, since=round(p.since, 1), families=fams,
-                         maintenance=rep.get('maintenance'), keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
+                         maintenance=rep.get('maintenance'), off=bool((rep.get('maintenance') or {}).get('off')) if p.state == 'maintenance' else False, keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
                          memory=rep.get('memory') if p.state in ('up', 'maintenance') else None,
                          soc=rep.get('soc') if p.state in ('up', 'maintenance') else None)
                 d['words'] = words(d)
@@ -782,6 +784,26 @@ class Link:
 
 
 LINK = Link()
+
+
+def switch(name, on, force=False, why=''):
+    """Switch a peer's local models off or on from this gateway: POST /hub/off or /hub/on over the link, with the token.
+    The peer does what `localmodels off` / `on` does there (its own leases refuse an off with 409 unless forced); this
+    gateway then sees it in maintenance and routes nothing there until it is on. -> (HTTP code, body)."""
+    c = configured().get(name)
+    if not c: return 404, dict(ok=False, error=f"no peer named {name} in this host's settings (localmodels peer)")
+    tok = token()
+    if not tok: return 409, dict(ok=False, error=token_problem() or 'no peer-token on this host')
+    body = b'{}' if on else json.dumps(dict(force=bool(force), why=llmshare.clean(why, 100) or '')).encode()
+    try: code, data = fetch(c['url'], '/hub/on' if on else '/hub/off', {'X-Hub-Token': tok, 'X-Hub-From': me()}, timeout=15, method='POST', body=body)
+    except OSError as e: return 502, dict(ok=False, error=f'peer {name}: {reach_words(e)}')
+    except http.client.HTTPException as e: return 502, dict(ok=False, error=f'peer {name}: invalid response ({type(e).__name__}: {e})')
+    try: j = json.loads(data or b'{}')
+    except ValueError: j = {}
+    if not isinstance(j, dict): j = {}
+    if code in (401, 403) and not j.get('error'): j['error'] = f'auth failed (HTTP {code}): peer-token mismatch'
+    if code == 403 and 'only inference' in str(j.get('error')): j['error'] = f'peer {name} runs a release without remote switching ({j["error"]}): install the current release there'
+    return code, dict(j, peer=name)
 
 
 def poller():
