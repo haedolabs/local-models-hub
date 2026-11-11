@@ -145,8 +145,24 @@ def user(r):
         b = dict(r['batch'], name=label(raw, r['batch'].get('name')), phase=label(raw, r['batch'].get('phase')))
         if isinstance(b.get('job'), dict): b['job'] = dict(b['job'], name=label(raw, b['job'].get('name')))
         if b.get('now'): b['now'] = [dict(j, step=step(raw, j.get('step'))) for j in b['now']]
+        if b.get('phases'): b['phases'] = phases(raw, b['phases'])
         out['batch'] = b
     if isinstance(r.get('job'), dict): out['job'] = dict(r['job'], name=label(raw, r['job'].get('name')))
+    return out
+
+
+def phases(raw_project, ps):
+    """A run's phases as the screens show them: each name by its label; for a private project or in screenshot mode,
+    without a label, no name (the screens number it)."""
+    return [dict(p, name=label(raw_project, p.get('name'))) for p in ps if isinstance(p, dict)]
+
+
+def run(g):
+    """A run (runs.progress) for a screen: the project, the run, its phases and the phase at work as shown."""
+    raw = g.get('project') or '?'
+    out = dict(g, project=project(raw), name=label(raw, g.get('name')), phase=label(raw, g.get('phase')))
+    if g.get('phases'): out['phases'] = phases(raw, g['phases'])
+    if isinstance(g.get('job'), dict): out['job'] = dict(g['job'], name=label(raw, g['job'].get('name')))
     return out
 
 

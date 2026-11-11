@@ -376,6 +376,27 @@ def run(box):
         th.join(30); Fake.slow = 3.0
         t('a request in flight carries its run too, so the dash moves on at once', live and live[0].get('run_done') == 18, live)
 
+        print('the door: a run in phases, its plan declared (POST /hub/runs) and each request counted in its phase')
+        from localmodels import runs
+        runs.PLANS = os.path.join(box, 'runs')
+        def runs_post(body, headers=None):
+            req = urllib.request.Request(url + '/hub/runs', data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', **(headers or {})})
+            try: r = urllib.request.urlopen(req, timeout=10); return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
+        code, body = runs_post({'run': 'survey', 'phases': [{'name': 'B', 'items': 3}, {'name': 'C', 'items': 2}]}, {'X-Project': 'local-models'})
+        t('a plan declared: 200, and the plan as stored, its phases in order', code == 200 and [p['name'] for p in body['plan']['phases']] == ['B', 'C']
+          and body['plan']['project'] == 'local-models', (code, body))
+        code, body = runs_post({'run': 'survey', 'phases': [{'name': 'B', 'items': 'three'}]}, {'X-Project': 'local-models'})
+        t('a plan the hub cannot take: 400 with the reason', code == 400 and 'whole number' in body.get('error', ''), (code, body))
+        plan()
+        code, r, h = ask(tag='phase', headers={'X-Run': 'survey', 'X-Phase': 'B', 'X-Phase-Total': '3', 'X-Phase-Done': '1'})
+        row_ = rows_logged()[0]
+        t('the phase headers are logged with the request', (row_.get('run'), row_.get('phase'), row_.get('phase_total'), row_.get('phase_done')) == ('survey', 'B', 3, 1), row_)
+        got = json.loads(urllib.request.urlopen(url + '/hub/runs', timeout=10).read())
+        mine = [g for g in got.get('runs', []) if g.get('name') == 'survey']
+        t('GET /hub/runs: the run with its phases, B at work and C waiting', mine and [(p['name'], p['state']) for p in mine[0]['phases']] == [('B', 'running'), ('C', 'waiting')]
+          and mine[0]['total'] == 5, mine)
+
         print('the door: maintenance, announced and on')
         from localmodels import maint
         maint.FILE = os.path.join(box, 'maintenance.json')

@@ -157,10 +157,12 @@ def batch(log_dir):
 
 def live_runs():
     """The runs going on now (runs.py): from the last 3 hours of requests and those in flight, with each run name's last
-    pace on this Mac (the last 7 days, reread every 10 minutes) for an estimate before the first unit is done."""
+    pace and each phase's tokens per item on this Mac (the last 7 days, reread every 10 minutes) for an estimate before
+    the first unit is done, and the runs' declared plans (POST /hub/runs)."""
     rows = every('runrows', 5, lambda: llmshare.requests_log(3))
-    hist = every('runhist', 600, lambda: runs.history(llmshare.requests_log(24 * 7)))
-    return runs.progress(rows, llmshare.inflight(), history=hist)
+    week = lambda: llmshare.requests_log(24 * 7)
+    hist = every('runhist', 600, lambda: (lambda w: (runs.history(w), runs.costs(w)))(week()))
+    return runs.progress(rows, llmshare.inflight(), history=hist[0], plans=every('runplans', 5, runs.plans), costs=hist[1])
 
 
 def attach_runs(out):

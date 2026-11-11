@@ -20,7 +20,7 @@ INSTRUCTIONS = (
     "(full rules: the guide tool). Send OpenAI-compatible requests to http://localhost:1235/v1 or Anthropic-compatible ones to http://localhost:1235 (the gateway), "
     "never directly to LM Studio's port 1234: the gateway runs admission control across all clients, attributes each request to its project and session, and "
     "logs metadata only (never content). The project's name on the hub's screens is set once with the name tool. Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
-    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA. The status tool lists the loaded models and their total concurrent slots (at_once): "
+    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA, and a run in phases X-Phase, X-Phase-Total and X-Phase-Done (its plan: POST /hub/runs) for an estimate per phase and for the whole run. The status tool lists the loaded models and their total concurrent slots (at_once): "
     "a batch should keep that many requests in flight (the gateway queues the rest). For bulk read-only jobs, use ask and batch here "
     "(local agents with read-only tools scoped to your project's folder) instead of Claude multi-agent workflows. "
     "Treat their answers as leads to verify, not verdicts. Never stop LM Studio's server; before unloading or reloading a model, call "
@@ -46,11 +46,14 @@ TOOLS = [
     {'name': 'batch', 'description': "Many local-agent jobs in parallel (bulk reading: checking many files, summarising "
      "many documents), each with read-only tools scoped to this project's folder. jobs: [{label, prompt, schema?, think?}] "
      "(think=false: no thinking, for lookups and extraction). parallel: concurrency (default: the total slots of the loaded "
-     "replicas). Returns a job id immediately; poll it with job_status. A job whose request fails because the model is "
-     "down retries with backoff for up to an hour. Treat the answers as leads to verify.",
+     "replicas). run and phase: this batch is that phase of a larger run (the hub shows the whole run and estimates each "
+     "phase; declare the phases to come with POST /hub/runs, GUIDE.md). Returns a job id immediately; poll it with "
+     "job_status. A job whose request fails because the model is down retries with backoff for up to an hour. Treat the "
+     "answers as leads to verify.",
      'inputSchema': _o({'jobs': {'type': 'array', 'items': _o({'label': {'type': 'string'}, 'prompt': {'type': 'string'},
                         'schema': {'type': 'object'}, 'max_turns': {'type': 'integer'}, 'max_tokens': {'type': 'integer'}, 'think': {'type': 'boolean'}}, ['prompt'])},
-                        'parallel': {'type': 'integer', 'minimum': 1, 'maximum': 16}, 'folder': FOLDER}, ['jobs'])},
+                        'parallel': {'type': 'integer', 'minimum': 1, 'maximum': 16}, 'folder': FOLDER,
+                        'run': {'type': 'string', 'maxLength': 80}, 'phase': {'type': 'string', 'maxLength': 60}}, ['jobs'])},
     {'name': 'job_status', 'description': 'Progress of an ask or batch job this project started: done, running, failed, and when finished a line per job. '
      'results=true adds every answer (capped); label=... one job\'s full answer.',
      'inputSchema': _o({'job': {'type': 'string'}, 'label': {'type': 'string'}, 'results': {'type': 'boolean'}}, ['job'])},
@@ -158,7 +161,7 @@ def _root(folder=None, within=None):
     return root, None
 
 
-def start(kind, jobs, parallel=1, folder=None, read_files=True, within=None):
+def start(kind, jobs, parallel=1, folder=None, read_files=True, within=None, run=None, phase=None):
     """Write a job folder and start its runner as its own process. within: the session's project folder (MCP calls),
     which the root must be inside and which names the job's project. -> (job id, folder) or raises ValueError."""
     root, err = _root(folder, within)
@@ -168,7 +171,8 @@ def start(kind, jobs, parallel=1, folder=None, read_files=True, within=None):
     project = whois.project_of(within or root) or os.path.basename(within or root)
     d = agent.new_dir(os.path.join(AGENTS, llmshare._safe(project)), kind)
     jobs = agent.unique_labels([dict(j, label=j.get('label') or f'{kind}-{i + 1}') for i, j in enumerate(jobs)])
-    json.dump(dict(project=project, root=root, model=m['id'], parallel=parallel, kind=kind, read_files=read_files, jobs=jobs),
+    json.dump(dict(project=project, root=root, model=m['id'], parallel=parallel, kind=kind, read_files=read_files, jobs=jobs,
+                   **({'run': str(run)[:80], 'phase': str(phase or 'all')[:60]} if run else {})),
               open(os.path.join(d, 'jobs.json'), 'w'), indent=1)
     py = shutil.which('python3') or sys.executable
     p = subprocess.Popen([py, os.path.join(HOME, 'bin', 'localmodels'), 'agent-run', d], cwd=root, start_new_session=True,
@@ -250,7 +254,8 @@ def call(name, a):
             jobs = [j for j in a.get('jobs') or [] if isinstance(j, dict) and j.get('prompt')]
             if not jobs: return dict(ok=False, error='no jobs with a prompt')
         at_once = llmshare.at_once() or llmshare.settings().get('batch_at_once', 8)
-        try: job, d = start(name, jobs, int(a.get('parallel') or (1 if name == 'ask' else at_once)), a.get('folder'), a.get('read_files', True), within=_session_folder())
+        try: job, d = start(name, jobs, int(a.get('parallel') or (1 if name == 'ask' else at_once)), a.get('folder'), a.get('read_files', True), within=_session_folder(),
+                               run=a.get('run') if name == 'batch' else None, phase=a.get('phase'))
         except (ValueError, TypeError) as e: return dict(ok=False, error=str(e))
         if name == 'batch': return dict(ok=True, job=job, jobs=len(jobs), note='follow it with job_status')
         t0, wait = time.time(), int(a.get('wait_seconds') if a.get('wait_seconds') is not None else 120)
@@ -273,7 +278,8 @@ def run_folder(d):
     defs = (lambda job: files.defs()) if spec.get('read_files', True) else (lambda job: [])
     kind = 'ask' if spec.get('kind') == 'ask' else 'batch'
     summary, _, _ = agent.batch(spec['jobs'], spec['model'], defs, lambda n, a, job: files.call(n, a), spec['project'],
-                                spec.get('parallel', 1), out_dir=d, quiet=True, by='claude' if os.environ.get('CLAUDECODE') == '1' else None, kind=kind)
+                                spec.get('parallel', 1), out_dir=d, quiet=True, by='claude' if os.environ.get('CLAUDECODE') == '1' else None, kind=kind,
+                                run=spec.get('run'), phase=spec.get('phase'))
     print(f"{summary['ok']} of {summary['jobs']} ok in {summary['seconds']} s")
     return 0 if summary['ok'] == summary['jobs'] else 1
 
