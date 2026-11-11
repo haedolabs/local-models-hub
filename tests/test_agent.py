@@ -66,6 +66,17 @@ def run(box):
     r = agent.run_job(dict(label='a', prompt='say fine'), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t('a 503 with Retry-After: waits that long and asks again', r['ok'] and r['answer'] == 'fine' and r['usage']['retries'] == 1 and len(s.calls) == 2 and time.time() - t0 >= 1, (r.get('error'), len(s.calls)))
     t('every request names its step for the dash (X-Step)', s.calls[0]['headers'].get('X-Step', '').startswith('a: '), s.calls[0]['headers'])
+    posted = []
+    llmshare.hub_post = lambda path, body=None, timeout=5: posted.append((path, body))
+    s = Script([dict(content='one'), dict(content='two')]); agent.post = s
+    agent.batch([dict(label='p1', prompt='x'), dict(label='p2', prompt='y')], 'm', NO_TOOLS, NO_CALL, 'test', parallel=1, out_dir=os.path.join(box, 'phased'),
+                quiet=True, run='survey', phase='D')
+    llmshare.hub_post = lambda *a, **k: None
+    hs = [c['headers'] for c in s.calls]
+    t('a batch in a run\'s phase: each request names the run and phase, its size, and the items done before it',
+      [(h.get('X-Run'), h.get('X-Phase'), h.get('X-Phase-Total'), h.get('X-Phase-Done')) for h in hs] == [('survey', 'D', '2', '0'), ('survey', 'D', '2', '1')], hs)
+    t('and declares its phase and size to the hub (POST /hub/runs)', ('/hub/runs', dict(run='survey', phases=[dict(name='D', items=2)], project='test', end=False)) in posted, posted)
+    t('each request still names its own step (X-Step)', all(h.get('X-Step', '').startswith(('p1: ', 'p2: ')) for h in hs), hs)
     s = Script([http_error(400, '{"error": "Error: The model has crashed without additional information."}'), dict(content='fine')]); agent.post = s
     r = agent.run_job(dict(label='b', prompt='x'), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t("LM Studio's 400 'the model has crashed': asked again", r['ok'] and r['usage']['retries'] == 1, r.get('error'))

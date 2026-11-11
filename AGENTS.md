@@ -7,7 +7,7 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 - `localmodels/llmshare.py` — the sharing rules: slot locks, leases, the swap lock, the model listing, the readers of the shared state.
 - `localmodels/models.py`, `crashes.py`, `recycle.py` — the instance manager: replicas kept loaded, crashed instances reloaded, instances recycled before the crash threshold; `crashes.ENGINE_WORDS`, the one list of the engine's failure words.
 - `localmodels/admission.py` — admission by context size: each request's estimated context, each instance's budget of context in flight from its model's cost per token and the Mac's memory.
-- `localmodels/runs.py`, `maint.py` — batch and job progress with finish times; maintenance windows and the switched-off state (`localmodels off` / `on`).
+- `localmodels/runs.py`, `maint.py` — run and phase progress with finish times, run plans (`/hub/runs`) and per-phase estimates in tokens per item; maintenance windows and the switched-off state (`localmodels off` / `on`).
 - `localmodels/peers.py` — other Macs' gateways as more replicas of a family: the shared token, a peer's report, the front's link (polls, backoff, free slots, model fingerprints), the network checks.
 - `localmodels/agent.py` — local agents: the tool loop, read-only file tools, JSON answers, retries.
 - `localmodels/mcp_server.py` — the MCP tools and the detached job runner.

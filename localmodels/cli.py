@@ -91,8 +91,8 @@ def ago_left(s):
     s = max(0, int(round(s)))
     if s < 90: return f'{s} s'
     if s < 5400: return f'{round(s / 60)} min'
-    if s < 172800: h, m = s // 3600, round(s % 3600 / 60); return f'{h} h' + (f' {m} min' if m else '')
-    d, h = s // 86400, round(s % 86400 / 3600); return f'{d} d' + (f' {h} h' if h else '')
+    if s < 172800: s = round(s / 60) * 60; h, m = s // 3600, s % 3600 // 60; return f'{h} h' + (f' {m} min' if m else '')   # rounded first: never "1 h 60 min"
+    s = round(s / 3600) * 3600; d, h = s // 86400, s % 86400 // 3600; return f'{d} d' + (f' {h} h' if h else '')
 
 
 def finish_words(t):
@@ -109,7 +109,24 @@ def track_words(word, p):
     when = (f"{ago_left(p['left'])} left" + (f", done about {finish_words(p['finish'])}" if p.get('finish') else '') if p.get('left') else 'finishing') \
         if p.get('left') is not None \
         else 'estimating the time left' if p['done'] < p['total'] else 'done'
-    return f" · {word}{' ' + p['name'] if p.get('name') else ''}: {p['done']} of {p['total']}, {when}"
+    if p.get('left') is None and p.get('at_least'): when = f"at least {ago_left(p['at_least'])} left, still estimating"
+    return f" · {word}{' ' + p['name'] if p.get('name') else ''}: {p['done']} of {p['total']}, {when}" + phase_words(p)
+
+
+BASIS_WORDS = {'this run earlier': 'from this run earlier', 'an earlier run': 'from an earlier run', "this run's other phases": "from this run's other phases"}
+
+
+def phase_words(p):
+    """A run in phases, after its whole: '; phase C 19 of 50 (31 min), then D 40 (about 1 h 20 min, from an earlier run), E 10 (...)'."""
+    ps = [dict(x, name=x.get('name') or f'#{i + 1}') for i, x in enumerate(p.get('phases') or [])]   # unnamed: a private project's, numbered
+    todo = [x for x in ps if x.get('state') != 'done']
+    if not todo: return ''
+    def one(x, first):
+        size = f"{x['done']} of {x['total']}" if x['state'] == 'running' and x.get('total') else f"{'~' if x.get('approx') else ''}{x['total']}" if x.get('total') is not None else 'size not known'
+        est = 'not estimated yet' if x.get('left') is None else ago_left(x['left']) if x.get('basis') == 'measured' else f"about {ago_left(x['left'])}, {BASIS_WORDS.get(x.get('basis'), 'estimated')}"
+        return f"{'phase ' if first else ''}{x['name']} {size} ({est})"
+    done = [x['name'] for x in ps if x.get('state') == 'done']
+    return '; ' + (f"{', '.join(done)} done; " if done else '') + one(todo[0], True) + (', then ' + ', '.join(one(x, False) for x in todo[1:]) if todo[1:] else '')
 
 
 def num(a, name, default):
@@ -161,7 +178,7 @@ def status():
             f"{r['direct']} direct connections to LM Studio (bypassing the gateway)" if r['direct'] else 'idle (lease held)'
         who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
         print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or r.get('job') or {}).get('started') else 'since'} {ago(r['since'])}"
-              + (track_words('batch', b) if b.get('total') else '') + track_words('job', r.get('job')) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
+              + (track_words('run', b) if b.get('phases') else (track_words('run', b) if b.get('total') else '') + track_words('phase', r.get('job'))) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
     work = [c for c in cs if c['working']]
     print(f"Claude Code sessions: {len(work)} active" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
           + f", {len(cs) - len(work)} idle in the last 3 hours")

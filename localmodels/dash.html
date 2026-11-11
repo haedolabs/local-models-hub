@@ -166,6 +166,7 @@ td { padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.sub { padding-left: 28px; color: var(--ink-2); }
+td.sub.prog { padding-top: 0; padding-bottom: 3px; }
 .badge { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; font-size: 11.5px; box-shadow: 0 0 0 1px var(--ring); color: var(--ink-2); white-space: nowrap; }
 .badge.warn::before { content: "!"; font-weight: 700; color: var(--critical); }
 .badge.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
@@ -180,6 +181,14 @@ td.sub { padding-left: 28px; color: var(--ink-2); }
 .tracks { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 2px 0 4px; }
 .bar-thin.wide { width: 100%; height: 6px; border-radius: 3px; margin: 3px 0 2px; }
 .bar-thin.wide > div { border-radius: 3px; }
+.runblock { padding: 1px 0 3px; }
+.segbar { display: flex; gap: 3px; height: 6px; margin: 2px 0 3px; }
+.segbar > div { position: relative; min-width: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.segbar > div > div { height: 100%; background: var(--s1); }
+.segbar > div.running { box-shadow: 0 0 0 1px var(--gold); }
+.segbar > div.waiting > div { opacity: 0.55; }
+.phwords { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.phwords .done { color: var(--muted); }
 .chart { position: relative; flex: 1 1 auto; min-height: 60px; }
 .chart > svg { display: block; }                                    /* no inline baseline gap under the chart */
 .tablebox { max-height: 100%; overflow: hidden; }
@@ -245,7 +254,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
   </section>
 
   <section class="row c">
-    <article class="card"><h2>Clients</h2><div class="hint">processes with a request in flight or a lease held (2 min idle); batch and job progress per run</div><div class="body" id="users"></div></article>
+    <article class="card"><h2>Clients</h2><div class="hint">processes with a request in flight or a lease held (2 min idle); run and phase progress, with an estimate for each</div><div class="body" id="users"></div></article>
     <article class="card"><h2>Claude Code sessions</h2><div class="hint">sessions active in the last 3 h, newest first</div><div class="body" id="claude"></div></article>
     <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
@@ -303,8 +312,8 @@ function span(s) {               // a stretch of time in the unit that reads bes
   s = Math.max(0, Math.round(s));
   if (s < 90) return s + ' s';
   if (s < 5400) return Math.round(s / 60) + ' min';
-  if (s < 172800) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + ' h' + (m ? ` ${m} min` : ''); }
-  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600); return d + ' d' + (h ? ` ${h} h` : '');
+  if (s < 172800) { s = Math.round(s / 60) * 60; const h = Math.floor(s / 3600), m = (s % 3600) / 60; return h + ' h' + (m ? ` ${m} min` : ''); }   // rounded first: never "1 h 60 min"
+  s = Math.round(s / 3600) * 3600; const d = Math.floor(s / 86400), h = (s % 86400) / 3600; return d + ' d' + (h ? ` ${h} h` : '');
 }
 function left(s) { return span(s) + ' left'; }
 function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
@@ -604,7 +613,7 @@ function renderNow() {
   const answering = S.users.filter(u => u.answering).map(u => u.project);
   const fin = u => (u.batch && u.batch.finish) || (u.job && u.job.finish);
   const ends = S.users.filter(fin);
-  $('k-ans-f').textContent = ends.length ? `${ends[0].project}: ${ends[0].batch && ends[0].batch.finish ? 'batch' : 'job'} done about ${finishAt(fin(ends[0]))}`
+  $('k-ans-f').textContent = ends.length ? `${ends[0].project}: ${ends[0].batch && ends[0].batch.finish ? 'run' : 'phase'} done about ${finishAt(fin(ends[0]))}`
     : answering.length ? [...new Set(answering)].join(', ') : 'idle';
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
@@ -780,25 +789,65 @@ function peerBlocks(seen, local) {      // a family only a peer has (the others'
   return out;
 }
 
-function track(word, name, p, why) {  // one labelled bar: Batch or Job, done of total, time left, finish in local time
+function whenWords(p) {            // time left and finish in local time, or why there is none yet
   const fin = p.finish || (p.left != null ? Date.now() / 1000 + p.left : null);
-  const when = p.left != null ? (p.left > 0 ? `${left(p.left)} · done about ${finishAt(fin)}` : 'finishing')
-    : p.done < p.total ? 'estimating after the first one' : 'done';
-  const mt = S.maintenance, clash = mt && mt.phase === 'announced' && fin && fin > mt.start;
+  return [fin, p.left != null ? (p.left > 0 ? `${left(p.left)} · done about ${finishAt(fin)}` : 'finishing')
+    : p.at_least ? `at least ${left(p.at_least)} · estimating the rest`
+    : p.done < p.total ? 'estimating after the first one' : 'done'];
+}
+
+function clashBadge(fin) {         // a run that would still be going when an announced maintenance window starts
+  const mt = S.maintenance;
+  return mt && mt.phase === 'announced' && fin && fin > mt.start ? el('span', {class: 'badge warn', style: 'margin-left:6px'}, `ends after maintenance starts (${clock(mt.start)})`) : '';
+}
+
+function track(word, name, p, why) {  // one labelled bar: Run or Phase, done of total, time left, finish in local time
+  const [fin, when] = whenWords(p);
   return el('div', {class: 'track', title: [name, why, p.started ? 'started ' + clock(p.started) : ''].filter(Boolean).join(' · ')},
     el('div', {}, el('b', {}, word), name ? el('span', {class: 'muted'}, ' ' + name) : '',
-      clash ? el('span', {class: 'badge warn', style: 'margin-left:6px'}, `ends after maintenance starts (${clock(mt.start)})`) : ''),
+      clashBadge(fin)),
     el('div', {class: 'bar-thin wide'}, el('div', {style: `width:${p.pct || 0}%`})),
     el('div', {class: 'ink2'}, `${p.done} of ${p.total} · ${when}`));
 }
 
-function progress(u) {             // the batch (the whole run) and the job (the phase it is on now), each with its own bar
+const BASIS = {measured: "measured in this phase", 'this run earlier': 'measured earlier in this run', 'an earlier run': 'from the same phase in an earlier run',
+  "this run's other phases": "from this run's other phases"};
+
+function phaseText(p) {            // a phase in a few words: done, 75 of 247 · 1 h 20 min, 482 · ~2 h 40 min
+  if (p.state === 'done') return 'done';
+  const size = p.state === 'running' && p.total != null ? `${p.done} of ${p.total}` : p.total != null ? `${p.approx ? '~' : ''}${p.total}` : 'size not said';
+  return size + ' · ' + (p.left == null ? 'not estimated yet' : (p.basis === 'measured' ? '' : '~') + span(p.left));
+}
+
+function phaseTitle(p) {
+  return [`phase ${p.name}: ${p.state}`, p.total != null ? `${p.done} of ${p.total} items${p.approx ? ' (approximate size)' : ''}` : 'size not said',
+    p.tokens_per_item ? `${p.tokens_per_item.toLocaleString()} tokens an item, ${BASIS[p.basis] || 'estimated'}` : '',
+    p.left ? `${left(p.left)}` + (p.finish ? ` · done about ${finishAt(p.finish)}` : '') : '',
+    p.started ? 'started ' + clock(p.started) : '', p.ended ? 'ended ' + clock(p.ended) : ''].filter(Boolean).join(' · ');
+}
+
+function phaseStrip(b) {           // a run in phases: a segment per phase, as wide as its items, filled as it is done
+  const ps = (b.phases || []).map((p, i) => Object.assign({}, p, {name: p.name || `#${i + 1}`})), size = p => Math.max(p.total || 0, 1), all = ps.reduce((a, p) => a + size(p), 0) || 1;
+  return el('div', {class: 'phases'},
+    el('div', {class: 'segbar'}, ...ps.map(p => el('div', {class: p.state, style: `flex:${size(p) / all} 1 0`, title: phaseTitle(p)},
+      el('div', {style: `width:${p.state === 'done' ? 100 : p.pct || 0}%`})))),
+    el('div', {class: 'phwords ink2'}, ...ps.map(p => el('span', {class: p.state, title: phaseTitle(p)}, el('b', {}, p.name), ' ' + phaseText(p)))));
+}
+
+function progress(u) {             // the run (all its phases) and the phase it is on now, each with its own bar; a run in phases adds a strip of them
   const b = u.batch && u.batch.total ? u.batch : null, j = u.job && u.job.total ? u.job : null;
   if (!b && !j) return u.step ? el('div', {class: 'muted'}, el('b', {}, 'Step'), ' ' + u.step) : null;
+  if (b && b.phases && b.phases.length) {   // a run in phases: one line for the run, its phases as the bar, a line of phase estimates
+    const why = b.basis ? `estimate in tokens per item at the throughput this run gets; least certain part: ${BASIS[b.basis] || b.basis}` : '';
+    const [fin, when] = whenWords(b);
+    return el('div', {class: 'runblock', title: [b.name, why, b.started ? 'started ' + clock(b.started) : ''].filter(Boolean).join(' · ')},
+      el('div', {}, el('b', {}, 'Run'), b.name ? el('span', {class: 'muted'}, ' ' + b.name) : '', el('span', {class: 'ink2'}, ` · ${b.done.toLocaleString()} of ${b.total.toLocaleString()} · ${when}`), clashBadge(fin)),
+      phaseStrip(b));
+  }
   const why = b && (b.basis === 'the last run' ? 'estimate from the last run of this name' : b.basis ? "estimate from this run's pace" : '');
   return el('div', {class: 'tracks'},
-    b ? track('Batch', b.name, b, why) : el('div', {class: 'muted track', title: 'the script can say its whole size with X-Run, X-Run-Total and X-Run-Done (GUIDE.md)'}, el('b', {}, 'Batch'), ' size not said'),
-    j ? track('Job', j.name, j) : u.step ? el('div', {class: 'muted track'}, el('b', {}, 'Job'), ' ' + u.step) : '');
+    b ? track('Run', b.name, b, why) : el('div', {class: 'muted track', title: 'the script can say its whole size with X-Run and its phases with X-Phase and POST /hub/runs (GUIDE.md)'}, el('b', {}, 'Run'), ' size not said'),
+    j ? track('Phase', j.name, j) : u.step ? el('div', {class: 'muted track'}, el('b', {}, 'Phase'), ' ' + u.step) : '');
 }
 
 function renderUsers() {
@@ -816,13 +865,13 @@ function renderUsers() {
     const prog = progress(u);
     rows.push(el('tr', {},
       el('td', {}, el('span', {class: 'dot', style: `background:${color(u.project)}`}), u.project),
-      el('td', {}, kindWords(u.kind), u.app ? el('div', {class: 'muted'}, u.app) : ''),
+      el('td', {}, kindWords(u.kind), u.app ? (prog ? el('span', {class: 'muted'}, ' · ' + u.app) : el('div', {class: 'muted'}, u.app)) : ''),   // one line when a progress row follows
       el('td', {}, now, flag),
       el('td', {}, (u.models || []).map(short).join(', ') || '–'),
       el('td', {class: 'num', title: ((u.batch || u.job || {}).started ? 'this run started ' : 'using a model since ') + clock(u.since)}, ago(u.since)),
       el('td', {title: u.title || ''}, u.title || (u.session ? 'a Claude session' : el('span', {class: 'muted'}, '–'))),
     ));
-    if (prog) rows.push(el('tr', {}, el('td', {class: 'sub', colspan: head.length}, prog)));
+    if (prog) rows.push(el('tr', {}, el('td', {class: 'sub prog', colspan: head.length}, prog)));
     for (const j of (b.now || []).slice(0, 8)) {
       rows.push(el('tr', {}, el('td', {class: 'sub', colspan: 4}, `agent ${j.job}` + (j.step ? ` · ${j.step}` : '')), el('td', {class: 'num ink2'}, ago(j.since)),
         el('td', {}, j.pct != null ? el('div', {class: 'ink2'}, `${j.pct}%` + (j.left ? ` · ~${left(j.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${j.pct}%`}))) : el('span', {class: 'muted'}, 'starting'))));

@@ -1044,6 +1044,96 @@ def test_progress(box):
         t(f'a plan.json of the wrong shape ({bad}): no exception, no total', isinstance(b, dict) and b['total'] is None, b)
 
 
+def test_run_plans(box):
+    print("run plans: a run's phases declared once, each phase's progress from its headers, an estimate for every phase and the whole run")
+    from localmodels import cli, dash, runs
+    runs.PLANS = os.path.join(box, 'runs')
+    now = 1_000_000.0
+    t('the phase headers read whole with the run, and nonsense is dropped',
+      runs.from_headers({'X-Run': 'survey', 'X-Phase': 'D', 'X-Phase-Done': '75', 'X-Phase-Total': '247'}) == dict(run='survey', phase='D', phase_done=75, phase_total=247)
+      and runs.from_headers({'X-Run': 'survey', 'X-Phase': 'D', 'X-Phase-Done': 'many'}) == dict(run='survey', phase='D')
+      and runs.from_headers({'X-Phase': 'D', 'X-Phase-Done': '3'}) == {})
+
+    # the plan: declared once, merged by phase name, order kept, new phases appended
+    p = runs.declare('proj', 'survey', [dict(name='B', items=30), dict(name='C', items=50), dict(name='D', items=40), dict(name='E', items=8, approx=True)], now=now - 9000)
+    p = runs.declare('proj', 'survey', [dict(name='E', items=10, approx=False), dict(name='F')], now=now - 9000)
+    t('a plan: phases in the order first declared, a later declaration updates by name and appends new phases',
+      [(x['name'], x.get('items'), x.get('approx', False)) for x in p['phases']] == [('B', 30, False), ('C', 50, False), ('D', 40, False), ('E', 10, False), ('F', None, False)], p['phases'])
+    p = runs.declare('proj', 'survey', [dict(name='F', items=None)], now=now - 9000)
+    p['phases'] = [x for x in p['phases'] if x['name'] != 'F']; runs._save(p)
+    for bad in (dict(run='', phases=[]), dict(run='x', phases='B'), dict(run='x', phases=[dict(items=3)]), dict(run='x', phases=[dict(name='B', items='lots')])):
+        try: runs.declare('proj', bad['run'], bad['phases'], now=now); err = None
+        except ValueError as e: err = e
+        t(f'a plan the hub cannot take is refused with the reason ({bad})', err is not None and str(err), err)
+    t('the plan is on disk, one file per project and run', [x['run'] for x in runs.plans(now=now - 8000)] == ['survey'])
+
+    def rec(at, phase, done, total, tokens, seconds=60, run='survey', project='proj'):
+        return dict(at=at, seconds=seconds, status=200, project=project, kind='batch', run=run, phase=phase, phase_done=done, phase_total=total,
+                    prompt_tokens=int(tokens * 0.8), completion_tokens=tokens - int(tokens * 0.8), step=f'item {done}')
+    earlier = [rec(now - 86400 + 60 * k + 60, 'D', k, 10, 10_000, run='survey-yesterday') for k in range(10)]   # D took 10,000 tokens an item before
+    b = [rec(now - 7200 + 60 * k + 60, 'B', k, 30, 4_000) for k in range(30)]        # B: 30 items at 4,000 tokens, two hours ago
+    c = [rec(now - 1200 + 60 * k + 60, 'C', k, 50, 5_000) for k in range(20)]        # C: now, one item a minute at 5,000 tokens
+    costs = runs.costs(earlier + b + c)
+    t('the cost of a phase from the records: tokens per item, by project and phase name', abs(costs.get(('proj', 'D'), 0) - 10_000) < 1, costs)
+    g = runs.progress(b + c, now=now, plans=runs.plans(now=now), costs=costs)
+    r = g.get(('proj', 'survey'), {})
+    ph = {x['name']: x for x in r.get('phases') or []}
+    t('a planned run: every phase listed in plan order', list(ph) == ['B', 'C', 'D', 'E'], list(ph))
+    t('a phase a later one has begun after is done, counted whole', ph.get('B', {}).get('state') == 'done' and ph['B'].get('done') == 30, ph.get('B'))
+    t('the phase at work: running, its count from its headers', (ph.get('C', {}).get('state'), ph['C'].get('done'), ph['C'].get('total')) == ('running', 19, 50), ph.get('C'))
+    t("the phase at work: time left from its own tokens per item and the run's throughput (31 items x 5,000 tokens at ~83 tokens/s, ~31 min)",
+      ph['C'].get('left') and 1700 <= ph['C']['left'] <= 2000 and ph['C'].get('basis') == 'measured', ph.get('C'))
+    t('a phase not begun, done before in an earlier run: 40 items x 10,000 tokens at the same throughput (~80 min)',
+      ph.get('D', {}).get('state') == 'waiting' and ph['D'].get('left') and 4500 <= ph['D']['left'] <= 5100 and ph['D'].get('basis') == 'an earlier run', ph.get('D'))
+    t("a phase never measured anywhere: this run's other phases stand for it, and it says so",
+      ph.get('E', {}).get('left') and 400 <= ph['E']['left'] <= 700 and ph['E'].get('basis') == "this run's other phases", ph.get('E'))
+    t('each phase finishes after the ones before it', ph['C'].get('finish') < ph['D'].get('finish') < ph['E'].get('finish')
+      and abs(ph['E']['finish'] - (now + ph['C']['left'] + ph['D']['left'] + ph['E']['left'])) < 2, [ph[k].get('finish') for k in 'CDE'])
+    t('the whole run: items of every phase, its time left the sum of the phases left, its finish the last phase\'s',
+      (r.get('done'), r.get('total')) == (49, 130) and r.get('left') == ph['C']['left'] + ph['D']['left'] + ph['E']['left'] and abs(r.get('finish', 0) - ph['E']['finish']) < 2
+      and r.get('scope') == 'whole run' and r.get('kind') == 'run', {k: r.get(k) for k in ('done', 'total', 'left', 'finish', 'scope')})
+    t("the whole run's basis is its least certain phase's", r.get('basis') == "this run's other phases", r.get('basis'))
+    t('the job is the phase at work, as the dashboard reads it', (r.get('job') or {}).get('name') == 'C' and r['job'].get('left') == ph['C']['left'], r.get('job'))
+
+    slow = [rec(now - 1200 + 120 * k + 120, 'C', k, 50, 5_000) for k in range(10)]
+    r2 = runs.progress(b + slow, now=now, plans=runs.plans(now=now), costs=costs)[('proj', 'survey')]
+    d2 = {x['name']: x for x in r2['phases']}['D']
+    t("half the throughput (another project took the other half): the same work's estimate doubles", d2.get('left') and 1.8 <= d2['left'] / ph['D']['left'] <= 2.2, (d2.get('left'), ph['D']['left']))
+
+    r3 = runs.progress(b + c, now=now, plans=[], costs={}).get(('proj', 'survey'), {})
+    t('no plan declared: the phases the headers name, in the order they began', [x['name'] for x in r3.get('phases') or []] == ['B', 'C'] and r3.get('total') == 80, r3.get('phases'))
+    runs.declare('proj', 'fresh', [dict(name='one', items=12), dict(name='two', items=5)], now=now - 30)
+    r4 = runs.progress([], now=now, plans=runs.plans(now=now), costs={}).get(('proj', 'fresh'), {})
+    t('a plan just declared, nothing measured yet: shown, no made-up number', r4.get('total') == 17 and r4.get('left') is None and r4.get('finish') is None
+      and all(x['left'] is None and x['state'] == 'waiting' for x in r4.get('phases') or [None]), r4)
+    runs.declare('proj', 'fresh', end=True, now=now - 20)
+    t('a run its client ended is no longer shown once idle', ('proj', 'fresh') not in runs.progress([], now=now + runs.ACTIVE + 60, plans=runs.plans(now=now + runs.ACTIVE + 60), costs={}))
+    open(os.path.join(runs.PLANS, 'junk.json'), 'w').write('[1, 2]')
+    try: n, err = len(runs.plans(now=now)), None
+    except Exception as e: n, err = 0, e
+    t('a plan file of the wrong shape is skipped, never an exception', err is None and n >= 1, err)
+
+    words = cli.track_words('run', r)
+    t('the status line: the whole run, then the phase at work and the ones to come, each with its time',
+      'run survey: 49 of 130' in words and 'phase C 19 of 50' in words and 'then D 40' in words and 'E 10' in words, words)
+    real = dash.live_runs
+    dash.live_runs = lambda: {('proj', 'survey'): r}
+    try:
+        rows = [dict(project='proj', pid=1, batch=None, since=now - 60)]
+        dash.attach_runs(rows)
+    finally: dash.live_runs = real
+    t('the dashboard row: the whole run with its phases, and the phase at work as its job',
+      len((rows[0].get('batch') or {}).get('phases') or []) == 4 and (rows[0].get('job') or {}).get('name') == 'C', rows[0])
+    from localmodels import names
+    names.set_private('proj', True); names.set_label('proj', 'D', 'deep check')
+    try: shown, g2 = names.user(rows[0]), names.run(r)
+    finally: names.set_private('proj', False); names.forget('proj')
+    t('a private project: its phase and run names hidden on every screen unless labelled, the counts kept',
+      [x['name'] for x in shown['batch']['phases']] == [None, None, 'deep check', None] and shown['batch']['name'] is None and shown['job']['name'] is None
+      and [x['name'] for x in g2['phases']] == [None, None, 'deep check', None] and g2['phases'][1]['done'] == 19, shown['batch']['phases'])
+    t('the status line numbers a phase with no name to show', 'phase #2 19 of 50' in cli.track_words('run', shown['batch']), cli.track_words('run', shown['batch']))
+
+
 def test_sessions(box):
     print("Claude Code's records: of subagents and workflows, only how many; never a description or an agent's label")
     from localmodels import sessions
@@ -1169,6 +1259,7 @@ def main():
         test_privacy_check(box)
         test_about(box)
         test_progress(box)
+        test_run_plans(box)
         test_sessions(box)
         test_names(box)
     finally: shutil.rmtree(box, ignore_errors=True)

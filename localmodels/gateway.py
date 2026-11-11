@@ -5,7 +5,8 @@
 For every request that makes a model work (chat, completions, embeddings, responses, messages):
   1. who: the project, the Claude Code session and the program, from the header X-Project (or a /p/<project>/ path),
      or else from the program on the other end of the connection (whois). X-Kind says what kind of run it is; X-Step
-     what this request is for (the dash shows it); X-Run, X-Run-Total and X-Run-Done, the whole run it belongs to (runs.py).
+     what this request is for (the dash shows it); X-Run, X-Run-Total and X-Run-Done, the whole run it belongs to, and
+     X-Phase, X-Phase-Total and X-Phase-Done, the phase of it (runs.py; a run's plan: POST /hub/runs).
   2. a lease for that program on that model, kept two minutes after its last request, so no swap unloads it mid-run.
   3. a slot (llmshare.slot_any): all projects together never send LM Studio more than the model answers at once. A chat
      or ask request (a person is waiting) gets the next free slot before queued batch requests; otherwise first come,
@@ -38,12 +39,12 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import HOME, VERSION, admission, crashes, dash, errors, icon, llmshare, maint, peers, recycle, runs, web, whois
+from . import HOME, VERSION, admission, crashes, dash, errors, icon, llmshare, maint, names, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
 UP = llmshare.LMSTUDIO
-LINK_PASS = ('X-Project', 'X-Session', 'X-Kind', 'X-Step', 'X-Run', 'X-Run-Total', 'X-Run-Done')   # who a request is from, sent along to a peer
+LINK_PASS = ('X-Project', 'X-Session', 'X-Kind', 'X-Step', 'X-Run', 'X-Run-Total', 'X-Run-Done', 'X-Phase', 'X-Phase-Total', 'X-Phase-Done')   # who a request is from, sent along to a peer
 GEN = re.compile(r'/(chat/completions|completions|embeddings|responses|messages|chat)$')
 SWAP = re.compile(r'/(load|unload)$')
 PASS = ('content-type', 'authorization', 'accept', 'x-api-key', 'anthropic-version', 'openai-organization')
@@ -444,7 +445,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         kind = llmshare.clean(self.headers.get('X-Kind'), 20).lower()
         if kind not in llmshare.KINDS: kind = (own_kind(pid) if pid else None) or 'other'
         step = llmshare.clean(self.headers.get('X-Step'), 120) or None
-        run = runs.from_headers(self.headers)                                  # X-Run, X-Run-Total, X-Run-Done: the whole run
+        run = runs.from_headers(self.headers)                                  # X-Run, X-Run-Total, X-Run-Done: the whole run; X-Phase...: its phase
         model = llmshare.clean(j.get('model') or next((llmshare.family(r['id']) for r in llmshare.loaded()), None) or 'unknown', 200)
         try: xt = float(self.headers.get('X-Timeout') or 0)
         except ValueError: xt = 0
@@ -665,6 +666,12 @@ class Door(http.server.BaseHTTPRequestHandler):
             return 502, {}, (f'{who}: response truncated' if peer else 'LM Studio response truncated') + f' ({type(e).__name__})'
         finally: up.close()
 
+    def _own_project(self):
+        """The project of the program on the other end of this connection (whois), as a request without X-Project gets."""
+        host = self.client_address[0]
+        pid = whois.peer_pid(self.client_address[1], PORT, '[::1]' if ':' in host else '127.0.0.1') if not self._link else 0
+        return (whois.identity(pid) if pid else {}).get('project')
+
     # ---- the hub's own pages
     def hub(self, method, path):
         route = path.split('?')[0].rstrip('/')
@@ -701,6 +708,15 @@ class Door(http.server.BaseHTTPRequestHandler):
                 if not maint.switched_off(): return self._send(200, dict(ok=True, note='not switched off', maintenance=maint.view()))
                 threading.Thread(target=_switch_on, name='switch-on', daemon=True).start()
                 return self._send(202, dict(ok=True, note='switching on: the families loaded before are being loaded'))
+            if route == '/hub/runs':                                                # the runs going on, each phase estimated (POST: declare a run's plan)
+                if method != 'POST': return self._send(200, dict(runs=[names.run(g) for g in sorted(dash.live_runs().values(), key=lambda g: -g['started'])]))
+                try: j = json.loads(self._body() or b'{}')
+                except ValueError: j = None
+                if not isinstance(j, dict): return self._send(400, dict(error='the body must be a JSON object: {"run", "phases": [{"name", "items"}]}'))
+                project = llmshare.clean(self.headers.get('X-Project') or j.get('project'), 80) or self._own_project() or 'unknown'
+                try: plan = runs.declare(project, j.get('run'), j.get('phases'), end=bool(j.get('end')))
+                except ValueError as e: return self._send(400, dict(error=str(e)))
+                return self._send(200, dict(ok=True, plan=plan))
             if route == '/hub/errors':                                              # what the error record holds (localmodels errors)
                 return self._send(200, dict(errors=errors.recent((q.get('minutes') or [1440])[0], 200)))
             if route == '/hub/client-error' and method == 'POST':                     # the dashboard's own render errors
@@ -717,7 +733,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
-        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/client-error'))
+        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/client-error'))
 
 
 class Server(http.server.ThreadingHTTPServer):

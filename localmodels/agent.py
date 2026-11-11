@@ -307,8 +307,10 @@ def step_words(fn, a):
 
 
 # ---------------------------------------------------------------- one agent
-def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None, system=SYSTEM, words=step_words, kind='batch'):
+def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None, system=SYSTEM, words=step_words, kind='batch', headers=None):
     """One job, start to answer. defs(job) -> the tools it may use (MCP-style dicts); call(name, args, job) -> a result.
+    headers: more for the hub on each request (a dict, or a function returning one, read at each request): the run and
+    phase it belongs to, e.g. agent.phase_headers(run, phase, total, done).
     -> {label, ok, model, answer, result, seconds, turns, calls, usage, log}."""
     t0, lab = time.time(), label(job.get('label'))
     mark = os.path.join(log_dir, lab + '.running') if log_dir else None   # the dash shows jobs in progress
@@ -336,7 +338,8 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
         t_first, k = time.time(), 0
         wait_down = WAIT_DOWN if job.get('wait_down') is None else float(job['wait_down'])
         while True:
-            try: r = post('/v1/chat/completions', req, project, kind, headers={'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
+            more = (headers() if callable(headers) else headers) or {}
+            try: r = post('/v1/chat/completions', req, project, kind, headers={**more, 'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
             except Exception as e:                       # not recorded: a failed request is retried or raised to the job, whose log holds it
                 again, pause, what = transient(e)
                 if not again or time.time() - t_first >= wait_down: raise
@@ -461,6 +464,20 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
     return out
 
 
+def phase_headers(run, phase, total=None, done=None):
+    """The headers that put a request in a run's phase (X-Run, X-Phase, X-Phase-Total, X-Phase-Done), for run_job's headers."""
+    h = {'X-Run': str(run)[:80], 'X-Phase': str(phase)[:60]}
+    if total is not None: h['X-Phase-Total'] = str(int(total))
+    if done is not None: h['X-Phase-Done'] = str(int(done))
+    return h
+
+
+def plan_run(run, phases, project, end=False):
+    """Declare a run's phases to the hub, in order: [{"name", "items", "approx"}] (POST /hub/runs); again to update them,
+    end=True when the run is over. -> the hub's answer, or None when the hub does not answer."""
+    return llmshare.hub_post('/hub/runs', dict(run=run, phases=phases, project=project, end=end))
+
+
 def new_dir(logs, kind):
     """A fresh folder for a batch, never one another session is writing: the time, then -2, -3... if taken."""
     os.makedirs(logs, exist_ok=True)
@@ -472,24 +489,28 @@ def new_dir(logs, kind):
 
 
 def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None, extra=None, quiet=False, system=SYSTEM,
-          words=step_words, by=None, kind='batch'):
+          words=step_words, by=None, kind='batch', run=None, phase=None):
     """Run jobs side by side (as many as LM Studio answers at once), holding a lease the dash reads its progress from.
-    Asks the hub for fresh copies first (a copy far along its band is recycled before the work starts). -> (summary, folder, results)."""
+    Asks the hub for fresh copies first (a copy far along its band is recycled before the work starts). run and phase:
+    this batch is that phase of that run (its size declared to the hub, each request counted in it; plan_run declares
+    the phases still to come). -> (summary, folder, results)."""
     logs = logs or os.path.expanduser('~/Library/Logs/LocalModels/agents')
     out_dir = out_dir or new_dir(logs, 'batch')
     os.makedirs(out_dir, exist_ok=True)
     jobs = unique_labels(jobs)
     json.dump(dict(model=model, parallel=parallel, started=time.time(), jobs=[j['label'] for j in jobs], project=project, pid=os.getpid(),
-                   by=by or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you')),
+                   by=by or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you'), **({'run': run, 'phase': phase or 'all'} if run else {})),
               open(os.path.join(out_dir, 'plan.json'), 'w'))
     if kind == 'batch' and len(jobs) > 1: llmshare.hub_post('/hub/recycle', dict(model=model))
     t0, results = time.time(), []
+    if run: plan_run(run, [dict(name=phase or 'all', items=len(jobs))], project)
+    more = (lambda: phase_headers(run, phase or 'all', len(jobs), len(results))) if run else None
     try:
         with llmshare.lease(project, [model], kind, log_dir=out_dir), cf.ThreadPoolExecutor(max_workers=max(1, int(parallel))) as ex:
             def once_more(j):                                   # a local model sometimes ends with no answer: one retry
                 try:
-                    r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind)
-                    if not r['ok'] and not r.get('error'): r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind); r['retried'] = True
+                    r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind, more)
+                    if not r['ok'] and not r.get('error'): r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind, more); r['retried'] = True
                 except Exception as e: r = dict(label=label(j.get('label')), ok=False, error=f'{type(e).__name__}: {e}', seconds=0, turns=0, calls=[], usage={})   # not recorded: the job's result
                 return r
             for f in cf.as_completed([ex.submit(once_more, j) for j in jobs]):
