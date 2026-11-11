@@ -220,7 +220,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
     <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
     <div class="chips"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><button class="btn" id="power" style="display:none"></button><span id="clock" class="muted"></span>
+      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><button class="btn" id="power" style="display:none"></button><span id="peer-power"></span><span id="clock" class="muted"></span>
       <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
   </header>
   <div>
@@ -580,7 +580,7 @@ function renderNow() {
   if (ps.length || serve) {
     const why = p => { const w = String(p.why || '').split(/[:(]/)[0].trim(); return w.length > 48 ? w.slice(0, 47) + '…' : w; };   // the whole reason is the tooltip
     const away = p => p.state === 'down' ? `peer ${p.name}: unreachable${p.since ? ' since ' + clock(p.since) : ''}${why(p) ? ` (${why(p)})` : ''} · next poll in ${Math.max(0, Math.round((p.next_at || 0) - S.time))} s`
-      : p.state === 'refused' ? `peer ${p.name}: auth failed` : `peer ${p.name}: ${p.state}`;
+      : p.state === 'refused' ? `peer ${p.name}: auth failed` : p.off ? `peer ${p.name}: switched off` : `peer ${p.name}: ${p.state}`;
     const said = [ps.length ? (up.length === ps.length ? `peers ${up.length}/${ps.length} reachable: ${up.map(p => p.name).join(', ')}`
       : ps.filter(p => p.state !== 'up').map(away).join(' · ')) : '', serve].filter(Boolean).join(' · ');
     chip('chip-peers', up.length === ps.length && (!serve || /^listening/.test(serve)), said, said);
@@ -599,6 +599,19 @@ function renderNow() {
     pw.title = off ? 'Load the families that were loaded when switched off (POST /hub/on); the instance manager adds the other replicas'
       : 'Unload every instance once the requests in flight finish; until turned on, requests get 503 and nothing is loaded, reloaded or started (POST /hub/off)';
   }
+  const pp = $('peer-power');                           // each peer's local models off or on from here (POST /hub/link/off, /hub/link/on)
+  for (const p of ps) {
+    let b = pp.querySelector(`[data-peer="${CSS.escape(p.name)}"]`);
+    const show = p.state === 'up' || !!p.off;
+    if (!show) { if (b && !b.disabled) b.remove(); continue; }
+    if (!b) { b = el('button', {class: 'btn'}); b.dataset.peer = p.name; pp.appendChild(b); }
+    if (b.disabled) continue;
+    b.textContent = p.off ? `turn ${p.name} on` : `turn ${p.name} off`;
+    b.dataset.off = p.off ? '1' : '';
+    b.title = p.off ? `Switch on peer ${p.name}'s local models: it loads the families loaded when switched off, and this gateway routes to it again (POST /hub/link/on)`
+      : `Switch off peer ${p.name}'s local models: it unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there (POST /hub/link/off)`;
+  }
+  for (const b of [...pp.children]) if (!ps.some(p => p.name === b.dataset.peer)) b.remove();
   // stat tiles
   const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
   let busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
@@ -998,6 +1011,22 @@ $('power').addEventListener('click', async () => {             // switch the loc
         r = await fetch('/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"force": true}'});
     }
   } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
+  finally { b.disabled = false; tickNow(); }
+});
+$('peer-power').addEventListener('click', async ev => {     // a peer's local models off or on; the next snapshot shows its state
+  const b = ev.target.closest('button[data-peer]');
+  if (!b || b.disabled) return;
+  const name = b.dataset.peer, on = b.dataset.off === '1', post = body => fetch(on ? '/hub/link/on' : '/hub/link/off',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({peer: name}, body))});
+  b.disabled = true; b.textContent = on ? `turning ${name} on…` : `turning ${name} off…`;
+  try {
+    let r = await post({});
+    if (r.status === 409) {
+      const j = await r.json();
+      if ((j.blockers || []).length && confirm(`Peer ${name} in use: ${j.blockers.join('; ')}.\nSwitch its local models off anyway?`)) r = await post({force: true});
+      else if (!(j.blockers || []).length) alert(`Peer ${name}: ${j.error || 'HTTP 409'}`);
+    } else if (!r.ok) { const j = await r.json().catch(() => ({})); alert(`Peer ${name}: nothing switched ${on ? 'on' : 'off'}: ${j.error || 'HTTP ' + r.status}`); }
+  } catch (e) { /* not recorded: the next snapshot says whether the peer answers */ }
   finally { b.disabled = false; tickNow(); }
 });
 $('theme').addEventListener('click', () => {
