@@ -1220,7 +1220,10 @@ def check():
     errs = _errors.recent(60, 200)
     t('no errors recorded in the last hour', not errs,
       f"{len(errs)} recorded; last: {errs[0].get('source')} · {errs[0].get('where')}: {errs[0].get('error')} (localmodels errors --trace)" if errs else 'localmodels errors for the record')
+    from . import maint
     if dash.door()['stale']: print("  skip instance-manager check (the gateway runs stale code until localmodels install)")
+    elif maint.switched_off() or maint.on():            # paused: it skips the crash watch, which records each look
+        print(f"  skip instance-manager check (paused: {'local models switched off' if maint.switched_off() else 'maintenance window active'})")
     else:
         seen = time.time() - (crashes._read(fresh=True).get('at') or 0)
         t("instance manager polls every 20 s (crashes, replicas, recycles)", seen < 90, f'last look {seen:.0f} s ago')
