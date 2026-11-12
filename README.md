@@ -7,7 +7,7 @@ Reverse proxy, instance manager and MCP server for one LM Studio shared by every
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/dashboard-light.png">
-  <img alt="The dashboard during a synthetic workload: all 12 slots in use and 2 requests queued, across two replicas on this Mac and one on a peer Mac; tiles, slot modules in each project's color, time series of concurrency, throughput, requests and memory, and tables of clients, Claude Code sessions and recent requests" src="docs/dashboard-light.png">
+  <img alt="The dashboard during a synthetic workload: all 12 slots in use and 2 requests queued, across two replicas on this Mac and one on a peer Mac; tiles, slot modules drawn as memory modules in each project's color, time series of concurrency, throughput, requests and memory with recycles marked, and tables of clients with their runs' finish times, Claude Code sessions and recent requests" src="docs/dashboard-light.png">
 </picture>
 
 The dashboard at 1512 × 900 during `localmodels demo --minutes 60`: three synthetic batches keep all 12 slots busy, 8 on two replicas on the front Mac (M5 Max) and 4 on a peer (MacBook Pro M4 Pro, over Thunderbolt Bridge), with 2 more requests in the gateway's admission queue. Taken in screenshot mode (`localmodels present on`): every project other than the demo's and the hub's own shows as "other", and no session title shows. Full size: [dark](docs/dashboard-dark.png), [light](docs/dashboard-light.png); at 1728 × 1117: [dark](docs/dashboard-large-dark.png), [light](docs/dashboard-large-light.png).
@@ -20,24 +20,24 @@ Standard-library Python 3.9+, no third-party dependencies. macOS on Apple silico
 
 Close-ups from the same run.
 
-<img src="docs/models-dark.png" alt="Loaded models card: qwen/qwen3.6-35b-a3b, two replicas with 4 slots each and 4 slots on the peer m4pro, all in use and colored by project; replica 1 at 75% and replica 2 at 93% of 150K tokens written; the peer at 41 ms round-trip time via Thunderbolt Bridge">
+<img src="docs/models-dark.png" alt="Loaded models card: qwen/qwen3.6-35b-a3b, two replicas with 4 slots each and 4 slots on the peer m4pro, every slot a memory module in its project's color; replica 1 at 24% and replica 2 at 16% of 150K tokens written; the peer at 41 ms round-trip time via Thunderbolt Bridge">
 
-**Loaded models:** one module per slot, in the color of the project using it. Each local replica's bar is its progress to the recycle threshold, by tokens processed or written since load, whichever is further along (here written: 75% and 93% of 150K). The peer's row gives its free slots for this gateway, its requests in flight from it and the link's round-trip time.
+**Loaded models:** one module per slot, in the color of the project using it. Each local replica's bar is its progress to the recycle threshold, by tokens processed or written since load, whichever is further along (here written: 24% and 16% of 150K, both recycled a few minutes earlier). The peer's row gives its free slots for this gateway, its requests in flight from it and the link's round-trip time.
 
-<img src="docs/concurrency-dark.png" alt="Concurrent requests by project over an hour: research, evals and docs fill 12 slots, with dips to 8 at recycles, this Mac's marked by dotted lines, while the queued line rises from 2 to 6">
+<img src="docs/concurrency-dark.png" alt="Concurrent requests by project over an hour: research, docs and evals fill 12 slots against the dashed slots line, with dips at four recycles marked by dotted lines and named in the legend, while the queued line rises from 2 to about 6">
 
-**Concurrent requests, by project,** over the demo hour: 12 in flight, 2 waiting. Dotted lines mark this Mac's recycles (the unmarked dip at 1:23 PM is the peer recycling its own instance): while a replica drains and reloads, 8 run and the rest wait in the gateway's queue (the light line). All 3,127 requests of the hour returned 200, 898 of them served by the peer.
+**Concurrent requests, by project,** over the demo hour: 12 in flight, 2 waiting. Dotted lines mark this Mac's four recycles (each replica twice, at 150K to 160K tokens written; the unmarked dips are the peer recycling its own instance): while a replica drains and reloads, 8 run and the rest wait in the gateway's queue (the light line). All 2,424 requests of the hour returned 200, 769 of them served by the peer.
 
 <p>
-  <img src="docs/tiles-1-dark.png" width="823" alt="Dashboard tiles: 12 of 12 slots active; 2 queued; 275 tokens/s in the last minute; 2,992 requests in the last hour from 3 projects"><br>
-  <img src="docs/tiles-2-dark.png" width="679" alt="Dashboard tiles: memory 149 of 176 GB (m5max 106 of 128, m4pro 43 of 48); SoC load GPU 100%, CPU 21%, m4pro GPU 99%, CPU 10%; 1 Claude Code session working, 2 idle">
+  <img src="docs/tiles-1-dark.png" width="819" alt="Dashboard tiles: 12 of 12 slots active, evals done at about 00:26; 2 queued, both batch; 179 tokens/s in the last minute; 2,530 requests in the last hour from 4 projects"><br>
+  <img src="docs/tiles-2-dark.png" width="675" alt="Dashboard tiles: memory 148 of 176 GB (m5max 105 of 128, m4pro 43 of 48); SoC load GPU 87%, CPU 77%, m4pro GPU 99%, CPU 8%; 1 Claude Code session working, 14 idle">
 </p>
 
 **Tiles:** requests in flight against every slot the gateway can use (local and peer), the admission queue, throughput, requests in the last hour, memory as one pool across both Macs, GPU and CPU load per Mac, and Claude Code sessions.
 
-<img src="docs/clients-dark.png" alt="Clients card: the docs batch, 2 active and 1 queued for 59 minutes, with batch and job progress bars at 1271 of 1305, 2 min left, done about 01:36 PM">
+<img src="docs/clients-dark.png" alt="Clients card: the evals, docs and research batches, each running for 58 minutes, each with its run on one line: answer grading 768 of 989, summaries 1018 of 1311 and consistency check 636 of 818, each about 18 minutes from done, finishing at about 00:25 to 00:26">
 
-**Clients:** each process with a request in flight or a lease, with its run's progress (`X-Run`) and its phase's (`X-Phase`, or `X-Step: <phase> N of M`), each with the remaining time and a finish time measured from the run's own throughput; a run in phases adds a strip with every phase, done, at work or to come, each with its estimate.
+**Clients:** each process with a request in flight or a lease, with its run's progress (`X-Run`) and its phase's (`X-Phase`, or `X-Step: <phase> N of M`) on a line each: a bar, done of total, the remaining time and a finish time measured from the run's own throughput. A phase about as large as the whole run (as here) is not repeated; a run declared in phases draws one segment per phase in its bar, and with more than one phase a line with each phase's estimate.
 
 ## Features
 
