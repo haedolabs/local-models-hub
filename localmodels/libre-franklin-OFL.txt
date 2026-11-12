@@ -1,0 +1,4 @@
+Libre Franklin
+Copyright 2012 The Libre Franklin Project Authors (https://github.com/impallari/Libre-Franklin)
+Licensed under the SIL Open Font License, Version 1.1, https://openfontlicense.org
+Latin subset, weights 400 and 500, served from this site as libre-franklin-400.woff2 and libre-franklin-500.woff2.

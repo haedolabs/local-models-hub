@@ -7,50 +7,61 @@
 <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 :root {
+  /* Haedo Labs' design language: near-black, off-white, the shared grey and
+     hairline, and sapphire, the one color. Every series is a step of sapphire (OKLab, its own hue, lighter or darker), ordered
+     so neighbours differ most; "other" is a neutral. No red: states are told apart by words and position first; color only
+     adds weight (warning in the shared beige-grey, critical in the strongest ink). The light theme is the same on paper. */
   color-scheme: light;
-  --plane: #e7eae6; --surface: #f4f6f3; --ink: #1e2823; --ink-2: #4a5a51; --muted: #76847b;
-  --grid: rgba(120,98,52,0.12); --axis: rgba(120,98,52,0.38); --ring: rgba(120,98,52,0.20); --hover: rgba(120,98,52,0.06); --track: #dde3dd;
-  --s1: #a5832e; --s2: #a86c42; --s3: #2f8a7c; --s4: #7c8a83; --s5: #9c8a52; --s6: #4b955a; --s7: #57809f; --s8: #7e7399;
-  --p1: #2e7d4f; --p2: #1a9e6e; --p3: #6a8f2a; --p4: #0f6e5c; --p5: #4c9f3c; --p6: #3c5a2e; --p7: #8aa83a;   /* projects: board greens */
-  --other: #9aa89f; --good: #3f9a62; --warning: #c09a3a; --serious: #c48a5e; --critical: #bf8059; --good-text: #2f7a4c;   /* no red: soft amber and apricot */
-  --gold: #a8863a; --silicon: #2b312e; --silk: rgba(30,40,35,0.38); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%237a6634' stroke-opacity='0.08' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%237a6634' fill-opacity='0.08'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
+  --plane: #ece7df; --surface: rgba(244,241,236,0.82); --ink: #111110; --ink-2: #4a4641; --muted: #6b665f;
+  --grid: rgba(17,17,16,0.08); --axis: rgba(17,17,16,0.30); --ring: rgba(17,17,16,0.14); --hover: rgba(17,17,16,0.05); --track: #dcd6cc;
+  --s1: #0d4eb1; --s2: #85a6db; --s3: #053784; --s4: #5e89d0; --s5: #366bc5; --s6: #a6bfe4; --s7: #0f52ba; --s8: #a39d93;
+  --p1: #0d4eb1; --p2: #85a6db; --p3: #053784; --p4: #5e89d0; --p5: #366bc5; --p6: #a6bfe4; --p7: #0f52ba;
+  --other: #b5afa5; --good: #0f52ba; --warning: #8a7466; --serious: #7a6a5f; --critical: #111110; --good-text: #0d4eb1;
+  --pin: #0f52ba; --die: #161615; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.35); --pcb: .2;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --plane: #0d1311; --surface: #131b17; --ink: #e2e6dc; --ink-2: #b3bdb2; --muted: #82908a;
-    --grid: rgba(214,180,96,0.09); --axis: rgba(214,180,96,0.30); --ring: rgba(214,180,96,0.17); --hover: rgba(214,180,96,0.06); --track: #1d2924;
-    --s1: #d6b460; --s2: #c88f62; --s3: #66b8a8; --s4: #aab4ae; --s5: #d8c48e; --s6: #7fc58c; --s7: #93b4cf; --s8: #b4a8c8;
-    --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
-    --other: #5f7468; --good: #86d39c; --warning: #e6c06c; --serious: #e2ad80; --critical: #e0a07a; --good-text: #93dcab;
-    --gold: #d6b460; --silicon: #1a201d; --silk: rgba(226,230,220,0.45); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%23d6b460' stroke-opacity='0.055' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%23d6b460' fill-opacity='0.055'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
+    --plane: #111110; --surface: rgba(22,22,21,0.8); --ink: #ece7df; --ink-2: #b5afa5; --muted: #8d867c;
+    --grid: rgba(236,231,223,0.07); --axis: rgba(236,231,223,0.26); --ring: #262522; --hover: rgba(236,231,223,0.05); --track: #242320;
+    --s1: #4578ce; --s2: #bad3f9; --s3: #0f52ba; --s4: #87ace8; --s5: #6692db; --s6: #ccdffe; --s7: #225ec0; --s8: #5e5a54;
+    --p1: #4578ce; --p2: #bad3f9; --p3: #0f52ba; --p4: #87ace8; --p5: #6692db; --p6: #ccdffe; --p7: #225ec0;
+    --other: #4a4743; --good: #87ace8; --warning: #bca496; --serious: #d4c3b6; --critical: #ece7df; --good-text: #a9c6f4;
+    --pin: #4578ce; --die: #0d0d0c; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.55); --pcb: .26;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --plane: #0d1311; --surface: #131b17; --ink: #e2e6dc; --ink-2: #b3bdb2; --muted: #82908a;
-  --grid: rgba(214,180,96,0.09); --axis: rgba(214,180,96,0.30); --ring: rgba(214,180,96,0.17); --hover: rgba(214,180,96,0.06); --track: #1d2924;
-  --s1: #d6b460; --s2: #c88f62; --s3: #66b8a8; --s4: #aab4ae; --s5: #d8c48e; --s6: #7fc58c; --s7: #93b4cf; --s8: #b4a8c8;
-  --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
-  --other: #5f7468; --good: #86d39c; --warning: #e6c06c; --serious: #e2ad80; --critical: #e0a07a; --good-text: #93dcab;
-  --gold: #d6b460; --silicon: #1a201d; --silk: rgba(226,230,220,0.45); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%23d6b460' stroke-opacity='0.055' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%23d6b460' fill-opacity='0.055'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
+  --plane: #111110; --surface: rgba(22,22,21,0.8); --ink: #ece7df; --ink-2: #b5afa5; --muted: #8d867c;
+  --grid: rgba(236,231,223,0.07); --axis: rgba(236,231,223,0.26); --ring: #262522; --hover: rgba(236,231,223,0.05); --track: #242320;
+  --s1: #4578ce; --s2: #bad3f9; --s3: #0f52ba; --s4: #87ace8; --s5: #6692db; --s6: #ccdffe; --s7: #225ec0; --s8: #5e5a54;
+  --p1: #4578ce; --p2: #bad3f9; --p3: #0f52ba; --p4: #87ace8; --p5: #6692db; --p6: #ccdffe; --p7: #225ec0;
+  --other: #4a4743; --good: #87ace8; --warning: #bca496; --serious: #d4c3b6; --critical: #ece7df; --good-text: #a9c6f4;
+  --pin: #4578ce; --die: #0d0d0c; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.55); --pcb: .26;
 }
+@font-face { font-family: "Libre Franklin"; font-weight: 400; font-display: swap; src: url("/libre-franklin-400.woff2") format("woff2"); }
+@font-face { font-family: "Libre Franklin"; font-weight: 500; font-display: swap; src: url("/libre-franklin-500.woff2") format("woff2"); }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--plane); color: var(--ink); height: 100%; }
-body { background-image: var(--traces); }   /* copper traces and vias, faint: the page is the board */
-body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+b, strong, th { font-weight: 500; }   /* the face has two weights, 400 and 500: nothing is drawn heavier */
+html, body { margin: 0; color: var(--ink); height: 100%; }
+html { background: var(--plane); } body { background: transparent; }   /* the ground on the page itself, so the board sits on it */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: var(--pcb);   /* a circuit board in sapphire (pcb.svg, */
+  background: url("/pcb.svg") 0 0 / 640px repeat; }                                                              /* tools/pcb.py: one tile, no seam), faint, behind everything */
+body { font: 13px/1.4 "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; overflow: hidden; }
 .wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
 @media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
 header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 20px; }
-h1 { font-size: 18px; font-weight: 600; margin: 0; }
-.sub { color: var(--ink-2); margin-left: 10px; }
+h1 { margin: 0; line-height: 0; }
+h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* the name drawn as outlines (HWT Unit Gothic), HUB in sapphire */
+.title { display: flex; align-items: center; gap: 14px; }
+.sub { color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
-.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px rgba(134,211,156,0.35); }   /* status LEDs */
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px var(--glow); }   /* status lights */
 .seg { display: inline-flex; background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 2px; }
 .seg button, .btn { font: inherit; border: 0; background: transparent; color: var(--ink-2); padding: 3px 10px; border-radius: 6px; cursor: pointer; }
 .seg button:hover, .btn:hover { background: var(--hover); }
-.seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--ring); }
+.seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--ring); }
 .btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
 #alerts:empty { display: none; }
 .kpis { display: flex; gap: 10px; }
@@ -61,19 +72,19 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .soc .socnums { min-width: 0; flex: 1; }
 @container soc (max-width: 175px) { .soc .pkg { width: 40px; height: 40px; padding: 4px; } .soc .die { padding: 2px; gap: 2px; } }
 @container soc (max-width: 157px) { .soc .pkg { display: none; } }
-.pkg { flex: none; width: 56px; height: 56px; padding: 5px; border-radius: 3px;   /* the chip: gold pins on four sides, the die inside */
+.pkg { flex: none; width: 56px; height: 56px; padding: 5px; border-radius: 3px;   /* the chip: fine pins on four sides, the die inside, in sapphire */
   background:
-    repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) top / 100% 3px no-repeat,
-    repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) bottom / 100% 3px no-repeat,
-    repeating-linear-gradient(0deg, var(--gold) 0 2px, transparent 2px 5px) left / 3px 100% no-repeat,
-    repeating-linear-gradient(0deg, var(--gold) 0 2px, transparent 2px 5px) right / 3px 100% no-repeat; }
-.die { width: 100%; height: 100%; border-radius: 3px; background: var(--silicon); padding: 3px; display: flex; flex-direction: column; gap: 3px;
-  box-shadow: inset 0 0 0 1px rgba(214,180,96,0.28); }
+    repeating-linear-gradient(90deg, var(--pin) 0 2px, transparent 2px 5px) top / 100% 3px no-repeat,
+    repeating-linear-gradient(90deg, var(--pin) 0 2px, transparent 2px 5px) bottom / 100% 3px no-repeat,
+    repeating-linear-gradient(0deg, var(--pin) 0 2px, transparent 2px 5px) left / 3px 100% no-repeat,
+    repeating-linear-gradient(0deg, var(--pin) 0 2px, transparent 2px 5px) right / 3px 100% no-repeat; }
+.die { width: 100%; height: 100%; border-radius: 3px; background: var(--die); padding: 3px; display: flex; flex-direction: column; gap: 3px;
+  box-shadow: inset 0 0 0 1px rgba(15,82,186,0.55); }
 .cores { display: grid; gap: 1.5px; }
 .cores.cpu { grid-template-columns: repeat(6, 1fr); }                 /* each CPU core lit by its own load */
 .cores.gpu { grid-template-columns: repeat(8, 1fr); flex: 1; }        /* the GPU's cores, lit by its utilization */
-.cores i { display: block; aspect-ratio: 1; border-radius: 1px; background: rgba(214,180,96, var(--u, .12)); transition: background-color 1.2s ease; }
-.cores.gpu i { aspect-ratio: auto; background: rgba(102,184,168, var(--u, .12)); }
+.cores i { display: block; aspect-ratio: 1; border-radius: 1px; background: rgba(var(--core), var(--u, .12)); transition: background-color 1.2s ease; }
+.cores.gpu i { aspect-ratio: auto; background: rgba(var(--gpu), var(--u, .12)); }
 .cores.gpu.busy i { animation: breathe 3.6s ease-in-out infinite; }   /* hard at work: a slow, soft glow */
 @keyframes breathe { 50% { filter: brightness(1.16); } }
 @media (prefers-reduced-motion: reduce) { .cores.gpu.busy i { animation: none; } }
@@ -81,20 +92,14 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .row.a { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
 .row.b { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .row.c { grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 4fr); }
-.card { background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
-.card::before { content: ''; position: absolute; inset: 5px; pointer-events: none; opacity: .55;   /* silkscreen corner marks */
-  background:
-    linear-gradient(var(--silk), var(--silk)) left top / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) left top / 1px 9px no-repeat,
-    linear-gradient(var(--silk), var(--silk)) right top / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) right top / 1px 9px no-repeat,
-    linear-gradient(var(--silk), var(--silk)) left bottom / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) left bottom / 1px 9px no-repeat,
-    linear-gradient(var(--silk), var(--silk)) right bottom / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) right bottom / 1px 9px no-repeat; }
-.card h2 { font: 600 13px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; margin: 0; flex: none; }   /* silkscreen */
+.card { background: var(--surface); border-radius: 4px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
+.card h2 { font: 500 11px/1.5 "Libre Franklin", system-ui, sans-serif; text-transform: uppercase; letter-spacing: .2em; margin: 0; flex: none; }   /* small tracked capitals */
 .card .hint { color: var(--muted); font-size: 11.5px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }   /* only the body gives way */
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex: none; }
 .card .body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .tile { padding: 8px 12px; }
-.tile .label { color: var(--ink-2); font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; white-space: nowrap; }
-.tile .value { font-size: 22px; font-weight: 600; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, always */
+.tile .label { color: var(--muted); font: 500 10.5px/1.5 "Libre Franklin", system-ui, sans-serif; text-transform: uppercase; letter-spacing: .2em; white-space: nowrap; }
+.tile .value { font-size: 22px; font-weight: 400; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, always */
 .tile .minor { color: var(--ink-2); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile .value small { font-size: 12px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
 .tile .foot { color: var(--muted); font-size: 11.5px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -113,11 +118,11 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 #recent td > div { overflow: hidden; text-overflow: ellipsis; }
 .fam-note { color: var(--ink-2); font-size: 11.5px; margin-bottom: calc(6px * var(--mk, 1)); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
-svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
+svg text { font: 10.5px "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
 #models-body { --mk: 1; padding-top: var(--lead, 0px); }   /* fitModels(): --mk scales the boxes, spacing and bars; text keeps its size */
 .fam { margin-bottom: calc(8px * var(--mk, 1) + var(--gap, 0px)); }
 .fam:last-child { margin-bottom: 0; }
-.fam-name { font-weight: 600; }
+.fam-name { font-weight: 500; }
 .fam-meta { color: var(--ink-2); font-size: 11.5px; }
 .copy { display: grid; grid-template-columns: 62px minmax(0, 1fr) var(--right, auto); align-items: center; gap: calc(4px * var(--mk, 1)) calc(10px * var(--mk, 1)); margin-top: calc(6px * var(--mk, 1)); }
 .copy + .copy { margin-top: calc(6px * var(--mk, 1) + var(--gap, 0px)); }        /* room left over goes between rows, not under the name */
@@ -132,32 +137,19 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 .slots { display: flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); min-width: 0; }   /* the modules share the row's free width */
 #models-body.compact .slots { display: inline-flex; }
 #models-body.compact .slot { flex: none; width: calc(30px * var(--mk, 1)); }
-.slot {                    /* a slot as a memory module: the board (gray when free, the project's color when active), its chips, */
-  position: relative; overflow: hidden;      /* and gold contacts along the bottom edge, broken by the key notch */
-  flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
-  border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px;
-  background-color: var(--track);
-  background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .16) 0 9%, transparent 9% 12.5%);    /* eight chips */
-  background-size: 86% 40%; background-position: 50% 48%; background-repeat: no-repeat;
-  -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
-          mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
+.slot {                    /* a slot: a module, the track's color when free, the project's color when in use */
+  position: relative; overflow: hidden;
+  flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(10px * var(--mk, 1));
+  border-radius: calc(2px * var(--mk, 1)); background-color: var(--track);
 }
-.slot.on {                 /* in use: the board in the project's color (a shade of green; the legend names it) */
-  background-color: var(--board);
-  background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .34) 0 9%, transparent 9% 12.5%);
-}
-.slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
-  background: repeating-linear-gradient(90deg, var(--gold) 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
-.slot:not(.on)::after { opacity: .45; }
+.slot.on { background-color: var(--board); }
 .slot.on::before {         /* in use: a soft light runs along the module and its contacts brighten; the phase follows the clock */
   content: ''; position: absolute; top: 0; bottom: 0; left: -45%; width: 45%;      /* (slotEl), so a refresh never restarts it */
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .17), transparent);
   animation: current 4s ease-in-out var(--d, 0s) infinite;
 }
-.slot.on::after { animation: contacts 4s ease-in-out var(--d, 0s) infinite; }
 @keyframes current { 0% { transform: translateX(0); opacity: 0; } 12% { opacity: 1; } 60% { transform: translateX(322%); opacity: 1; } 70%, 100% { transform: translateX(322%); opacity: 0; } }
-@keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.22); } }
-@media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .slot.on::before { animation: none; } }
 .copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .bandpct { display: none; }
 #models-body.tight .band, #models-body.tight .band-end { display: none; }
@@ -169,17 +161,17 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 .band .bar > div { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; background: var(--s1); }
 .band .bar > i { position: absolute; top: calc(-2px * var(--mk, 1)); width: 1px; height: calc(8px * var(--mk, 1)); background: var(--axis); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { text-align: left; font-weight: 500; color: var(--ink-2); font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 td { padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.sub { padding-left: 28px; color: var(--ink-2); }
 td.sub.prog { padding-top: 0; padding-bottom: 3px; }
 .badge { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; font-size: 11.5px; box-shadow: 0 0 0 1px var(--ring); color: var(--ink-2); white-space: nowrap; }
-.badge.warn::before { content: "!"; font-weight: 700; color: var(--critical); }
+.badge.warn::before { content: "!"; font-weight: 500; color: var(--critical); }
 .badge.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
-.badge.down::before { content: "!"; font-weight: 700; color: var(--critical); }
-.badge.cycle::before { content: "↻"; font-weight: 700; color: var(--warning); }
+.badge.down::before { content: "!"; font-weight: 500; color: var(--critical); }
+.badge.cycle::before { content: "↻"; font-weight: 500; color: var(--warning); }
 .muted { color: var(--muted); }
 .ink2 { color: var(--ink-2); }
 .empty { color: var(--muted); padding: 6px 0; }
@@ -193,30 +185,30 @@ td.sub.prog { padding-top: 0; padding-bottom: 3px; }
 .segbar { display: flex; gap: 3px; height: 6px; margin: 2px 0 3px; }
 .segbar > div { position: relative; min-width: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
 .segbar > div > div { height: 100%; background: var(--s1); }
-.segbar > div.running { box-shadow: 0 0 0 1px var(--gold); }
+.segbar > div.running { box-shadow: 0 0 0 1px var(--s1); }
 .segbar > div.waiting > div { opacity: 0.55; }
 .phwords { display: flex; flex-wrap: wrap; gap: 2px 14px; }
 .phwords .done { color: var(--muted); }
 .chart { position: relative; flex: 1 1 auto; min-height: 60px; }
 .chart > svg { display: block; }                                    /* no inline baseline gap under the chart */
 .tablebox { max-height: 100%; overflow: hidden; }
-#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--plane); color: var(--ink); border-radius: 4px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
 #tip .t { color: var(--muted); margin-bottom: 4px; }
 #tip .r { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
-#tip .r b { font-weight: 600; font-variant-numeric: tabular-nums; }
+#tip .r b { font-weight: 500; font-variant-numeric: tabular-nums; }
 #tip .r span { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
 .offline { opacity: 0.45; transition: opacity .2s; }
-#banner { display: none; padding: 8px 14px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
+#banner { display: none; padding: 8px 14px; border-radius: 4px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
 #banner b { color: var(--critical); }
-.alert { display: flex; gap: 10px; align-items: flex-start; padding: 7px 14px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); margin-bottom: 6px; }
+.alert { display: flex; gap: 10px; align-items: flex-start; padding: 7px 14px; border-radius: 4px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); margin-bottom: 6px; }
 .alert:last-child { margin-bottom: 0; }
-.alert .ico { flex: none; width: 18px; height: 18px; border-radius: 50%; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; color: #fff; }
+.alert .ico { flex: none; width: 18px; height: 18px; border-radius: 50%; font-weight: 500; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; color: var(--plane); }
 .alert.critical .ico { background: var(--critical); }
-.alert.warning .ico { background: var(--warning); color: #0b0b0b; }
-.alert.info .ico { background: var(--s1); }
+.alert.warning .ico { background: var(--warning); }
+.alert.info .ico { background: var(--s1); color: #ece7df; }
 .alert code, .crash-then code { font-size: 12px; }
 footer { color: var(--muted); font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; justify-content: space-between; }
-footer b { color: var(--ink-2); font-weight: 600; }
+footer b { color: var(--ink-2); font-weight: 500; }
 #about { margin-left: auto; text-align: right; white-space: nowrap; }
 #about a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
 #about a:hover { color: var(--ink-2); }
@@ -225,7 +217,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
 <body>
 <div class="wrap">
   <header>
-    <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
+    <div class="title"><h1><svg xmlns="http://www.w3.org/2000/svg" viewBox="7 -69 1491 72" role="img" aria-label="__HUB_NAME__"><title>__HUB_NAME__</title><path class="a" fill="currentColor" d="M90.5 -15.2L35.4 -15.2L35.4 -66.8L8.4 -66.8L8.4 0L90.5 0ZM146.9 -67.9C123.6 -67.9 102.9 -58.5 102.9 -33.4C102.9 -8.3 123.6 1.1 146.9 1.1C170.2 1.1 189.8 -8.3 189.8 -33.4C189.8 -58.5 170.2 -67.9 146.9 -67.9ZM146.9 -14.3C136.9 -14.3 131.7 -19.7 131.7 -30.4L131.7 -36.4C131.7 -47.1 136.9 -52.5 146.9 -52.5C157 -52.5 162.2 -47 162.2 -36.4L162.2 -30.4C162.2 -19.8 157 -14.3 146.9 -14.3ZM234.7 -33.4C234.7 -46.4 241.3 -52.7 253.3 -52.7C263.5 -52.7 271.6 -49.3 277.1 -45L289 -61.2C280.8 -65.7 266.8 -67.9 251 -67.9C224.7 -67.9 206 -55.3 206 -33.4C206 -11.8 224.3 1.1 250 1.1C265.8 1.1 281.9 -1.1 290.1 -5.6L278.2 -21.8C272.7 -17.5 263.2 -14.1 253 -14.1C241.3 -14.1 234.7 -20.1 234.7 -33.4ZM325.3 0L328.6 -7.6L356 -7.6L359.2 0L386 0L357.6 -66.8L330.6 -66.8L300.9 0ZM342.4 -39.4L342.8 -39.4L349.9 -22.4L335 -22.4ZM482.5 -15.2L427.4 -15.2L427.4 -66.8L400.4 -66.8L400.4 0L482.5 0ZM609.7 -66.8L594.4 -36.2L579.3 -66.8L536.5 -66.8L536.5 0L559 0L559 -47.4L583.5 0L600.5 0L623.7 -46.7L623.7 0L650.7 0L650.7 -66.8ZM713.1 -67.9C689.8 -67.9 669.1 -58.5 669.1 -33.4C669.1 -8.3 689.8 1.1 713.1 1.1C736.4 1.1 756 -8.3 756 -33.4C756 -58.5 736.4 -67.9 713.1 -67.9ZM713.1 -14.3C703.1 -14.3 697.9 -19.7 697.9 -30.4L697.9 -36.4C697.9 -47.1 703.1 -52.5 713.1 -52.5C723.2 -52.5 728.4 -47 728.4 -36.4L728.4 -30.4C728.4 -19.8 723.2 -14.3 713.1 -14.3ZM821.3 0C841.6 0 858.6 -13.6 858.6 -33.4C858.6 -53.2 841.9 -66.8 821.6 -66.8L774.5 -66.8L774.5 0ZM815.2 -51.6C823.8 -51.6 829.9 -44 829.9 -33.4C829.9 -22.8 823.8 -15.2 815.6 -15.2L801.5 -15.2L801.5 -51.6ZM959.1 -15.2L904 -15.2L904 -26.3L943.5 -26.3L943.5 -41.3L904 -41.3L904 -51.6L958.4 -51.6L958.4 -66.8L877 -66.8L877 0L959.1 0ZM1058.6 -15.2L1003.5 -15.2L1003.5 -66.8L976.5 -66.8L976.5 0L1058.6 0ZM1075.6 -45.4C1075.6 -31.3 1087.1 -24 1109.5 -24L1120.7 -24C1125.6 -24 1127.7 -21.9 1127.7 -19.4C1127.7 -16.3 1125.5 -14.6 1119.2 -14.6L1109.6 -14.6C1097.5 -14.6 1089.1 -17 1082.2 -21.4L1072.7 -5.3C1083.9 -1.1 1095.8 1 1107.2 1L1122.8 1C1143.6 1 1153.4 -9.4 1153.4 -22.1C1153.4 -34.8 1144.7 -44 1127.6 -44L1107 -44C1102.8 -44 1100.5 -45.3 1100.5 -48.1C1100.5 -51 1102.8 -52.3 1107.6 -52.3L1116.7 -52.3C1126 -52.3 1134.4 -50.8 1141.4 -47.8L1148.9 -62.3C1142.9 -65.5 1130.9 -67.8 1119.4 -67.8L1104.7 -67.8C1086.8 -67.8 1075.6 -58.5 1075.6 -45.4Z"/><path class="h" fill="#0f52ba" d="M1208.5 -66.8L1208.5 0L1235.5 0L1235.5 -26.3L1265.1 -26.3L1265.1 0L1292.1 0L1292.1 -66.8L1265.1 -66.8L1265.1 -41.3L1235.5 -41.3L1235.5 -66.8ZM1310.6 -33.4C1310.6 -7.2 1330.6 1.1 1352.7 1.1C1374.8 1.1 1393.7 -7.2 1393.7 -33.4L1393.7 -66.8L1367.9 -66.8L1367.9 -30.4C1367.9 -19.8 1362.8 -14.3 1352.7 -14.3C1342.7 -14.3 1337.6 -19.7 1337.6 -30.4L1337.6 -66.8L1310.6 -66.8ZM1496.3 -16.9C1496.3 -24.8 1490.2 -31.2 1478.7 -33.4L1478.7 -33.8C1489 -36 1493.8 -42.8 1493.8 -49.9C1493.8 -61.8 1482.5 -66.8 1464.5 -66.8L1412.2 -66.8L1412.2 0L1467 0C1485.5 0 1496.3 -5.2 1496.3 -16.9ZM1465.1 -46.5C1465.1 -43.6 1462.9 -41.3 1458.2 -41.3L1439.2 -41.3L1439.2 -51.6L1457.8 -51.6C1463 -51.6 1465.1 -49.4 1465.1 -46.5ZM1467.6 -20.8C1467.6 -17.9 1465.5 -15.2 1460.3 -15.2L1439.2 -15.2L1439.2 -26.3L1460.4 -26.3C1465.5 -26.3 1467.6 -23.5 1467.6 -20.8Z"/></svg></h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
     <div class="chips"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
       <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><button class="btn" id="power" style="display:none"></button><span id="peer-power"></span><span id="clock" class="muted"></span>
@@ -247,7 +239,7 @@ footer b { color: var(--ink-2); font-weight: 600; }
   </section>
 
   <section class="row a">
-    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one module per slot (in use: the project's green); bar: tokens processed since load against the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
+    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one module per slot (in use: the project's color); bar: tokens processed since load against the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
     <article class="card"><div class="card-head"><div><h2>Concurrent requests, by project</h2><div class="hint" id="ans-hint">top line: total slots across loaded instances; right edge: now</div></div><button class="btn" data-table="ans">table</button></div>
       <div class="legend" id="ans-legend"></div><div class="chart" id="ans"></div></article>
   </section>
@@ -303,7 +295,7 @@ function sv(tag, attrs) { const e = document.createElementNS(NS, tag); for (cons
 function color(project) {
   if (project === 'direct to LM Studio') return 'var(--other)';
   const slot = COLORS[project];
-  return slot ? `var(--p${slot})` : 'var(--other)';         // projects: a palette of greens, each a plausible module board (blue is "all projects")
+  return slot ? `var(--p${slot})` : 'var(--other)';         // projects: steps of sapphire, neighbours apart ("other" is a neutral)
 }
 function compact(n) { n = +n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'K' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n)); }
 function full(n) { return Math.round(+n || 0).toLocaleString(); }

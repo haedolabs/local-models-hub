@@ -254,6 +254,11 @@ def sampler():
         time.sleep(15)
 
 
+def asset(name):
+    """A file shipped beside the page, as bytes: the typeface (Libre Franklin, SIL OFL: libre-franklin-OFL.txt) or the board behind it."""
+    return open(os.path.join(os.path.dirname(PAGE), name), 'rb').read()
+
+
 def page():
     try: return open(PAGE, 'rb').read().replace(b'__HUB_NAME__', NAME.encode())     # one name, from the package
     except OSError: return b'<p>dash.html is missing from the installed code (localmodels install)</p>'

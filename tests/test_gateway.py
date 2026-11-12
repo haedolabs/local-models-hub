@@ -7,7 +7,7 @@ before batches in the queue, a chunked request body, a route with a trailing sla
 LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
 loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_gateway.py
 """
-import http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
+import http.server, json, os, re, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
@@ -594,8 +594,14 @@ def run(box):
           and [struct.unpack('>II', got[p][2][16:24]) for p in ('/favicon.ico', '/apple-touch-icon.png')] == [(64, 64), (180, 180)], {p: v[:2] for p, v in got.items()})
         d = got['/favicon.png'][2]
         t('its die is sapphire, its corner is transparent', pixel(d, 32, 32) == die + (255,) and pixel(d, 0, 0)[3] == 0, (pixel(d, 32, 32), pixel(d, 0, 0)))
+        fonts = {f: fetch(f) for f in ('/libre-franklin-400.woff2', '/libre-franklin-500.woff2')}
+        t('the typeface of the page answers as WOFF2 from the gateway itself, both weights',
+          all(c == 200 and ct == 'font/woff2' and d[:4] == b'wOF2' for c, ct, d in fonts.values()), {f: v[:2] for f, v in fonts.items()})
+        board = fetch('/pcb.svg')
+        t('so does the circuit board behind it, as SVG', board[0] == 200 and board[1] == 'image/svg+xml' and board[2].lstrip().startswith(b'<svg'), board[:2])
         page = urllib.request.urlopen(url + '/', timeout=10).read()
         t('the page links it (tab, bookmarks, favorites)', b'rel="icon" type="image/png" sizes="64x64" href="/favicon.png"' in page and b'rel="apple-touch-icon"' in page)
+        t('the page asks for nothing from another site', not re.search(rb'(?:src|href)="https?://(?!localhost)|url\("?https?://', page.replace(b'https://haedolabs.com', b'')), re.findall(rb'https?://[^"\' )]+', page)[:5])
 
         print('the demo: generic batches through the gateway, made-up records, every request named')
         from localmodels import demo
