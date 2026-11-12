@@ -849,7 +849,7 @@ def test_maintenance(box):
 def test_switch_off(box):
     print('switched off: requests refused, every instance unloaded once idle, nothing loaded or started, then on again')
     from localmodels import llmshare as L, maint, models
-    maint.OFF = os.path.join(box, 'off.json')
+    maint.OFF, maint.SWITCHING = os.path.join(box, 'off.json'), os.path.join(box, 'switching.json')
     real = (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
             models.server_up, crashes.MISS, L.SWAP_LOCK, L.read_ok, L.inflight, L.swap_blockers)
     L.read_ok = lambda: True
@@ -884,6 +884,7 @@ def test_switch_off(box):
       code == 200 and m['off'] and m['phase'] == 'on' and maint.on() and maint.retry_after(m) == maint.OFF_RETRY
       and maint.header(m).startswith('on') and 'switched off' in maint.words(m) and maint.read()['before'] == [B], (code, m))
     t('the Claude Code hook stays silent while switched off', maint.notice() == '')
+    t('the screens see the switch-off under way, with the requests it waits for', maint.view()['inflight'] == 1 and not maint.view()['unloaded'], maint.view())
     words = models.keep()
     t('a request in flight: nothing unloaded yet, and it says so', not unloads and any('waiting for 1 request' in w for w in words), words)
     flight.clear()
@@ -897,7 +898,16 @@ def test_switch_off(box):
     models.keep(); time.sleep(0.4); words = models.keep()
     t('an instance that goes away while off is not reloaded as a crash', not loads and not starts, (loads, words))
     t('switching off twice keeps the first record', models.switch_off()[1].get('note') == 'already switched off')
+    seen = {}
+    def watch_load(key, ident, context, parallel):
+        seen['during'] = maint.switching(); return fake_load(key, ident, context, parallel)
+    models.load = watch_load
     words = models.switch_on()
+    models.load = fake_load
+    sw = maint.switching()
+    t('the screens see the switch-on: loading (with its families) while it loads, then done and ok with what came of it',
+      (seen.get('during') or {}).get('phase') == 'loading' and seen['during']['families'] == [B] and sw and sw['phase'] == 'done' and sw['ok'] and 'loaded' in sw['words'], (seen, sw))
+    t('the outcome is shown for a while, then no more', maint.switching(now=time.time() + maint.SHOWN_FOR + 1) is None)
     t('on: the record goes, the families loaded before are loaded (first replica), the server started first',
       maint.switched_off() is None and maint.read() is None and loads == [B] and starts and any('switched on' in w for w in words), (loads, words))
     crashes_after = sum(1 for l in open(crashes.RECORD) if '"crash"' in l) if os.path.exists(crashes.RECORD) else 0

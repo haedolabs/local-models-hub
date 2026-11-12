@@ -145,6 +145,8 @@ def _snapshot():
     out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
     except Exception as e: out['maintenance'] = None; errors.record('snapshot: maintenance', e)
+    try: out['switching'] = maint.switching()
+    except Exception as e: out['switching'] = None; errors.record('snapshot: switching', e)
     try:                                          # this Mac's peers (each one's state, the link, the families it serves) and this Mac as a peer
         out['peers'] = peers.view()
         for p in out['peers']:

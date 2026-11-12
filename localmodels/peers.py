@@ -544,7 +544,7 @@ def report(front=None):
     except Exception as e: mem = None; errors.record('peer report: memory', e)
     try: chip = {k: v for k, v in dash.every('soc', 2, dash.soc).items() if k != 'cpu'}   # the front shows this host's chip at work
     except Exception as e: chip = None; errors.record('peer report: soc', e)
-    return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
+    return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(), switching=maint.switching(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
                 keeper=keeper, memory=mem, soc=chip)
 
@@ -768,7 +768,7 @@ class Link:
                          rtt_ms=round(p.rtt * 1000, 1) if p.rtt is not None else None, route=dict(interface=p.route[0], port=p.route[1]),
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
                          address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, since=round(p.since, 1), families=fams,
-                         maintenance=rep.get('maintenance'), off=bool((rep.get('maintenance') or {}).get('off')) if p.state == 'maintenance' else False, keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
+                         maintenance=rep.get('maintenance'), switching=rep.get('switching') if p.state in ('up', 'maintenance') else None, off=bool((rep.get('maintenance') or {}).get('off')) if p.state == 'maintenance' else False, keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
                          memory=rep.get('memory') if p.state in ('up', 'maintenance') else None,
                          soc=rep.get('soc') if p.state in ('up', 'maintenance') else None)
                 d['words'] = words(d)
