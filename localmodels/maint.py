@@ -26,6 +26,8 @@ from . import llmshare
 
 FILE = os.path.join(llmshare.SHARED, 'maintenance.json')
 OFF = os.path.join(llmshare.SHARED, 'off.json')
+SWITCHING = os.path.join(llmshare.SHARED, 'switching.json')   # a switch-on under way, then its outcome for SHOWN_FOR seconds
+SHOWN_FOR = 120
 QUIET_FOR = 120          # "after the batches": no batch request for this long, then it starts
 OFF_RETRY = 300          # Retry-After while switched off: there is no scheduled end
 _cache = {'mtime': None, 'rec': None}
@@ -75,6 +77,33 @@ def switch_on():
     except OSError: pass
     _off_cache['mtime'] = None
     return rec
+
+
+def on_started(families, now=None):
+    """A switch-on began loading `families` (models.switch_on): the screens show it under way until on_done."""
+    _write(dict(v=1, at=now or time.time(), pid=os.getpid(), families=sorted(families or []), done=None, ok=None, words=''), SWITCHING)
+
+
+def on_done(ok, words=''):
+    rec = _switching_raw()
+    if rec: _write(dict(rec, done=time.time(), ok=bool(ok), words=str(words)[:300]), SWITCHING)
+
+
+def _switching_raw():
+    try: rec = json.load(open(SWITCHING))
+    except (OSError, ValueError): return None
+    return rec if isinstance(rec, dict) and rec.get('at') else None
+
+
+def switching(now=None):
+    """The switch-on the screens show: {at, families, done, ok, words, phase}; phase 'loading' while it runs, 'done' for
+    SHOWN_FOR seconds after it ends; None otherwise, and when the process that ran it died mid-way."""
+    rec, now = _switching_raw(), now or time.time()
+    if not rec: return None
+    if rec.get('done'): return dict(rec, phase='done') if now - rec['done'] < SHOWN_FOR else None
+    try: os.kill(int(rec.get('pid') or 0), 0); alive = bool(rec.get('pid'))
+    except (OSError, ValueError): alive = False
+    return dict(rec, phase='loading') if alive and now - rec['at'] < 1800 else None
 
 
 def _raw():
@@ -198,7 +227,8 @@ def view(now=None):
     """What the screens show: {phase, start, end, minutes, why, words}, or None."""
     m = read(now=now)
     return dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), minutes=m['minutes'], why=m.get('why'), words=words(m, now),
-                off=bool(m.get('off')), unloaded=m.get('unloaded')) if m else None
+                off=bool(m.get('off')), unloaded=m.get('unloaded'),
+                inflight=len(llmshare.inflight()) if m.get('off') and not m.get('unloaded') else None) if m else None
 
 
 def notice(now=None):

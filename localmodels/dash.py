@@ -375,7 +375,7 @@ def snapshot():
     from . import peers
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
                 last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
-                maintenance=maint.view(), peers=peers.view(), pool=pool())
+                maintenance=maint.view(), switching=maint.switching(), peers=peers.view(), pool=pool())
 
 
 def crash_view():

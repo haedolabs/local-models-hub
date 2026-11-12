@@ -487,7 +487,13 @@ def switch_on():
         crashes.after_maintenance(rows)
         maint.switch_on()
     fams = list(rec.get('before') or (llmshare.settings().get('families') or {}).keys())
-    return ['switched on: requests are admitted and the instance manager resumes'] + _load_back(fams, {r['id'] for r in rows}, 'switch-off')
+    maint.on_started([b for b in fams if b not in {r['id'] for r in rows}])
+    did = []
+    try: did = _load_back(fams, {r['id'] for r in rows}, 'switch-off')
+    finally:
+        bad = [w for w in did if 'failed' in w or 'manually' in w or 'not in settings' in w]
+        maint.on_done(not bad, '; '.join(bad) if bad else (lambda n: f"{n} instance{'s' if n != 1 else ''} loaded; the instance manager adds the other replicas")(len(llmshare.loaded(fresh=True))))
+    return ['switched on: requests are admitted and the instance manager resumes'] + did
 
 
 def _again(job, room):

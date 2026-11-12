@@ -73,6 +73,23 @@ h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* th
 .seg button:hover, .btn:hover { background: var(--hover); }
 .seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--ring); }
 .btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
+.seg button:active, .btn:active { background: var(--ring); }                       /* a press shows at once, before any answer */
+.seg button:focus-visible, .btn:focus-visible, #accent:focus-visible { outline: 2px solid var(--pin); outline-offset: 1px; }
+.btn:disabled { cursor: default; }
+.btn.busy { cursor: progress; color: var(--ink); position: relative; overflow: hidden; }   /* an action under way: a slow light along it */
+.btn.busy::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--glow), transparent);
+  transform: translateX(-100%); animation: sweep 2.4s ease-in-out infinite; pointer-events: none; }
+@keyframes sweep { to { transform: translateX(100%); } }
+.act-say { font-size: 12px; color: var(--ink-2); max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity .6s; }
+.act-say:empty { display: none; }
+.act-say .said { display: inline-flex; align-items: center; gap: 6px; }
+.act-say .said + .said::before { content: "·"; margin-right: 6px; color: var(--muted); }
+.act-say i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+.act-say .busy i { background: var(--pin); animation: breathe 1.6s ease-in-out infinite; box-shadow: 0 0 6px var(--glow); }
+.act-say .done i { background: var(--good); box-shadow: 0 0 6px var(--glow); }
+.act-say .fail { color: var(--ink); } .act-say .fail i { background: var(--warning); }
+.act-say .fading { opacity: 0; transition: opacity .8s; }
+@media (prefers-reduced-motion: reduce) { .btn.busy::after, .act-say .busy i { animation: none; } .act-say .fading { transition: none; } }
 #alerts:empty { display: none; }
 .kpis { display: flex; gap: 10px; }
 .kpis > .card { flex: 1 1 0; min-width: 0; }
@@ -249,7 +266,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
     <div class="h-status"><span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span></div>
     <div class="h-view"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div></div>
-    <div class="h-actions"><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><button class="btn act" id="power" style="display:none"></button><span id="peer-power" style="display:contents"></span></div>
+    <div class="h-actions"><span class="act-say" id="act-say" role="status" aria-live="polite"></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><button class="btn act" id="power" style="display:none"></button><span id="peer-power" style="display:contents"></span></div>
   </header>
   <div>
     <div id="banner"><b>Gateway unreachable.</b> <span class="ink2">Start it with <code>localmodels start</code>; this page reconnects automatically.</span></div>
@@ -641,27 +658,19 @@ function renderNow() {
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
   if (mt) { mc.querySelector('span').textContent = mt.off ? mt.words.replace(/; turn on: localmodels on$/, '') : mt.words; mc.querySelector('i').style.background = mt.off ? 'var(--other)' : mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
-  const pw = $('power'), off = !!(mt && mt.off);
+  const pw = $('power');                                 // this Mac's local models off or on (POST /hub/off, /hub/on)
   pw.style.display = '';
-  if (!pw.disabled) {
-    pw.textContent = off ? 'turn models on' : 'turn models off';
-    pw.dataset.off = off ? '1' : '';
-    pw.title = off ? 'Load the families that were loaded when switched off (POST /hub/on); the instance manager adds the other replicas'
-      : 'Unload every instance once the requests in flight finish; until turned on, requests get 503 and nothing is loaded, reloaded or started (POST /hub/off)';
-  }
+  powerButton(pw, 'here', mt, S.switching, '', 'turn models');
   const pp = $('peer-power');                           // each peer's local models off or on from here (POST /hub/link/off, /hub/link/on)
   for (const p of ps) {
     let b = pp.querySelector(`[data-peer="${CSS.escape(p.name)}"]`);
-    const show = p.state === 'up' || !!p.off;
-    if (!show) { if (b && !b.disabled) b.remove(); continue; }
+    const show = p.state === 'up' || !!p.off || !!pend['peer:' + p.name] || !!(b && b.classList.contains('busy'));
+    if (!show) { if (b) b.remove(); continue; }
     if (!b) { b = el('button', {class: 'btn act'}); b.dataset.peer = p.name; pp.appendChild(b); }
-    if (b.disabled) continue;
-    b.textContent = p.off ? `turn ${p.name} on` : `turn ${p.name} off`;
-    b.dataset.off = p.off ? '1' : '';
-    b.title = p.off ? `Switch on peer ${p.name}'s local models: it loads the families loaded when switched off, and this gateway routes to it again (POST /hub/link/on)`
-      : `Switch off peer ${p.name}'s local models: it unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there (POST /hub/link/off)`;
+    powerButton(b, 'peer:' + p.name, p.maintenance, p.switching, p.name, `turn ${p.name}`);
   }
   for (const b of [...pp.children]) if (!ps.some(p => p.name === b.dataset.peer)) b.remove();
+  renderSaid();
   // stat tiles
   const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
   let busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
@@ -1081,41 +1090,106 @@ document.addEventListener('click', ev => {
 });
 const THEMES = ['auto', 'light', 'dark'];
 function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; }
-$('poll-now').addEventListener('click', async () => {          // the gateway looks at every peer at once, then the page reads it
-  const b = $('poll-now'); b.disabled = true; b.textContent = 'polling…';
-  try { await fetch('/hub/link', {method: 'POST'}); } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
-  finally { b.disabled = false; b.textContent = 'poll now'; tickNow(); }
-});
-$('power').addEventListener('click', async () => {             // switch the local models off or on; the next snapshot shows the state
-  const b = $('power'), on = b.dataset.off === '1';
-  if (!on && !confirm("Switch this Mac's local models off?\nEvery instance is unloaded once the requests in flight finish; until turned on, requests here get 503 and nothing is loaded.")) return;
-  b.disabled = true; b.textContent = on ? 'turning on…' : 'turning off…';
-  try {
-    let r = await fetch(on ? '/hub/on' : '/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-    if (r.status === 409) {
-      const j = await r.json();
-      if (confirm(`In use: ${(j.blockers || []).join('; ')}.\nSwitch the local models off anyway?`))
-        r = await fetch('/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{"force": true}'});
-    } else if (!r.ok) { const j = await r.json().catch(() => ({})); alert(`Nothing switched ${on ? 'on' : 'off'}: ${j.error || 'HTTP ' + r.status}`); }
-  } catch (e) { /* not recorded: the next snapshot says whether the gateway answers */ }
-  finally { b.disabled = false; tickNow(); }
-});
-$('peer-power').addEventListener('click', async ev => {     // a peer's local models off or on; the next snapshot shows its state
-  const b = ev.target.closest('button[data-peer]');
-  if (!b || b.disabled) return;
-  const name = b.dataset.peer, on = b.dataset.off === '1', post = body => fetch(on ? '/hub/link/on' : '/hub/link/off',
-    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({peer: name}, body))});
-  if (!on && !confirm(`Switch peer ${name}'s local models off?\nIt unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there.`)) return;
-  b.disabled = true; b.textContent = on ? `turning ${name} on…` : `turning ${name} off…`;
+// ---- actions that change the hub: a press shows at once; the button then follows the gateway's own state (the snapshot,
+// every 2 s) until the change is done, so it is never offered again mid-way; the words beside the buttons say what is
+// happening, then what came of it, and any refusal or failure, in place (no alert boxes).
+const pend = {};                 // key ('here', 'peer:<name>') -> {want: 'on'|'off', at}: sent, not yet seen in the snapshot
+const was = {};                  // key -> the last render's {busy, off}, to see a change finish
+const said = new Map();          // key -> {text, tone ('busy'|'done'|'fail'), until}
+const SEEN_WITHIN = 15000;       // a switch the gateway accepted shows in its snapshot within this; past it, the page says so
+function say(key, text, tone, ms) {
+  if (!text) said.delete(key); else said.set(key, {text, tone, until: ms ? Date.now() + ms : 0});
+  renderSaid();
+}
+function renderSaid() {
+  const now = Date.now(), box = $('act-say'), kids = [];
+  for (const [k, m] of said) {
+    if (m.until && now > m.until + 900) { said.delete(k); continue; }
+    kids.push(el('span', {class: 'said ' + m.tone + (m.until && now > m.until ? ' fading' : ''), title: m.text}, el('i'), m.text));
+  }
+  const key = kids.map(k => k.className + k.textContent).join('|');
+  if (box.dataset.key !== key) { box.replaceChildren(...kids); box.dataset.key = key; }
+}
+setInterval(renderSaid, 400);
+function powerState(key, mt, sw) {     // -> {busy, off, words}: off is the state the button switches away from
+  const off = !!(mt && mt.off), p = pend[key], name = key.startsWith('peer:') ? key.slice(5) + ': ' : '';
+  if (p && p.sending) return {busy: true, off: p.want === 'on', want: p.want, words: name + `switching ${p.want}: sending`};
+  if (off && !mt.unloaded) return {busy: true, off: true, want: 'off', words: name + (mt.inflight ? `switching off: waiting for ${mt.inflight} request${mt.inflight === 1 ? '' : 's'} in flight to finish, then unloading` : 'switching off: unloading every instance')};
+  if (sw && sw.phase === 'loading') return {busy: true, off: false, want: 'on', words: name + `switching on: loading ${(sw.families || []).join(', ') || 'the instances'} · ${Math.max(0, Math.round(Date.now() / 1000 - sw.at))} s`};
+  if (p && (p.want === 'off') !== off) {
+    if (Date.now() - p.at < SEEN_WITHIN) return {busy: true, off: p.want === 'on', want: p.want, words: name + `switching ${p.want}: request accepted, waiting for the gateway`};
+    delete pend[key];
+    say(key, name + `switching ${p.want}: no change seen in ${SEEN_WITHIN / 1000} s; check localmodels status`, 'fail', 20000);
+  }
+  if (p && p.want === 'on' && !sw && Date.now() - p.at < 3000) return {busy: true, off: false, want: 'on', words: name + 'switching on: starting the load'};
+  return {busy: false, off};
+}
+function powerButton(b, key, mt, sw, peer, verb) {
+  const st = powerState(key, mt, sw), before = was[key], name = peer ? peer + ': ' : '';
+  was[key] = st;
+  b.classList.toggle('busy', st.busy); b.disabled = st.busy; b.setAttribute('aria-busy', st.busy ? 'true' : 'false');
+  if (st.busy) {
+    b.textContent = (peer ? `${peer} ` : '') + `switching ${st.want}…`;
+    say(key, st.words, 'busy');
+    return;
+  }
+  const finished = before && before.busy;
+  if (finished || pend[key]) {
+    delete pend[key];
+    if (st.off) say(key, name + `switched off at ${clock(mt.unloaded || mt.start)}: every instance unloaded; requests get 503`, 'done', 10000);
+    else if (sw && sw.phase === 'done' && !sw.ok) say(key, name + `switched on, but not every load succeeded: ${sw.words}`, 'fail', 30000);
+    else say(key, name + `switched on${sw && sw.words ? ': ' + sw.words : ''}; requests are admitted`, 'done', 10000);
+  }
+  b.textContent = `${verb} ${st.off ? 'on' : 'off'}`;
+  b.dataset.off = st.off ? '1' : '';
+  b.title = peer
+    ? (st.off ? `Switch on peer ${peer}'s local models: it loads the families loaded when switched off, and this gateway routes to it again (POST /hub/link/on)`
+              : `Switch off peer ${peer}'s local models: it unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there (POST /hub/link/off)`)
+    : (st.off ? 'Load the families that were loaded when switched off (POST /hub/on); the instance manager adds the other replicas'
+              : 'Unload every instance once the requests in flight finish; until turned on, requests get 503 and nothing is loaded, reloaded or started (POST /hub/off)');
+}
+async function powerSwitch(b, key, peer, post) {     // the click: confirm a switch-off, send it, then let the snapshot carry it
+  if (b.disabled) return;
+  const on = b.dataset.off === '1', name = peer ? peer + ': ' : '', who = peer ? `peer ${peer}'s` : "this Mac's";
+  if (!on && !confirm(`Switch ${who} local models off?\n` + (peer ? 'It unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there.'
+    : 'Every instance is unloaded once the requests in flight finish; until turned on, requests here get 503 and nothing is loaded.'))) return;
+  const want = on ? 'on' : 'off';
+  pend[key] = {want, at: Date.now(), sending: true};           // the button stays busy while the request is out, whatever renders meanwhile
+  b.disabled = true; b.classList.add('busy'); b.textContent = (peer ? `${peer} ` : '') + `switching ${want}…`;
+  say(key, name + `switching ${want}: sending`, 'busy');
+  let ok = false;
   try {
     let r = await post({});
     if (r.status === 409) {
-      const j = await r.json();
-      if ((j.blockers || []).length && confirm(`Peer ${name} in use: ${j.blockers.join('; ')}.\nSwitch its local models off anyway?`)) r = await post({force: true});
-      else if (!(j.blockers || []).length) alert(`Peer ${name}: ${j.error || 'HTTP 409'}`);
-    } else if (!r.ok) { const j = await r.json().catch(() => ({})); alert(`Peer ${name}: nothing switched ${on ? 'on' : 'off'}: ${j.error || 'HTTP ' + r.status}`); }
-  } catch (e) { /* not recorded: the next snapshot says whether the peer answers */ }
-  finally { b.disabled = false; tickNow(); }
+      const j = await r.json().catch(() => ({})), by = j.blockers || [];
+      if (by.length && confirm(`${peer ? 'Peer ' + peer : 'The local models are'} in use: ${by.join('; ')}.\nSwitch ${peer ? 'its' : 'them'} off anyway?`)) r = await post({force: true});
+      else { say(key, by.length ? name + 'left on: in use, not forced' : name + `nothing switched: ${j.error || 'HTTP 409'}`, by.length ? 'done' : 'fail', by.length ? 6000 : 20000); }
+    }
+    if (r.ok) ok = true;
+    else if (r.status !== 409) { const j = await r.json().catch(() => ({})); say(key, name + `nothing switched ${want}: ${j.error || 'HTTP ' + r.status}`, 'fail', 20000); }
+  } catch (e) { say(key, name + `nothing switched ${want}: the gateway did not answer`, 'fail', 20000); }
+  if (ok) { pend[key] = {want, at: Date.now()}; say(key, name + `switching ${want}: request accepted`, 'busy'); }
+  else { delete pend[key]; was[key] = null; b.disabled = false; b.classList.remove('busy'); b.textContent = (peer ? `turn ${peer}` : 'turn models') + (on ? ' on' : ' off'); if (said.get(key) && said.get(key).tone === 'busy') say(key, ''); }
+  tickNow();
+}
+$('poll-now').addEventListener('click', async () => {          // the gateway looks at every peer at once, then the page reads it
+  const b = $('poll-now'); if (b.disabled) return;
+  b.disabled = true; b.classList.add('busy'); b.textContent = 'polling…';
+  let ok = true;
+  try { ok = (await fetch('/hub/link', {method: 'POST'})).ok; } catch (e) { ok = false; }
+  try { S = await get('/hub/snapshot'); fresh = Date.now(); online(true); guard('page', renderNow); } catch (e) { ok = false; }
+  b.disabled = false; b.classList.remove('busy'); b.textContent = 'poll now';
+  const ps = (S && S.peers) || [];
+  say('poll', ok ? 'polled: ' + (ps.map(p => `${p.name} ${p.state === 'up' ? 'reachable' : p.off ? 'switched off' : p.state}`).join(', ') || 'no peers')
+    : 'poll failed: the gateway did not answer', ok ? 'done' : 'fail', ok ? 6000 : 15000);
+});
+$('power').addEventListener('click', () => powerSwitch($('power'), 'here', '',
+  body => fetch($('power').dataset.off === '1' ? '/hub/on' : '/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})));
+$('peer-power').addEventListener('click', ev => {          // a peer's local models off or on
+  const b = ev.target.closest('button[data-peer]'); if (!b) return;
+  const name = b.dataset.peer, on = b.dataset.off === '1';
+  powerSwitch(b, 'peer:' + name, name, body => fetch(on ? '/hub/link/on' : '/hub/link/off',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({peer: name}, body))}));
 });
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];

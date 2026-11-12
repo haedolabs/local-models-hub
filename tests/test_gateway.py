@@ -471,6 +471,8 @@ def run(box):
         end = time.time() + 20
         while maint.switched_off() and time.time() < end: time.sleep(0.2)
         t('on: 202, and the record goes', code == 202 and maint.switched_off() is None, (code, body))
+        snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=10).read())
+        t("on: the dashboard's snapshot carries the switch-on (loading, then its outcome)", (snap.get('switching') or {}).get('phase') in ('loading', 'done'), snap.get('switching'))
         plan()
         code, r, h = ask(tag='switched-on')
         t('on: answered again', code == 200, (code, r))
