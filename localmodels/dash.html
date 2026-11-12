@@ -137,19 +137,32 @@ svg text { font: 10.5px "Libre Franklin", system-ui, -apple-system, "Segoe UI", 
 .slots { display: flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); min-width: 0; }   /* the modules share the row's free width */
 #models-body.compact .slots { display: inline-flex; }
 #models-body.compact .slot { flex: none; width: calc(30px * var(--mk, 1)); }
-.slot {                    /* a slot: a module, the track's color when free, the project's color when in use */
-  position: relative; overflow: hidden;
-  flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(10px * var(--mk, 1));
-  border-radius: calc(2px * var(--mk, 1)); background-color: var(--track);
+.slot {                    /* a slot as a memory module: the board (the track when free, the project's sapphire when in use), */
+  position: relative; overflow: hidden;      /* eight chips, and contacts along the bottom edge broken by the key notch */
+  flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
+  border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px;
+  background-color: var(--track);
+  background-image: repeating-linear-gradient(90deg, color-mix(in srgb, var(--die) 22%, transparent) 0 9%, transparent 9% 12.5%);   /* eight chips */
+  background-size: 86% 40%; background-position: 50% 48%; background-repeat: no-repeat;
+  -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
+          mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
 }
-.slot.on { background-color: var(--board); }
+.slot.on {                 /* in use: the board in the project's sapphire (the legend names it), its chips darker */
+  background-color: var(--board);
+  background-image: repeating-linear-gradient(90deg, color-mix(in srgb, var(--die) 55%, transparent) 0 9%, transparent 9% 12.5%);
+}
+.slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;   /* the contacts: the mark's off-white pins */
+  background: repeating-linear-gradient(90deg, rgb(var(--core)) 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
+.slot:not(.on)::after { opacity: .35; }
 .slot.on::before {         /* in use: a soft light runs along the module and its contacts brighten; the phase follows the clock */
   content: ''; position: absolute; top: 0; bottom: 0; left: -45%; width: 45%;      /* (slotEl), so a refresh never restarts it */
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .17), transparent);
+  background: linear-gradient(90deg, transparent, rgb(var(--core) / .17), transparent);
   animation: current 4s ease-in-out var(--d, 0s) infinite;
 }
+.slot.on::after { animation: contacts 4s ease-in-out var(--d, 0s) infinite; }
 @keyframes current { 0% { transform: translateX(0); opacity: 0; } 12% { opacity: 1; } 60% { transform: translateX(322%); opacity: 1; } 70%, 100% { transform: translateX(322%); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .slot.on::before { animation: none; } }
+@keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.22); } }
+@media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
 .copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .bandpct { display: none; }
 #models-body.tight .band, #models-body.tight .band-end { display: none; }
