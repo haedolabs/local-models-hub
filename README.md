@@ -91,6 +91,13 @@ Every host runs its own hub; the one the clients use (the front) lists peer gate
 
 A front switches a peer's local models off and on the same way: `localmodels peer off <name> [--force] [reason]` and `localmodels peer on <name>`, or the dashboard's **turn <name> off** / **turn <name> on** (`POST /hub/link/off`, `POST /hub/link/on` with `{"peer": <name>, "force"?, "why"?}`). The front sends `POST /hub/off` or `/hub/on` to the peer over the link with the shared token; the peer applies it as its own `localmodels off` / `on` (its leases refuse an off with `409` unless forced, and the reason names the front), and the front polls it at once and routes nothing there until it is on.
 
+### Menu-bar app (optional)
+`localmodels app install` builds `Local Models Hub.app` on this Mac from `app/` with the Command Line Tools' `swiftc` (`xcode-select --install` if missing), signs it ad hoc and puts it in `~/Applications`; a local build carries no quarantine attribute, so it opens without a Gatekeeper prompt and needs no Developer ID. It is a client of the gateway only: it reads `/hub/snapshot` every 5 s (2 s while its menu is open, backing off to 30 s while the gateway does not answer) and calls the endpoints the dashboard uses.
+- **Icon:** a monochrome template of the chip mark: the die filled while some slot can take a request, outlined when the local models are off, nothing is loaded or the gateway does not answer, and a dot at the corner when something needs attention (a crash, a peer unreachable or refusing the token, recorded errors, a settings or write problem). Its accessibility label says the state in words.
+- **Menu:** slots active and queued; the alerts (a click opens the dashboard); this Mac and each peer with its state and **Turn … off / on** (`POST /hub/off`, `/hub/on`, `/hub/link/off`, `/hub/link/on`; off asks first, and a `409` names the leases before forcing); **Start gateway** when it does not answer; **Open dashboard**; **Launch at login**.
+- **Notifications:** an instance left unloaded after a crash, and a peer unreachable for more than 60 s; each once, none for what was already so at launch.
+- `localmodels app` says whether it is installed and running; `localmodels app uninstall` removes it and its login item; `localmodels check` runs its tests (`app/tests`) when `swiftc` is present and reports an installed app built from another release.
+
 ### Observability
 - **Dashboard** at `http://localhost:1235` ([pictures](#dashboard)): one page, no build step, fits one screen. It shows:
   - per-instance slot occupancy by project (one module per slot), and tokens processed against the recycle threshold; the card's layout scales to its space for any number of models, folding detail as models are added;
@@ -273,6 +280,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints, with its typeface (`libre-franklin-400.woff2`, `-500.woff2`) and background (`pcb.svg`, drawn by `tools/pcb.py`), served beside the page; the terminal UI |
 | `localmodels/icon.py` | the icon as PNG (`/favicon.png`, `/apple-touch-icon.png`) and SVG; `python3 -m localmodels.icon` writes `brand/` and `docs/icon.png` |
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
+| `app/` | the optional menu-bar app (Swift, AppKit): `Glance.swift`, the snapshot read into icon, menu and notifications; `main.swift`, the app; `tests/`, its checks |
 | `hooks/hooks.json` | the plugin's maintenance hook |
 | `tests/` | sandbox tests against a fake LM Studio on an ephemeral port (no model is ever loaded or unloaded), and two gateways with a fake LM Studio each for peers; each suite first imports `tests/_sandbox.py`, which points the state folder, the gateway port, LM Studio's address and logs and `lms` into a temporary folder or at nothing, so no suite touches the live state; run by `localmodels check` and `publish` |
 | `tools/` | `thinkbench.py` (thinking on versus off), `loadbench.py` (long prompts and long structured completions, one instance versus two; `--memory`: an instance's footprint against the context it holds) |
