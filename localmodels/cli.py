@@ -1590,9 +1590,10 @@ def publish(a):
 
 
 FLAGS = {   # verb: (options that take a value, options that stand alone); a verb not listed reads its own words
+            # demo's --project, --workers, --model and --seed: one project's program, started by the demo itself
     'status': ((), ()), 'st': ((), ()), 'open': ((), ()), 'log': (('--hours',), ()), 'swapcheck': ((), ()),
     'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
-    'demo': (('--minutes',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
+    'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
