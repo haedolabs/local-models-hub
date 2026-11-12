@@ -10,7 +10,9 @@
   /* Haedo Labs' design language: near-black, off-white, the shared grey and
      hairline, and sapphire, the one color. Every series is a step of sapphire (OKLab, its own hue, lighter or darker), ordered
      so neighbours differ most; "other" is a neutral. No red: states are told apart by words and position first; color only
-     adds weight (warning in the shared beige-grey, critical in the strongest ink). The light theme is the same on paper. */
+     adds weight (warning in the shared beige-grey, critical in the strongest ink). The light theme is the same on paper.
+     Haedo Labs Sapphire is the default color; the footer's color setting can take the Mac's system accent or any color
+     instead, and then every step below is drawn again from it (applyAccent): same lightness, its hue and chroma. */
   color-scheme: light;
   --plane: #ece7df; --surface: rgba(244,241,236,0.82); --ink: #111110; --ink-2: #4a4641; --muted: #6b665f;
   --grid: rgba(17,17,16,0.08); --axis: rgba(17,17,16,0.30); --ring: rgba(17,17,16,0.14); --hover: rgba(17,17,16,0.05); --track: #dcd6cc;
@@ -18,6 +20,7 @@
   --p1: #0d4eb1; --p2: #85a6db; --p3: #053784; --p4: #5e89d0; --p5: #366bc5; --p6: #a6bfe4; --p7: #0f52ba;
   --other: #b5afa5; --good: #0f52ba; --warning: #8a7466; --serious: #7a6a5f; --critical: #111110; --good-text: #0d4eb1;
   --pin: #0f52ba; --die: #161615; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.35); --pcb: .2;
+  --brand: #0f52ba; --brand-edge: rgba(15,82,186,0.55);   /* the color itself: the name's HUB, the board, a die's edge */
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -45,8 +48,8 @@
 b, strong, th { font-weight: 500; }   /* the face has two weights, 400 and 500: nothing is drawn heavier */
 html, body { margin: 0; color: var(--ink); height: 100%; }
 html { background: var(--plane); } body { background: transparent; }   /* the ground on the page itself, so the board sits on it */
-body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: var(--pcb);   /* a circuit board in sapphire (pcb.svg, */
-  background: url("/pcb.svg") 0 0 / 640px repeat; }                                                              /* tools/pcb.py: one tile, no seam), faint, behind everything */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: var(--pcb);   /* a circuit board in the color (pcb.svg, */
+  background: var(--brand); -webkit-mask: url("/pcb.svg") 0 0 / 640px repeat; mask: url("/pcb.svg") 0 0 / 640px repeat; }   /* tools/pcb.py, as a mask: one tile, no seam), faint */
 body { font: 13px/1.4 "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; overflow: hidden; }
 .wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
 @media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
@@ -56,7 +59,10 @@ header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items:
 .btn.act { color: var(--ink); box-shadow: 0 0 0 1px var(--pin); }   /* an action that changes the hub, never mistaken for a view setting */
 #foot-left { display: inline-flex; gap: 12px; align-items: baseline; }
 h1 { margin: 0; line-height: 0; }
-h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* the name drawn as outlines (HWT Unit Gothic), HUB in sapphire */
+h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* the name drawn as outlines (HWT Unit Gothic), HUB in the color */
+#accent { font: inherit; font-size: 12px; color: var(--ink-2); background: transparent; border: 0; border-radius: 6px; padding: 1px 4px; box-shadow: 0 0 0 1px var(--ring); cursor: pointer; }
+#accent-own { width: 22px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: none; cursor: pointer; vertical-align: middle; }
+#accent-own::-webkit-color-swatch-wrapper { padding: 0; } #accent-own::-webkit-color-swatch { border: 0; border-radius: 4px; }
 .title { display: flex; align-items: center; gap: 14px; }
 .sub { color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
@@ -83,7 +89,7 @@ h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* th
     repeating-linear-gradient(0deg, var(--pin) 0 2px, transparent 2px 5px) left / 3px 100% no-repeat,
     repeating-linear-gradient(0deg, var(--pin) 0 2px, transparent 2px 5px) right / 3px 100% no-repeat; }
 .die { width: 100%; height: 100%; border-radius: 3px; background: var(--die); padding: 3px; display: flex; flex-direction: column; gap: 3px;
-  box-shadow: inset 0 0 0 1px rgba(15,82,186,0.55); }
+  box-shadow: inset 0 0 0 1px var(--brand-edge); }
 .cores { display: grid; gap: 1.5px; }
 .cores.cpu { grid-template-columns: repeat(6, 1fr); }                 /* each CPU core lit by its own load */
 .cores.gpu { grid-template-columns: repeat(8, 1fr); flex: 1; }        /* the GPU's cores, lit by its utilization */
@@ -239,7 +245,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
 <body>
 <div class="wrap">
   <header>
-    <div class="title"><h1><svg xmlns="http://www.w3.org/2000/svg" viewBox="7 -69 1491 72" role="img" aria-label="__HUB_NAME__"><title>__HUB_NAME__</title><path class="a" fill="currentColor" d="M90.5 -15.2L35.4 -15.2L35.4 -66.8L8.4 -66.8L8.4 0L90.5 0ZM146.9 -67.9C123.6 -67.9 102.9 -58.5 102.9 -33.4C102.9 -8.3 123.6 1.1 146.9 1.1C170.2 1.1 189.8 -8.3 189.8 -33.4C189.8 -58.5 170.2 -67.9 146.9 -67.9ZM146.9 -14.3C136.9 -14.3 131.7 -19.7 131.7 -30.4L131.7 -36.4C131.7 -47.1 136.9 -52.5 146.9 -52.5C157 -52.5 162.2 -47 162.2 -36.4L162.2 -30.4C162.2 -19.8 157 -14.3 146.9 -14.3ZM234.7 -33.4C234.7 -46.4 241.3 -52.7 253.3 -52.7C263.5 -52.7 271.6 -49.3 277.1 -45L289 -61.2C280.8 -65.7 266.8 -67.9 251 -67.9C224.7 -67.9 206 -55.3 206 -33.4C206 -11.8 224.3 1.1 250 1.1C265.8 1.1 281.9 -1.1 290.1 -5.6L278.2 -21.8C272.7 -17.5 263.2 -14.1 253 -14.1C241.3 -14.1 234.7 -20.1 234.7 -33.4ZM325.3 0L328.6 -7.6L356 -7.6L359.2 0L386 0L357.6 -66.8L330.6 -66.8L300.9 0ZM342.4 -39.4L342.8 -39.4L349.9 -22.4L335 -22.4ZM482.5 -15.2L427.4 -15.2L427.4 -66.8L400.4 -66.8L400.4 0L482.5 0ZM609.7 -66.8L594.4 -36.2L579.3 -66.8L536.5 -66.8L536.5 0L559 0L559 -47.4L583.5 0L600.5 0L623.7 -46.7L623.7 0L650.7 0L650.7 -66.8ZM713.1 -67.9C689.8 -67.9 669.1 -58.5 669.1 -33.4C669.1 -8.3 689.8 1.1 713.1 1.1C736.4 1.1 756 -8.3 756 -33.4C756 -58.5 736.4 -67.9 713.1 -67.9ZM713.1 -14.3C703.1 -14.3 697.9 -19.7 697.9 -30.4L697.9 -36.4C697.9 -47.1 703.1 -52.5 713.1 -52.5C723.2 -52.5 728.4 -47 728.4 -36.4L728.4 -30.4C728.4 -19.8 723.2 -14.3 713.1 -14.3ZM821.3 0C841.6 0 858.6 -13.6 858.6 -33.4C858.6 -53.2 841.9 -66.8 821.6 -66.8L774.5 -66.8L774.5 0ZM815.2 -51.6C823.8 -51.6 829.9 -44 829.9 -33.4C829.9 -22.8 823.8 -15.2 815.6 -15.2L801.5 -15.2L801.5 -51.6ZM959.1 -15.2L904 -15.2L904 -26.3L943.5 -26.3L943.5 -41.3L904 -41.3L904 -51.6L958.4 -51.6L958.4 -66.8L877 -66.8L877 0L959.1 0ZM1058.6 -15.2L1003.5 -15.2L1003.5 -66.8L976.5 -66.8L976.5 0L1058.6 0ZM1075.6 -45.4C1075.6 -31.3 1087.1 -24 1109.5 -24L1120.7 -24C1125.6 -24 1127.7 -21.9 1127.7 -19.4C1127.7 -16.3 1125.5 -14.6 1119.2 -14.6L1109.6 -14.6C1097.5 -14.6 1089.1 -17 1082.2 -21.4L1072.7 -5.3C1083.9 -1.1 1095.8 1 1107.2 1L1122.8 1C1143.6 1 1153.4 -9.4 1153.4 -22.1C1153.4 -34.8 1144.7 -44 1127.6 -44L1107 -44C1102.8 -44 1100.5 -45.3 1100.5 -48.1C1100.5 -51 1102.8 -52.3 1107.6 -52.3L1116.7 -52.3C1126 -52.3 1134.4 -50.8 1141.4 -47.8L1148.9 -62.3C1142.9 -65.5 1130.9 -67.8 1119.4 -67.8L1104.7 -67.8C1086.8 -67.8 1075.6 -58.5 1075.6 -45.4Z"/><path class="h" fill="#0f52ba" d="M1208.5 -66.8L1208.5 0L1235.5 0L1235.5 -26.3L1265.1 -26.3L1265.1 0L1292.1 0L1292.1 -66.8L1265.1 -66.8L1265.1 -41.3L1235.5 -41.3L1235.5 -66.8ZM1310.6 -33.4C1310.6 -7.2 1330.6 1.1 1352.7 1.1C1374.8 1.1 1393.7 -7.2 1393.7 -33.4L1393.7 -66.8L1367.9 -66.8L1367.9 -30.4C1367.9 -19.8 1362.8 -14.3 1352.7 -14.3C1342.7 -14.3 1337.6 -19.7 1337.6 -30.4L1337.6 -66.8L1310.6 -66.8ZM1496.3 -16.9C1496.3 -24.8 1490.2 -31.2 1478.7 -33.4L1478.7 -33.8C1489 -36 1493.8 -42.8 1493.8 -49.9C1493.8 -61.8 1482.5 -66.8 1464.5 -66.8L1412.2 -66.8L1412.2 0L1467 0C1485.5 0 1496.3 -5.2 1496.3 -16.9ZM1465.1 -46.5C1465.1 -43.6 1462.9 -41.3 1458.2 -41.3L1439.2 -41.3L1439.2 -51.6L1457.8 -51.6C1463 -51.6 1465.1 -49.4 1465.1 -46.5ZM1467.6 -20.8C1467.6 -17.9 1465.5 -15.2 1460.3 -15.2L1439.2 -15.2L1439.2 -26.3L1460.4 -26.3C1465.5 -26.3 1467.6 -23.5 1467.6 -20.8Z"/></svg></h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
+    <div class="title"><h1><svg xmlns="http://www.w3.org/2000/svg" viewBox="7 -69 1491 72" role="img" aria-label="__HUB_NAME__"><title>__HUB_NAME__</title><path class="a" fill="currentColor" d="M90.5 -15.2L35.4 -15.2L35.4 -66.8L8.4 -66.8L8.4 0L90.5 0ZM146.9 -67.9C123.6 -67.9 102.9 -58.5 102.9 -33.4C102.9 -8.3 123.6 1.1 146.9 1.1C170.2 1.1 189.8 -8.3 189.8 -33.4C189.8 -58.5 170.2 -67.9 146.9 -67.9ZM146.9 -14.3C136.9 -14.3 131.7 -19.7 131.7 -30.4L131.7 -36.4C131.7 -47.1 136.9 -52.5 146.9 -52.5C157 -52.5 162.2 -47 162.2 -36.4L162.2 -30.4C162.2 -19.8 157 -14.3 146.9 -14.3ZM234.7 -33.4C234.7 -46.4 241.3 -52.7 253.3 -52.7C263.5 -52.7 271.6 -49.3 277.1 -45L289 -61.2C280.8 -65.7 266.8 -67.9 251 -67.9C224.7 -67.9 206 -55.3 206 -33.4C206 -11.8 224.3 1.1 250 1.1C265.8 1.1 281.9 -1.1 290.1 -5.6L278.2 -21.8C272.7 -17.5 263.2 -14.1 253 -14.1C241.3 -14.1 234.7 -20.1 234.7 -33.4ZM325.3 0L328.6 -7.6L356 -7.6L359.2 0L386 0L357.6 -66.8L330.6 -66.8L300.9 0ZM342.4 -39.4L342.8 -39.4L349.9 -22.4L335 -22.4ZM482.5 -15.2L427.4 -15.2L427.4 -66.8L400.4 -66.8L400.4 0L482.5 0ZM609.7 -66.8L594.4 -36.2L579.3 -66.8L536.5 -66.8L536.5 0L559 0L559 -47.4L583.5 0L600.5 0L623.7 -46.7L623.7 0L650.7 0L650.7 -66.8ZM713.1 -67.9C689.8 -67.9 669.1 -58.5 669.1 -33.4C669.1 -8.3 689.8 1.1 713.1 1.1C736.4 1.1 756 -8.3 756 -33.4C756 -58.5 736.4 -67.9 713.1 -67.9ZM713.1 -14.3C703.1 -14.3 697.9 -19.7 697.9 -30.4L697.9 -36.4C697.9 -47.1 703.1 -52.5 713.1 -52.5C723.2 -52.5 728.4 -47 728.4 -36.4L728.4 -30.4C728.4 -19.8 723.2 -14.3 713.1 -14.3ZM821.3 0C841.6 0 858.6 -13.6 858.6 -33.4C858.6 -53.2 841.9 -66.8 821.6 -66.8L774.5 -66.8L774.5 0ZM815.2 -51.6C823.8 -51.6 829.9 -44 829.9 -33.4C829.9 -22.8 823.8 -15.2 815.6 -15.2L801.5 -15.2L801.5 -51.6ZM959.1 -15.2L904 -15.2L904 -26.3L943.5 -26.3L943.5 -41.3L904 -41.3L904 -51.6L958.4 -51.6L958.4 -66.8L877 -66.8L877 0L959.1 0ZM1058.6 -15.2L1003.5 -15.2L1003.5 -66.8L976.5 -66.8L976.5 0L1058.6 0ZM1075.6 -45.4C1075.6 -31.3 1087.1 -24 1109.5 -24L1120.7 -24C1125.6 -24 1127.7 -21.9 1127.7 -19.4C1127.7 -16.3 1125.5 -14.6 1119.2 -14.6L1109.6 -14.6C1097.5 -14.6 1089.1 -17 1082.2 -21.4L1072.7 -5.3C1083.9 -1.1 1095.8 1 1107.2 1L1122.8 1C1143.6 1 1153.4 -9.4 1153.4 -22.1C1153.4 -34.8 1144.7 -44 1127.6 -44L1107 -44C1102.8 -44 1100.5 -45.3 1100.5 -48.1C1100.5 -51 1102.8 -52.3 1107.6 -52.3L1116.7 -52.3C1126 -52.3 1134.4 -50.8 1141.4 -47.8L1148.9 -62.3C1142.9 -65.5 1130.9 -67.8 1119.4 -67.8L1104.7 -67.8C1086.8 -67.8 1075.6 -58.5 1075.6 -45.4Z"/><path class="h" fill="#0f52ba" style="fill: var(--brand)" d="M1208.5 -66.8L1208.5 0L1235.5 0L1235.5 -26.3L1265.1 -26.3L1265.1 0L1292.1 0L1292.1 -66.8L1265.1 -66.8L1265.1 -41.3L1235.5 -41.3L1235.5 -66.8ZM1310.6 -33.4C1310.6 -7.2 1330.6 1.1 1352.7 1.1C1374.8 1.1 1393.7 -7.2 1393.7 -33.4L1393.7 -66.8L1367.9 -66.8L1367.9 -30.4C1367.9 -19.8 1362.8 -14.3 1352.7 -14.3C1342.7 -14.3 1337.6 -19.7 1337.6 -30.4L1337.6 -66.8L1310.6 -66.8ZM1496.3 -16.9C1496.3 -24.8 1490.2 -31.2 1478.7 -33.4L1478.7 -33.8C1489 -36 1493.8 -42.8 1493.8 -49.9C1493.8 -61.8 1482.5 -66.8 1464.5 -66.8L1412.2 -66.8L1412.2 0L1467 0C1485.5 0 1496.3 -5.2 1496.3 -16.9ZM1465.1 -46.5C1465.1 -43.6 1462.9 -41.3 1458.2 -41.3L1439.2 -41.3L1439.2 -51.6L1457.8 -51.6C1463 -51.6 1465.1 -49.4 1465.1 -46.5ZM1467.6 -20.8C1467.6 -17.9 1465.5 -15.2 1460.3 -15.2L1439.2 -15.2L1439.2 -26.3L1460.4 -26.3C1465.5 -26.3 1467.6 -23.5 1467.6 -20.8Z"/></svg></h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
     <div class="h-status"><span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span></div>
     <div class="h-view"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div></div>
@@ -281,7 +287,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
     <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
 
-  <footer><span id="foot-left"><span id="clock" class="muted"></span><button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></span><span id="about"></span></footer>
+  <footer><span id="foot-left"><span id="clock" class="muted"></span><button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button><select id="accent" title="The dashboard's color: Haedo Labs Sapphire, the Mac's system accent (System Settings > Appearance), or a color of your own" aria-label="Color"><option value="sapphire">color: Haedo Labs Sapphire</option><option value="system">color: system accent</option><option value="own">color: your own</option></select><input type="color" id="accent-own" value="#0f52ba" title="Your own color" aria-label="Your own color" hidden></span><span id="about"></span></footer>
 </div>
 <div id="tip"></div>
 <script>
@@ -1108,6 +1114,73 @@ $('theme').addEventListener('click', () => {
   guard('charts', renderCharts);
 });
 try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
+// ---- the color: Haedo Labs Sapphire by default, or the Mac's system accent (/hub/accent), or one's own. Any other color
+// redraws every sapphire step: each keeps its OKLab lightness (the contrast the palette was measured for) and takes the new
+// color's hue, its chroma scaled by the new color's against sapphire's, pulled in until it is a real sRGB color.
+const SAPPHIRE = '#0f52ba';
+const STEPS = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'good', 'good-text', 'pin'];
+const BASE = {      // sapphire's steps, as the token blocks above set them, light then dark
+  light: {s1: '#0d4eb1', s2: '#85a6db', s3: '#053784', s4: '#5e89d0', s5: '#366bc5', s6: '#a6bfe4', s7: '#0f52ba', p1: '#0d4eb1', p2: '#85a6db', p3: '#053784',
+          p4: '#5e89d0', p5: '#366bc5', p6: '#a6bfe4', p7: '#0f52ba', good: '#0f52ba', 'good-text': '#0d4eb1', pin: '#0f52ba', gpu: '#87ace8'},
+  dark: {s1: '#4578ce', s2: '#bad3f9', s3: '#0f52ba', s4: '#87ace8', s5: '#6692db', s6: '#ccdffe', s7: '#225ec0', p1: '#4578ce', p2: '#bad3f9', p3: '#0f52ba',
+         p4: '#87ace8', p5: '#6692db', p6: '#ccdffe', p7: '#225ec0', good: '#87ace8', 'good-text': '#a9c6f4', pin: '#4578ce', gpu: '#87ace8'}};
+const lin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4), gam = c => c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+function toLch(hex) {
+  const [r, g, b] = [1, 3, 5].map(i => lin(parseInt(hex.slice(i, i + 2), 16) / 255));
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b),
+    s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+  return [L, Math.hypot(A, B), Math.atan2(B, A)];
+}
+function fromLch(L, C, h) {
+  const A = C * Math.cos(h), B = C * Math.sin(h);
+  const l = Math.pow(L + 0.3963377774 * A + 0.2158037573 * B, 3), m = Math.pow(L - 0.1055613458 * A - 0.0638541728 * B, 3),
+    s = Math.pow(L - 0.0894841775 * A - 1.2914855480 * B, 3);
+  return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+          -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+}
+function inGamut(L, C, h) {                            // the strongest chroma up to C that is still an sRGB color
+  let lo = 0, hi = C;
+  const ok = c => fromLch(L, c, h).every(v => v >= -1e-4 && v <= 1 + 1e-4);
+  if (ok(C)) return fromLch(L, C, h);
+  for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (ok(mid)) lo = mid; else hi = mid; }
+  return fromLch(L, lo, h);
+}
+const hexOf = rgb => '#' + rgb.map(v => Math.round(Math.min(1, Math.max(0, gam(Math.min(1, Math.max(0, v))))) * 255).toString(16).padStart(2, '0')).join('');
+const rgbOf = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(',');
+function stepsFor(color, scheme) {                     // -> the token lines for one scheme, drawn from color
+  const [, cs, hs] = toLch(SAPPHIRE), [, ca, ha] = toLch(color), k = cs ? ca / cs : 0, out = {};
+  for (const [name, hex] of Object.entries(BASE[scheme])) { const [L, C, h] = toLch(hex); out[name] = hexOf(inGamut(L, C * k, h + (ha - hs))); }
+  const lines = STEPS.map(n => `--${n}: ${out[n]};`);
+  lines.push(`--gpu: ${rgbOf(out.gpu)};`, `--glow: rgba(${rgbOf(color)},${scheme === 'dark' ? 0.55 : 0.35});`, `--brand: ${color};`, `--brand-edge: rgba(${rgbOf(color)},0.55);`);
+  return lines.join(' ');
+}
+let ACCENT = {mode: 'sapphire', own: SAPPHIRE}, SYSTEM = null;
+function applyAccent() {
+  const color = ACCENT.mode === 'own' ? ACCENT.own : ACCENT.mode === 'system' && SYSTEM ? SYSTEM.color : null;
+  let tag = $('accent-steps');
+  if (!color || color.toLowerCase() === SAPPHIRE) { if (tag) tag.remove(); }
+  else {
+    if (!tag) { tag = document.createElement('style'); tag.id = 'accent-steps'; document.head.append(tag); }
+    const light = stepsFor(color, 'light'), dark = stepsFor(color, 'dark');
+    tag.textContent = `:root { ${light} } @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { ${dark} } } :root[data-theme="dark"] { ${dark} }`;
+  }
+  $('accent').value = ACCENT.mode; $('accent-own').hidden = ACCENT.mode !== 'own'; $('accent-own').value = ACCENT.own;
+  $('accent').options[1].textContent = 'color: system accent' + (SYSTEM ? ` (${SYSTEM.name})` : '');
+  guard('charts', renderCharts);
+}
+async function readSystemAccent() {                    // the Mac's accent, read again whenever the page comes back into view
+  try { const r = await fetch('/hub/accent'); if (r.ok) { const j = await r.json(); if (/^#[0-9a-f]{6}$/i.test(j.color || '')) SYSTEM = j; } } catch (e) { /* not recorded: Sapphire stays */ }
+  applyAccent();
+}
+function saveAccent() { try { localStorage.setItem('lm-accent', JSON.stringify(ACCENT)); } catch (e) {} }
+$('accent').addEventListener('change', ev => { ACCENT.mode = ev.target.value; saveAccent(); applyAccent(); if (ACCENT.mode === 'own') $('accent-own').click(); });
+$('accent-own').addEventListener('input', ev => { ACCENT.own = ev.target.value; saveAccent(); applyAccent(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && ACCENT.mode === 'system') readSystemAccent(); });
+try { const a = JSON.parse(localStorage.getItem('lm-accent') || 'null');
+  if (a && ['sapphire', 'system', 'own'].includes(a.mode)) ACCENT = {mode: a.mode, own: /^#[0-9a-f]{6}$/i.test(a.own || '') ? a.own : SAPPHIRE}; } catch (e) {}
+applyAccent(); readSystemAccent();
 try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
 const relayout = () => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); } guard('Recent requests', renderRecent); };
 let resizing, laidOut = 0; window.addEventListener('resize', () => {    // at once on the first resize (a window shown or resized is drawn

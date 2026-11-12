@@ -8,11 +8,12 @@
   /hub/history      the last minutes from the hub's request log and the requests in flight now: answers at once by
                     project, waits, tokens a second, requests by project, and the memory the door samples every 15 s
   /hub/recent       the last requests (project, kind, copy, seconds, waits, tokens, the step; never the content)
+  /hub/accent       the Mac's system accent color (System Settings > Appearance), for the page's color setting
 
 Readings are gathered when the page asks (cached 2 s, one computation at a time however many pages ask), so nothing
 runs while nobody looks, except the memory sample.
 """
-import collections, json, os, re, threading, time
+import collections, json, os, re, subprocess, threading, time
 
 from . import HOME, NAME, VERSION, admission, crashes, dash, errors, llmshare, maint, names, peers, recycle, sessions
 from . import names as names_mod          # colors() takes a parameter called names
@@ -24,6 +25,23 @@ SLOTS = 7                                               # categorical slots for 
 _lock, _cache = threading.Lock(), {}
 _locks = collections.defaultdict(threading.Lock)
 _mem = collections.deque(maxlen=24 * 60 * 4)            # (time, GB used here, {peer: [used, total]} or None) every 15 s: a day
+
+
+# ---------------------------------------------------------------- the Mac's accent color
+# AppleAccentColor as System Settings > Appearance writes it, with the sRGB value macOS draws for it (controlAccentColor);
+# no key is Multicolor, which draws blue. The page offers it beside Haedo Labs Sapphire, its default, and a color of one's own.
+ACCENTS = {-1: ('Graphite', '#989898'), 0: ('Red', '#e0383e'), 1: ('Orange', '#f7821b'), 2: ('Yellow', '#ffc726'),
+           3: ('Green', '#62ba46'), 4: ('Blue', '#007aff'), 5: ('Purple', '#953d96'), 6: ('Pink', '#f74f9e')}
+
+
+def accent():
+    """-> {name, color}: the Mac's accent now (read on each call; it changes when the person changes it)."""
+    try:
+        r = subprocess.run(['defaults', 'read', '-g', 'AppleAccentColor'], capture_output=True, text=True, timeout=3)
+        n = int(r.stdout.strip()) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError): n = None
+    name, color = ACCENTS.get(n, ('Multicolor', ACCENTS[4][1]))
+    return dict(name=name, color=color)
 
 
 # ---------------------------------------------------------------- colors that follow the project

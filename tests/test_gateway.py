@@ -328,6 +328,17 @@ def run(box):
           (get('/', 'cross-site', 'navigate', 'document'), get('/hub/errors?minutes=x', 'cross-site', 'navigate', 'document')) == (200, 403))
         codes = (get('/hub/health', 'same-origin', 'cors', 'empty'), get('/', 'none', 'navigate', 'document'), get('/hub/health'))
         t("the dashboard's own requests (same-origin), an address typed in (none) and a program (no such header) are served", codes == (200, 200, 200), codes)
+        from localmodels import web
+        real_run = web.subprocess.run
+        try:
+            seen = []
+            for out, code in (('5\n', 0), ('', 1), ('x\n', 0)):    # Purple; no key (Multicolor: blue); unreadable
+                web.subprocess.run = lambda *a, **k: web.subprocess.CompletedProcess(a, code, out, '')
+                seen.append(web.accent())
+        finally: web.subprocess.run = real_run
+        t("/hub/accent: the Mac's accent as System Settings stores it; no key or an unreadable one is Multicolor's blue",
+          seen == [dict(name='Purple', color='#953d96'), dict(name='Multicolor', color='#007aff'), dict(name='Multicolor', color='#007aff')]
+          and get('/hub/accent') == 200, seen)
         from localmodels import errors
         codes = [get(p) for p in ('/hub/errors?minutes=x', '/hub/history?minutes=x', '/hub/recent?n=x')]
         t('a window or a count that is not a number falls back to the default: answered, and nothing recorded as an error',

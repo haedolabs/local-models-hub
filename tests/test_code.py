@@ -304,6 +304,9 @@ def main():
         t('every name it calls or passes as a callback is defined in the page or by the browser', not missing, ', '.join(missing))
         t("a peer that is not up: the peers chip says why, since when and when the next poll comes, and a poll-now button posts /hub/link",
           'id="poll-now"' in page and "fetch('/hub/link', {method: 'POST'})" in page and 'next poll in' in page and 'p.since' in page and 'p.why' in page)
+        t("the color setting: Haedo Labs Sapphire is the default, with the system accent (/hub/accent) and one's own color, kept per browser",
+          '<option value="sapphire">color: Haedo Labs Sapphire</option>' in page and "fetch('/hub/accent')" in page and 'type="color" id="accent-own"' in page
+          and "localStorage.setItem('lm-accent'" in page and 'style="fill: var(--brand)"' in page)
         t('the check catches the kind of slip it is for (a helper removed while still passed as a callback)',
           js_undefined('<script>function a(xs) { return xs.map(short).join(", "); }</script>') == ['short'])
         print('the inventories kept by hand')
