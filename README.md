@@ -271,7 +271,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/mcp_server.py` | the MCP server (stdio) and the detached job runner |
 | `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code sessions |
 | `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints; the terminal UI |
-| `localmodels/icon.py` | the icon as PNG, drawn from the dashboard's theme tokens (`/favicon.png`, `/apple-touch-icon.png`) |
+| `localmodels/icon.py` | the icon as PNG (`/favicon.png`, `/apple-touch-icon.png`) and SVG; `python3 -m localmodels.icon` writes `brand/` and `docs/icon.png` |
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
 | `hooks/hooks.json` | the plugin's maintenance hook |
 | `tests/` | sandbox tests against a fake LM Studio on an ephemeral port (no model is ever loaded or unloaded), and two gateways with a fake LM Studio each for peers; each suite first imports `tests/_sandbox.py`, which points the state folder, the gateway port, LM Studio's address and logs and `lms` into a temporary folder or at nothing, so no suite touches the live state; run by `localmodels check` and `publish` |
