@@ -703,6 +703,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             if route == '/hub/snapshot': return self._send(200, web.snapshot())
             if route == '/hub/history': return self._send(200, web.history((q.get('minutes') or [60])[0]))
             if route == '/hub/recent': return self._send(200, web.recent((q.get('n') or [25])[0]))
+            if route == '/hub/accent': return self._send(200, web.accent())        # the Mac's accent, for the page's color setting
             if route == '/hub/peer': return self._send(200, peers.report())          # what this Mac would tell a front
             if route == '/hub/link':                                                # this Mac's look at its peers (POST: look now)
                 if method == 'POST': peers.LINK.poll(force=True)
