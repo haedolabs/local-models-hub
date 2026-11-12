@@ -1247,6 +1247,35 @@ def test_names(box):
     t('off: names as set', names.project('folder-123') == 'folder-123' and names.presenting() is None)
 
 
+def test_pictures(box):
+    print('localmodels pictures: only in screenshot mode; crop boxes from the page, at the size the shot ends at; never the person\'s Chrome profile')
+    from localmodels import pictures, names
+    rects = dict(vw=1512, vh=900, tile0=[16, 82, 194, 90], tile3=[629, 82, 194, 90], models=[16, 182, 703, 370])
+    b = pictures.crop_box(rects, ('tile0', 'tile3'), (3024, 1800))
+    t('a crop is the union of its boxes, a margin around it, at 2x: x 10..829, y 76..178 in the page',
+      b == (20, 152, 1638, 204), b)
+    b = pictures.crop_box(dict(rects, edge=[0, 0, 100, 50]), ('edge',), (3024, 1800))
+    t('a crop at the page edge stays inside the picture and never starts at 0 (sips centres a crop offset of 0)', b[0] >= 1 and b[1] >= 1 and b[0] + b[2] <= 3024, b)
+    t('a box the page did not measure: no crop, said so', pictures.crop_box(rects, ('gone',), (3024, 1800)) is None)
+    args = pictures.chrome_args('/x/chrome', '/tmp/p', 1512, 900, 'light', shot='/tmp/a.png')
+    t("Chrome runs headless with its own profile, never the person's", '--headless=new' in args and '--user-data-dir=/tmp/p' in args, args)
+    t('light and dark are forced, not taken from the Mac',
+      any('preferredColorScheme=1' in a for a in args) and '--force-dark-mode' in pictures.chrome_args('/x', '/p', 1, 1, 'dark', shot='/a.png'))
+    t('every picture the README shows is made', {s[0] for s in pictures.SHOTS} | {c[0] for c in pictures.CROPS}
+      == {'dashboard-dark', 'dashboard-light', 'dashboard-large-dark', 'dashboard-large-light', 'tiles-1-dark', 'tiles-2-dark', 'models-dark', 'concurrency-dark', 'clients-dark'})
+    real = names.presenting
+    out = os.path.join(box, 'pics'); said = []
+    try:
+        names.presenting = lambda: None
+        code = pictures.take(out, say=said.append)
+        t('screenshot mode off: refused (exit 2), nothing written, and the words say how to turn it on',
+          code == 2 and not os.path.exists(out) and any('localmodels present on' in w for w in said), said)
+        names.presenting = lambda: dict(until=time.time() + 60, keep=['research'])
+        said.clear(); code = pictures.take(out, say=said.append)
+        t('screenshot mode ending within 5 minutes: refused too (it would end mid-capture)', code == 2 and not os.path.exists(out), said)
+    finally: names.presenting = real
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
@@ -1274,6 +1303,7 @@ def main():
         test_run_plans(box)
         test_sessions(box)
         test_names(box)
+        test_pictures(box)
     finally: shutil.rmtree(box, ignore_errors=True)
     t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')

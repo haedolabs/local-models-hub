@@ -27,6 +27,9 @@
   localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
   localmodels present on [for 2h] [show a,b] | off      screenshot mode: screens show the projects named (the demo's
                                  and local-models by default) and every other one as "other", with no session titles
+  localmodels pictures [--out docs] [--dry]   the README's pictures of the dashboard (headless Chrome, 1512 x 900 and
+                                 1728 x 1117 at 2x, dark and light, close-ups cut along the page's own boxes); only in
+                                 screenshot mode with 5 minutes left
   localmodels demo [--minutes 60] [--dry]   a synthetic workload under generic names (made-up records, three projects,
                                  every slot filled) for screenshots and load tests
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
@@ -1593,7 +1596,7 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
             # demo's --project, --workers, --model and --seed: one project's program, started by the demo itself
     'status': ((), ()), 'st': ((), ()), 'open': ((), ()), 'log': (('--hours',), ()), 'swapcheck': ((), ()),
     'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
-    'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
+    'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'pictures': (('--out',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
@@ -1657,6 +1660,10 @@ def main(argv):
     if verb == 'on': return on_cmd()
     if verb == 'present': return present_cmd(a)
     if verb == 'demo': return demo_cmd(a)
+    if verb == 'pictures':
+        from . import pictures
+        out = a[a.index('--out') + 1] if '--out' in a else None
+        return pictures.take(os.path.abspath(os.path.expanduser(out)) if out else None, dry='--dry' in a)
     if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)
     if verb in ('peer', 'peers'): return peer_cmd(a)
     if verb == 'notice':

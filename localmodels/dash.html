@@ -696,7 +696,7 @@ function renderNow() {
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
   guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
   guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); guard('tiles (cut lines)', tipCut);
-  guard('title', () => renderTitle(busy, cap, waiting));
+  guard('title', () => renderTitle(busy, cap, waiting)); guard('rects', writeRects);
 }
 
 const TITLE = document.title;
@@ -711,6 +711,15 @@ function staleness() {
   c.classList.toggle('stale', old);
   c.textContent = 'updated ' + S.clock + (old ? ` · ${span(age)} ago, not current` : '');
   if (old) document.title = 'not current – ' + TITLE;
+}
+const RECTS = new URLSearchParams(location.search).has('rects');
+function writeRects() {          // ?rects (localmodels pictures): each card's box in CSS pixels, written into the page for a headless --dump-dom
+  if (!RECTS) return;
+  const box = e => { const r = e.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; };
+  const out = {vw: innerWidth, vh: innerHeight, models: box($('models-body').closest('.card')), ans: box($('ans').closest('.card')), users: box($('users').closest('.card'))};
+  document.querySelectorAll('.kpis > .card').forEach((e, i) => out['tile' + i] = box(e));
+  let pre = $('lm-rects'); if (!pre) { pre = el('pre', {id: 'lm-rects', hidden: ''}); document.body.append(pre); }
+  pre.textContent = JSON.stringify(out);
 }
 function tipCut() {      // a tile line too long for its column ends in an ellipsis (never a second line): its whole text is its tooltip
   for (const e of document.querySelectorAll('.kpis .value, .kpis .minor, .kpis .foot')) {
