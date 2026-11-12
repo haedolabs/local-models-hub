@@ -18,6 +18,8 @@
                                  recovery, load_at_start, LM Studio's server) until `localmodels on`; kept across restarts.
                                  Refused while a run holds a lease on a loaded model, unless --force
   localmodels on                 switch them on again: the families loaded when switched off are loaded (all replicas)
+  localmodels app install | uninstall   the menu-bar app: built here from app/ with the Command Line Tools' swiftc, signed
+                                 ad hoc, in ~/Applications (state icon, on/off per host, two notifications)
   localmodels name               each project as seen and as shown on every screen, with its batches, jobs and scripts
   localmodels name project <as seen> <shown>            what every screen calls a project (a folder or an X-Project)
   localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
@@ -1181,7 +1183,110 @@ def run_tests(quiet=False):
         last = (p.stdout.strip().split('\n') or [''])[-1]
         out.append((name, p.returncode == 0, last if not fails else '; '.join(fails)[:300] if p.returncode else last))
         if p.returncode and not fails: out[-1] = (name, False, (p.stderr.strip().split('\n') or ['?'])[-1][:300])
+    if swiftc() and os.path.exists(os.path.join(HOME, 'app', 'tests', 'main.swift')): out.append(app_tests())
     return out
+
+
+# ---------------------------------------------------------------- the menu-bar app (app/)
+APP_ID = 'com.haedolabs.localmodels'
+APP_BUNDLE = os.path.expanduser('~/Applications/Local Models Hub.app')
+APP_EXE = 'LocalModelsHub'
+
+
+def swiftc():
+    """The Command Line Tools' Swift compiler, or None when they are not installed."""
+    w = shutil.which('swiftc')
+    if w: return w
+    try: p = subprocess.run(['xcrun', '-f', 'swiftc'], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError): return None
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+
+
+def app_tests():
+    """The app's state logic (app/Glance.swift) against its fixture snapshots. -> (name, ok, last line or the failures)."""
+    import tempfile
+    name = 'test_menubar.swift'
+    with tempfile.TemporaryDirectory(prefix='localmodels-app-') as d:
+        exe = os.path.join(d, 'tests')
+        try:
+            b = subprocess.run([swiftc(), '-swift-version', '5', os.path.join(HOME, 'app', 'Glance.swift'), os.path.join(HOME, 'app', 'tests', 'main.swift'), '-o', exe],
+                               capture_output=True, text=True, timeout=300)
+            if b.returncode: return (name, False, 'build failed: ' + (b.stderr.strip().split('\n') or ['?'])[0][:300])
+            p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+        except subprocess.SubprocessError as e: return (name, False, str(e))
+    fails = [l.strip()[5:] for l in p.stdout.split('\n') if l.strip().startswith('FAIL')]
+    return (name, p.returncode == 0, '; '.join(fails)[:300] if fails else (p.stdout.strip().split('\n') or [''])[-1])
+
+
+def app_installed():
+    """The installed app's version, or None when it is not installed."""
+    try:
+        with open(os.path.join(APP_BUNDLE, 'Contents', 'Info.plist'), 'rb') as f: return plistlib.load(f).get('CFBundleShortVersionString') or '?'
+    except (OSError, ValueError, plistlib.InvalidFileException): return None
+
+
+def app_quit():
+    subprocess.run(['pkill', '-x', APP_EXE], capture_output=True)
+    for _ in range(30):
+        if subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode: return
+        time.sleep(0.2)
+
+
+def app_cmd(a):
+    """localmodels app install | uninstall: the menu-bar app, built on this Mac from app/ (no signing needed: a local
+    build carries no quarantine attribute), in ~/Applications."""
+    w = [x for x in a if not x.startswith('--')]
+    verb = w[0] if w else ''
+    if verb not in ('install', 'uninstall'):
+        v = app_installed()
+        print(f'menu-bar app: ' + (f'{v} installed at {APP_BUNDLE}' + (' (running)' if not subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode else ' (not running)')
+                                    if v else 'not installed') + '\n  localmodels app install | uninstall')
+        return 0 if verb == '' else 2
+    if sandboxed(): print(f'nothing done: {sandboxed()}'); return 2
+    if verb == 'uninstall':
+        if not app_installed(): print('menu-bar app: not installed'); return 0
+        subprocess.run([os.path.join(APP_BUNDLE, 'Contents', 'MacOS', APP_EXE), '--unregister-login'], capture_output=True, timeout=30)
+        app_quit(); shutil.rmtree(APP_BUNDLE, ignore_errors=True)
+        print(f'menu-bar app removed ({APP_BUNDLE}), with its login item'); return 0
+    sc = swiftc()
+    if not sc: print('menu-bar app: needs the Command Line Tools (swiftc): xcode-select --install'); return 2
+    name, good, note = app_tests()
+    if not good: print(f'menu-bar app not installed: its tests fail: {note}'); return 1
+    import tempfile
+    os.makedirs(os.path.dirname(APP_BUNDLE), exist_ok=True)
+    stage = tempfile.mkdtemp(prefix='.localmodels-app-', dir=os.path.dirname(APP_BUNDLE))
+    try:
+        app = os.path.join(stage, 'Local Models Hub.app'); macos, res = os.path.join(app, 'Contents', 'MacOS'), os.path.join(app, 'Contents', 'Resources')
+        os.makedirs(macos); os.makedirs(res)
+        b = subprocess.run([sc, '-O', '-swift-version', '5', '-target', f'{os.uname().machine}-apple-macos13.0',
+                            os.path.join(HOME, 'app', 'Glance.swift'), os.path.join(HOME, 'app', 'main.swift'), '-o', os.path.join(macos, APP_EXE)],
+                           capture_output=True, text=True, timeout=600)
+        if b.returncode: print('menu-bar app: build failed:\n' + b.stderr.strip()[-1500:]); return 1
+        icon = subprocess.run(['sips', '-s', 'format', 'icns', os.path.join(HOME, 'brand', 'logo-1024.png'), '--out', os.path.join(res, 'AppIcon.icns')],
+                              capture_output=True, text=True, timeout=60)
+        cli = os.path.realpath(sys.argv[0]) if os.path.basename(sys.argv[0]) == 'localmodels' else os.path.join(HOME, 'bin', 'localmodels')
+        with open(os.path.join(app, 'Contents', 'Info.plist'), 'wb') as f:
+            plistlib.dump(dict(CFBundleIdentifier=APP_ID, CFBundleName='Local Models Hub', CFBundleDisplayName='Local Models Hub', CFBundleExecutable=APP_EXE,
+                               CFBundlePackageType='APPL', CFBundleShortVersionString=VERSION, CFBundleVersion=VERSION, LSMinimumSystemVersion='13.0',
+                               LSUIElement=True, NSHighResolutionCapable=True, LMHubURL=llmshare.HUB, LMHubCLI=cli,
+                               **({'CFBundleIconFile': 'AppIcon'} if icon.returncode == 0 else {})), f)
+        s = subprocess.run(['codesign', '--force', '--sign', '-', app], capture_output=True, text=True, timeout=120)
+        if s.returncode: print('menu-bar app: ad-hoc signing failed: ' + s.stderr.strip()[-300:]); return 1
+        was = app_installed()
+        app_quit()
+        if os.path.exists(APP_BUNDLE): shutil.rmtree(APP_BUNDLE)
+        os.rename(app, APP_BUNDLE)
+    finally: shutil.rmtree(stage, ignore_errors=True)
+    subprocess.run(['open', APP_BUNDLE], capture_output=True)
+    print(f"menu-bar app {VERSION} {'replaced ' + was if was else 'installed'}: {APP_BUNDLE} (built here, signed ad hoc; its tests: {note})")
+    print('  running in the menu bar; Launch at login is in its menu')
+    return 0
+
+
+def lmstudio_up():
+    from . import models
+    try: return models.server_up()
+    except Exception: return False                         # not recorded: the check prints what it finds
 
 
 def check():
@@ -1194,8 +1299,12 @@ def check():
         snap = json.load(llmshare.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
         t('the dashboard answers', NAME.encode() in page and b'__HUB_NAME__' not in page and 'lmstudio' in snap, f'{llmshare.HUB}/ (localmodels open)')
     except (OSError, ValueError) as e: t('the dashboard answers', False, str(e))
-    try: models = json.load(llmshare.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
-    except OSError as e: t('LM Studio reachable via the gateway', False, str(e))
+    from . import maint as _maint
+    if _maint.switched_off() and not lmstudio_up():     # switched off: the gateway starts no LM Studio server, by design
+        print("  skip LM Studio check (local models switched off: its server is not started until localmodels on)")
+    else:
+        try: models = json.load(llmshare.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
+        except OSError as e: t('LM Studio reachable via the gateway', False, str(e))
     t('the lms command is found', lms_found(), llmshare.LMS if lms_found() else f"not at {llmshare.LMS} and not on PATH: open LM Studio once and run ~/.lmstudio/bin/lms bootstrap, or set LMS; without it the instance manager cannot load, reload or recycle instances")
     rows = llmshare.loaded(fresh=True)
     ids = {r['id'] for r in rows}
@@ -1213,7 +1322,7 @@ def check():
         t('link listener bound', bool(dl and (dl.get('listening') or '').startswith('listening')),
           (dl or {}).get('listening') or 'no status (gateway runs code without peer support: localmodels install)')
     for name, good, note in run_tests():
-        t(f'{name[5:-3]}: the sandbox tests pass', good, note)
+        t(f'{os.path.splitext(name)[0][5:]}: the sandbox tests pass', good, note)
     down = crashes.down()
     t('no model is down after a crash', not down, '; '.join(d['words'] for d in down) or 'localmodels crashes for the record')
     from . import errors as _errors
@@ -1251,6 +1360,11 @@ def check():
         except (ValueError, AttributeError): pass
     t('the tools answer (MCP)', set(names) == {x['name'] for x in mcp_server.TOOLS}, ', '.join(names))
     t('gateway runs this code', not dash.door()['stale'], 'localmodels install refreshes it' if dash.door()['stale'] else digest(HOME))
+    av = app_installed()
+    if av:                                                 # the menu-bar app, when installed: running, and built from this release
+        running = not subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode
+        t('menu-bar app runs this release', running and av == VERSION,
+          f'{av}' + ('' if running else ', not running') + ('' if av == VERSION else f'; this release is {VERSION}: localmodels app install'))
     print(f"{sum(ok)} of {len(ok)} ok")
     return 0 if all(ok) else 1
 
@@ -1482,7 +1596,7 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
-    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force',)), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force',)), 'app': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 
@@ -1538,6 +1652,7 @@ def main(argv):
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
     if verb == 'off': return off_cmd(a)
+    if verb == 'app': return app_cmd(a)
     if verb == 'on': return on_cmd()
     if verb == 'present': return present_cmd(a)
     if verb == 'demo': return demo_cmd(a)
