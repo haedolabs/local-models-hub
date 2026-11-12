@@ -67,6 +67,8 @@ CUT = {
     'native': b'event: error\ndata: {"type": "error", "error": {"type": "server_error", "message": "LM Studio stream truncated (no terminal event)"}}\n\n',
 }
 ICONS = {'/favicon.ico': 64, '/favicon.png': 64, '/apple-touch-icon.png': 180, '/apple-touch-icon-precomposed.png': 180}   # path -> pixels
+FILES = {'/libre-franklin-400.woff2': 'font/woff2', '/libre-franklin-500.woff2': 'font/woff2',   # the dashboard's typeface (SIL OFL)
+         '/pcb.svg': 'image/svg+xml'}                                                           # and the circuit board behind it; served beside the page
 ANTHROPIC_ERROR = {400: 'invalid_request_error', 403: 'permission_error', 404: 'not_found_error', 409: 'invalid_request_error', 503: 'overloaded_error'}
 _n, _lock, _live = itertools.count(1), threading.Lock(), {}
 _start = {'at': 0.0, 'since': time.time(), 'lock': threading.Lock()}
@@ -348,6 +350,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if path.startswith('/hub/'): return self.hub(method, path)
         if method == 'GET' and path.split('?')[0] in ('/', '/dash', '/dash/'): return self._raw(200, web.page(), 'text/html; charset=utf-8')
         if method == 'GET' and path.split('?')[0] in ICONS: return self._raw(200, icon.png(ICONS[path.split('?')[0]]), 'image/png')
+        if method == 'GET' and path.split('?')[0] in FILES: return self._raw(200, web.asset(path.split('?')[0][1:]), FILES[path.split('?')[0]])
         m = re.match(r'^/p/([A-Za-z0-9._ -]{1,80})(/.*)$', path)
         if m: project, path = project or m.group(1), m.group(2)
         body = self._body()

@@ -270,7 +270,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/agent.py` | local agents: the tool loop, sandboxed read-only file tools, structured output, retries |
 | `localmodels/mcp_server.py` | the MCP server (stdio) and the detached job runner |
 | `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code sessions |
-| `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints; the terminal UI |
+| `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints, with its typeface (`libre-franklin-400.woff2`, `-500.woff2`) and background (`pcb.svg`, drawn by `tools/pcb.py`), served beside the page; the terminal UI |
 | `localmodels/icon.py` | the icon as PNG (`/favicon.png`, `/apple-touch-icon.png`) and SVG; `python3 -m localmodels.icon` writes `brand/` and `docs/icon.png` |
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
 | `hooks/hooks.json` | the plugin's maintenance hook |
@@ -309,4 +309,4 @@ Send every request through the gateway, never to port 1234. Hold a lease for a r
 
 ## License
 
-MIT, © 2026 [Haedo Labs](https://haedolabs.com); see [LICENSE](LICENSE).
+MIT, © 2026 [Haedo Labs](https://haedolabs.com); see [LICENSE](LICENSE). The dashboard's typeface, Libre Franklin, is under the SIL Open Font License 1.1 ([localmodels/libre-franklin-OFL.txt](localmodels/libre-franklin-OFL.txt)).

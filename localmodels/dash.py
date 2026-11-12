@@ -19,7 +19,18 @@ import glob, hashlib, json, os, re, shutil, subprocess, sys, time, urllib.reques
 from . import HOME, llmshare, maint, names, runs, sessions, whois
 
 COLOR = sys.stdout.isatty() and '--no-color' not in sys.argv
-C = dict(r='31', g='32', y='33', b='34', m='35', c='36', w='37', B='1', d='2', R='7')
+TRUE = os.environ.get('COLORTERM', '').lower() in ('truecolor', '24bit')
+
+
+def _fg(rgb, n):
+    """A foreground color: exact where the terminal takes 24-bit color, else the nearest of the 256."""
+    return '38;2;%d;%d;%d' % rgb if TRUE else f'38;5;{n}'
+
+
+# Haedo Labs' palette, as on the dashboard: sapphire and its steps, the shared beige-grey, off-white, the hairline grey.
+# The letters keep their old roles: g good, y warning, r critical (off-white: no red), c the accent, m Claude, b rules.
+C = dict(g=_fg((135, 172, 232), 110), y=_fg((188, 164, 150), 181), r=_fg((236, 231, 223), 255), c=_fg((69, 120, 206), 68),
+         m=_fg((169, 198, 244), 153), b=_fg((94, 90, 84), 240), w=_fg((236, 231, 223), 255), B='1', d='2', R='7')
 INSTALLED = os.path.join(llmshare.SHARED, 'hub')          # the copy launchd runs the door from (localmodels install)
 PROVIDERS = []                                            # (title, fn): a project's own rows, added to its own view
 _cache, _files = {}, {}
@@ -525,7 +536,7 @@ def show(s, w=80, h=24):
         big = max(sections, key=lambda x: len(x[1]) - x[2])
         if len(big[1]) <= big[2]: break
         big[1] = big[1][:-1]
-    body = [k(' local models ', 'R', 'B', 'm') + k(f"  what's running · {s['time']}", 'B')]
+    body = [k(' local models ', 'R', 'B', 'c') + k(f"  what's running · {s['time']}", 'B')]
     for title, lines, _ in sections: body += [rule(title)] + lines
     body = [fit(l, w) for l in body][:h - 1]
     body += [''] * (h - 1 - len(body))
