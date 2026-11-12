@@ -561,7 +561,8 @@ function renderMemory() {                    // this Mac, and each peer stacked 
   else { f.svg.append(sv('path', {d: line(cap), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '4 3'}));
          const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${cap[li]} GB`; f.svg.append(lt); }
   f.svg.append(sv('circle', {cx: xs[li], cy: f.y(sum[li]), r: 4, fill: series[series.length - 1].color, stroke: 'var(--surface)', 'stroke-width': 2}));
-  const vt = sv('text', {x: xs[li] + 8, y: f.y(sum[li]) + 4}); vt.textContent = sum[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
+  const vy = Math.abs(f.y(sum[li]) - yy) < 13 ? yy + 15 : f.y(sum[li]) + 4;            // clear of the capacity label at the same edge
+  const vt = sv('text', {x: xs[li] + 8, y: vy}); vt.textContent = sum[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
   crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(M.t[i]), stacked
     ? series.map(s => ({name: s.name, color: s.color, value: gb(s.v[i])})).concat([{name: 'total', color: 'var(--muted)', line: true, value: `${gb(sum[i])} of ${cap[i]} GB`}])
     : [{name: 'memory used', color: 'var(--s1)', line: true, value: `${gb(M.used[i])} of ${cap[i]} GB`}]));
@@ -664,7 +665,7 @@ function renderNow() {
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
   guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
-  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('tiles (cut lines)', tipCut);
+  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); guard('tiles (cut lines)', tipCut);
   guard('title', () => renderTitle(busy, cap, waiting));
 }
 
@@ -702,9 +703,9 @@ function fitModels() {   // any number of models: rows grow to fill the card (ne
   const search = (lo, hi, ok) => { for (let i = 0; i < 7; i++) { const k = (lo + hi) / 2; set(k); if (ok()) lo = k; else hi = k; } set(lo); return lo; };
   const right = () => {     // one right column for every row (state, recycle %), as wide as its widest label: modules and bars end together
     box.style.setProperty('--right', 'auto');
-    const w = Math.max(0, ...[...box.querySelectorAll('.st, .band-end')].filter(e => e.offsetParent).map(e => e.scrollWidth));
-    box.style.setProperty('--right', w ? Math.ceil(w) + 2 + 'px' : 'auto');        // + 2: scrollWidth rounds a fractional text width down
-  };
+    const w = Math.min(box.clientWidth * 0.42, Math.max(0, ...[...box.querySelectorAll('.st, .band-end')].filter(e => e.offsetParent).map(e => e.scrollWidth)));
+    box.style.setProperty('--right', w ? Math.ceil(w) + 2 + 'px' : 'auto');        // + 2: scrollWidth rounds a fractional text width down;
+  };                                                                                // at most 42% of the card: a long state ends in an ellipsis
   box.classList.remove('tight', 'compact', 'dense', 'cols'); box.style.setProperty('--gap', '0px'); box.style.setProperty('--lead', '0px'); set(1); right();
   for (const fold of ['tight', 'compact', 'dense', 'cols']) { if (!over()) break; box.classList.add(fold); right(); }   // bands, rows, meta, then two columns
   if (over()) { search(0.8, 1, () => !over()); return; }
@@ -718,6 +719,9 @@ function fitModels() {   // any number of models: rows grow to fill the card (ne
   else box.style.setProperty('--lead', (rest / 2).toFixed(1) + 'px');                  // one row: centered
 }
 
+function stateTips() {   // a state cut to fit the right column: its whole text is its tooltip
+  for (const e of $('models-body').querySelectorAll('.st')) e.title = e.scrollWidth > e.clientWidth + 1 ? e.textContent : '';
+}
 // a model down after a crash, a copy being recycled, an unsure listing: said at the top, in words
 function renderAlerts() {
   const out = [];

@@ -579,6 +579,18 @@ def test_cli_args():
             t(f'{" ".join(argv)}: refused with exit 2, nothing run', code == 2 and not did, (argv, code, did, out[-120:]))
         code, did, out = run('install', '--wait=480')
         t('--wait=480 is read as --wait 480', code == 0 and did and did[0][1][0] == 480 * 60, did)
+        from localmodels import demo                       # the demo starts one program per project: each one's command line is taken
+        kids, real_popen, real_plan = [], demo.subprocess.Popen, demo.plan
+        class Kid:
+            returncode = 0
+            def wait(self): return 0
+        demo.subprocess.Popen = lambda argv, **k: kids.append(argv) or Kid()
+        demo.plan = lambda minutes: ('test/family', 3, {p[0]: 1 for p in demo.PROJECTS})
+        try: demo.spawn(minutes=1, say=lambda *a: None, seed=1)
+        finally: demo.subprocess.Popen, demo.plan = real_popen, real_plan
+        took = [run(*argv[argv.index('demo'):]) for argv in kids]
+        t("the demo's own programs: the options it starts them with are taken (each runs, none refused)",
+          kids and all(code == 0 and did and did[0][0] == 'demo_cmd' for code, did, out in took), [(c, d[:1], o[-100:]) for c, d, o in took])
     finally:
         for n, f in real.items(): setattr(cli, n, f)
 
