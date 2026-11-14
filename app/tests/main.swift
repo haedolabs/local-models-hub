@@ -1,7 +1,8 @@
 // The menu-bar app's state logic (app/Glance.swift) against fixture snapshots: the icon, the menu's lines and actions,
-// and the notifications. Built and run by `localmodels check` when the Command Line Tools are present:
-//   swiftc app/Glance.swift app/tests/main.swift -o <tmp> && <tmp>
-import Foundation
+// and the notifications; and its menu kept in place across polls (app/Menu.swift), with real menu items. Built and run by
+// `localmodels check` when the Command Line Tools are present:
+//   swiftc app/Glance.swift app/Menu.swift app/tests/main.swift -o <tmp> && <tmp>
+import AppKit
 
 var results: [Bool] = []
 func t(_ name: String, _ good: Bool, _ note: @autoclosure () -> String = "") {
@@ -73,6 +74,147 @@ t("the gateway down: idle with attention, and a way to start it", gone.icon == .
 
 let partial = glance(snap(#"{}"#), now: now)
 t("a snapshot missing every field: read without a crash", partial.gatewayUp && partial.icon == .idle)
+
+// ---------------------------------------------------------------- extensions (GUIDE.md "Extensions"; a made-up one)
+print("menu-bar app: extensions, each in its own section, every action held to its own origin and verbs")
+
+func manifest(_ extra: String = "") -> Data {
+    Data((#"{"extension": 1, "id": "example.first", "name": "Example Tool", "title": "First Project", "version": "1.0.0", "menu": "http://localhost:9411/api/menu","#
+          + #" "open": "http://localhost:9411", "token": "/tmp/example.token", "token_header": "X-Example-Token","#
+          + #" "run": {"command": ["/usr/bin/true", "example"], "env": {"EXAMPLE_PROJECT": "/tmp/first"}, "verbs": ["start", "restart"]}\#(extra)}"#).utf8)
+}
+let ex = readExtension(manifest())
+t("a sound manifest is read", ex != nil && ex!.label == "Example Tool — First Project" && ex!.origin == "http://localhost:9411" && ex!.verbs == ["start", "restart"], "\(String(describing: ex))")
+t("...its token header and command as given", ex?.tokenHeader == "X-Example-Token" && ex?.command == ["/usr/bin/true", "example"] && ex?.env == ["EXAMPLE_PROJECT": "/tmp/first"])
+t("refused: another protocol version", readExtension(Data(#"{"extension": 2, "id": "a.b", "name": "A", "menu": "http://localhost:1/m"}"#.utf8)) == nil)
+t("refused: a menu on another machine", readExtension(Data(#"{"extension": 1, "id": "a.b", "name": "A", "menu": "http://example.com/m"}"#.utf8)) == nil)
+t("refused: an id with capitals", readExtension(Data(#"{"extension": 1, "id": "A.b", "name": "A", "menu": "http://localhost:1/m"}"#.utf8)) == nil)
+t("refused: not JSON", readExtension(Data("nope".utf8)) == nil && readExtension(nil) == nil)
+let offsite = readExtension(Data(#"{"extension": 1, "id": "a.b", "name": "A", "menu": "http://localhost:1/m", "open": "http://example.com/"}"#.utf8))
+t("a page on another origin is dropped, the extension kept", offsite != nil && offsite!.open.isEmpty)
+
+let menuJSON = #"{"menu": 1, "summary": "3 of 8 items ready", "alerts": [{"title": "Something is due tomorrow", "action": {"open": "/due"}}],"#
+    + #" "lines": [{"title": "A status line"}, {"title": "Open the report", "action": {"open": "/report"}, "indent": 1},"#
+    + #" {"title": "Export it", "action": {"post": "/api/export", "reveal": true}, "indent": 1},"#
+    + #" {"title": "Leave a note…", "action": {"post": "/api/note", "body": {"via": "menu"}, "input": {"prompt": "A note", "field": "text", "placeholder": "the note"}}},"#
+    + #" {"title": "Items", "children": [{"title": "First item", "action": {"open": "/items/1"}}]},"#
+    + #" {"title": "Off to another site", "action": {"open": "http://example.com/"}}, {"title": "Uninstall it", "action": {"run": "uninstall"}},"#
+    + #" {"title": "Restart it", "action": {"run": "restart", "confirm": "Restart the example?"}}],"#
+    + #" "events": [{"key": "done:42", "title": "Job 42 finished", "body": "all good"}]}"#
+let hubSnap = snap(#"{"about": {"version": "1.2.3"}, "door": {"up": true, "queue": {}}, "maintenance": null, "lmstudio": {"families": [\#(fam)]}, "peers": [], "crashes": {"down": []}}"#)
+let withExt = glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(menuJSON))])
+let at = withExt.lines.firstIndex { $0.title == "Example Tool — First Project" } ?? -1
+let sec = at >= 0 ? Array(withExt.lines[at...]) : []
+t("its section: in the menu itself (no submenu to open first), after the hosts, under its name as a host is",
+  at > 0 && sec[0] == Line(title: "Example Tool — First Project", separatorBefore: true, indent: 0)
+  && withExt.lines[..<at].contains { $0.title == "Turn local models off" }, "\(withExt.lines.map(\.title))")
+t("...its page first under the name", sec.count > 1 && sec[1] == Line(title: "Open Example Tool", action: .extOpen(ext: "example.first", url: "http://localhost:9411"), indent: 1), "\(sec.map(\.title))")
+t("...then its alert, in its own section (not the hub's list), with its action",
+  sec.count > 2 && sec[2] == Line(title: "Something is due tomorrow", action: .extOpen(ext: "example.first", url: "http://localhost:9411/due"), indent: 1)
+  && !withExt.lines[..<at].contains { $0.title.contains("due tomorrow") }, "\(sec.map(\.title))")
+t("...then the summary", sec.count > 3 && sec[3] == Line(title: "3 of 8 items ready", indent: 1), "\(sec.map(\.title))")
+t("...its alert lights the dot", withExt.attention)
+let kids = Array(sec.dropFirst(4))
+t("...its lines indented under the name, one deeper than served", kids.first == Line(title: "A status line", indent: 1)
+  && kids.contains(Line(title: "Open the report", action: .extOpen(ext: "example.first", url: "http://localhost:9411/report"), indent: 2)), "\(kids.map { "\($0.title) \($0.indent ?? -1)" })")
+t("...a POST that shows its file", kids.contains(Line(title: "Export it", action: .extPost(ext: "example.first", path: "/api/export", body: [:], confirm: "", input: nil, reveal: true), indent: 2)))
+t("...a POST that asks for a line first", kids.contains(Line(title: "Leave a note…", action: .extPost(ext: "example.first", path: "/api/note", body: ["via": "menu"], confirm: "",
+                                                                                                  input: Input(prompt: "A note", field: "text", placeholder: "the note"), reveal: false), indent: 1)))
+t("...a submenu of its own", kids.first { $0.title == "Items" }?.children == [Line(title: "First item", action: .extOpen(ext: "example.first", url: "http://localhost:9411/items/1"), indent: 0)])
+t("...a page on another site: drawn, but no action", kids.first { $0.title == "Off to another site" }?.action == Action.none)
+t("...a verb the manifest does not list: no action", kids.first { $0.title == "Uninstall it" }?.action == Action.none)
+t("...a listed verb, with its question", kids.first { $0.title == "Restart it" }?.action == .extRun(ext: "example.first", verb: "restart", confirm: "Restart the example?"))
+t("...one block: no separator inside the section itself", !sec.dropFirst().contains { $0.separatorBefore } && withExt.lines.last?.title == "Restart it", "\(sec.map(\.title))")
+t("its event: a key of its own, and a click opens its page", withExt.events == [Event(key: "ext:example.first:done:42", title: "Job 42 finished", body: "all good", ext: "example.first")], "\(withExt.events)")
+t("the hub's own lines and state are untouched by it", withExt.icon == .serving && withExt.summary == hubGlance(hubSnap, now: now).summary
+  && Array(withExt.lines[..<max(0, at)]) == hubGlance(hubSnap, now: now).lines)
+
+var longMenu = #"{"menu": 1, "lines": ["#
+longMenu += (0..<20).map { #"{"title": "line \#($0)", "separator": \#($0 == 3 ? "true" : "false")}"# }.joined(separator: ",") + "]}"
+let longSec = Array(glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(longMenu))]).lines.drop { $0.title != "Example Tool — First Project" })
+let more = longSec.last
+t("past 12 lines of its own, the rest under More (at their served indent)", longSec.count == 1 + 1 + 12 && more?.title == "More"
+  && more?.children.count == 9 && more?.children.first == Line(title: "line 11", indent: 0), "\(longSec.map(\.title)) \(more?.children.map(\.title) ?? [])")
+
+let song = "Like a Stone (Live At Queen Elizabeth Theatre, Toronto, ON April 20, 2011) — 1 of 13 · next: Stems"
+let cut = fit(song)
+t("a long title: cut in the middle at spaces, its end (the state) kept, the whole as the tooltip",
+  cut.title.count <= titleLength && cut.title.hasPrefix("Like a Stone") && cut.title.hasSuffix("1 of 13 · next: Stems") && cut.title.contains(" … ") && cut.tooltip == song, cut.title)
+t("a title that fits: as is, no tooltip", fit("Open the report") == ("Open the report", ""))
+let wide = glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(#"{"menu": 1, "lines": [{"title": "Songs", "children": [{"title": "\#(song)"}]}]}"#))])
+let cutKid = wide.lines.last?.children.first
+t("...and so in a submenu", cutKid?.title == cut.title && cutKid?.tooltip == song, "\(String(describing: cutKid))")
+
+let extDown = glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: nil, downSince: now - 90)])
+let downAt = extDown.lines.firstIndex { $0.title == "Example Tool — First Project — not answering" } ?? -1
+t("an extension not answering: its name says so, attention lit", downAt > 0 && extDown.attention, "\(extDown.lines.map(\.title))")
+t("...first under it, a way to start it (a listed verb)", downAt > 0 && extDown.lines[downAt + 1] == Line(title: "Start Example Tool", action: .extRun(ext: "example.first", verb: "start", confirm: ""), indent: 1),
+  "\(extDown.lines.map(\.title))")
+t("...and where it was asked", extDown.lines.last == Line(title: "No menu at http://localhost:9411/api/menu", indent: 1))
+t("...down for a minute and a half: one notification", extDown.events.map(\.key) == ["ext:example.first:down:\(Int(now - 90))"], "\(extDown.events)")
+t("...down for twenty seconds: none yet", glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: nil, downSince: now - 20)]).events.isEmpty)
+let noStart = readExtension(Data(#"{"extension": 1, "id": "a.b", "name": "A", "menu": "http://localhost:1/m"}"#.utf8))!
+t("...with no start verb: no Start line", !glance(hubSnap, now: now, extensions: [ExtensionPage(ext: noStart, menu: nil)]).lines.contains { $0.title.hasPrefix("Start") })
+
+let v2 = glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(#"{"menu": 2, "lines": [{"title": "x"}]}"#))])
+t("a menu of another protocol version: said, and nothing drawn from it", v2.lines.last?.title == "Example Tool — First Project — its menu is not protocol 1" && v2.lines.last?.children.isEmpty == true)
+let deep = glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(#"{"menu": 1, "lines": [{"title": "a", "children": [{"title": "b", "children": [{"title": "c", "children": [{"title": "d"}]}]}]}]}"#))])
+t("submenus stop at three deep", deep.lines.last?.children.first?.children.first?.title == "c" && deep.lines.last?.children.first?.children.first?.children.isEmpty == true,
+  "\(String(describing: deep.lines.last))")
+var many = #"{"menu": 1, "lines": ["#
+many += (0..<250).map { #"{"title": "line \#($0)"}"# }.joined(separator: ",") + "]}"
+let manySec = Array(glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(many))]).lines.drop { $0.title != "Example Tool — First Project" })
+t("at most 200 lines are drawn", manySec.count - 3 + (manySec.last?.children.count ?? 0) == 200, "\(manySec.count) \(manySec.last?.children.count ?? 0)")
+
+let downHub = glanceDown(extensions: [ExtensionPage(ext: ex!, menu: snap(menuJSON))], now: now)
+t("the gateway down: the extensions still show", downHub.lines.contains { $0.title == "Example Tool — First Project" } && downHub.lines.contains(Line(title: "Start gateway", action: .startGateway)), "\(downHub.lines.map(\.title))")
+t("no extensions: the menu is the hub's alone", glance(hubSnap, now: now).lines == hubGlance(hubSnap, now: now).lines)
+
+// ---------------------------------------------------------------- the menu kept in place across updates
+print("menu-bar app: an update keeps the items that line up, so an open submenu stays open")
+let K = { (s: String) -> [Kind] in s.map { $0 == "-" ? Kind.separator : $0 == ">" ? Kind.submenu : Kind.line } }
+t("nothing changed in shape: every item kept", keep(K("l-l>l-ll"), K("l-l>l-ll")) == (8, 0))
+t("an alert added at the top: the rest kept, the open submenu with it", keep(K("l-l>l-ll"), K("ll-l>l-ll")) == (1, 7))
+t("a line gone from a section: kept on both sides", keep(K("l-ll>-ll"), K("l-l>-ll")) == (3, 4))
+t("a line that grew a submenu: only it replaced", keep(K("l-lll-ll"), K("l-l>l-ll")) == (3, 4))
+t("never more kept than either has", { let k = keep(K("ll"), K("lll")); return k.head + k.tail <= 2 }())
+t("an empty menu: everything new", keep([], K("l-l")) == (0, 0))
+let kinds = { (g: Glance) -> [Kind] in g.lines.flatMap { l -> [Kind] in (l.separatorBefore ? [Kind.separator] : []) + [l.children.isEmpty ? .line : .submenu] } }
+var later = snap(menuJSON); later["summary"] = "4 of 8 items ready"
+let then = glance(hubSnap, now: now, extensions: [ExtensionPage(ext: ex!, menu: snap(menuJSON))])
+let after = glance(hubSnap, now: now + 2, extensions: [ExtensionPage(ext: ex!, menu: later)])
+t("a new summary two seconds later: the same shape, every item kept and retitled in place",
+  keep(kinds(then), kinds(after)) == (kinds(then).count, 0) && then.lines != after.lines)
+
+print("menu-bar app: the same with real menu items (app/Menu.swift): the same objects from one poll to the next")
+final class Sink: NSObject { @objc func act(_ s: NSMenuItem) {} }
+let sink = Sink(), keeper = MenuKeeper(target: sink, selector: #selector(Sink.act(_:)))
+let real = NSMenu(); real.autoenablesItems = false
+let footer = [Spec(), Spec(line: Line(title: "Open dashboard", action: .openDashboard, indent: 0), key: "d"),
+              Spec(line: Line(title: "Launch at login", action: .toggleLogin, indent: 0), on: true)]
+keeper.sync(real, specs(then.lines) + footer)
+let ids = { (m: NSMenu) -> [ObjectIdentifier] in m.items.map(ObjectIdentifier.init) }
+let item = { (title: String) -> NSMenuItem? in real.items.first { $0.title == title } }
+t("drawn: one item per line and per separator, each at its indent", real.items.count == specs(then.lines).count + 3
+  && real.items.filter(\.isSeparatorItem).count == then.lines.filter(\.separatorBefore).count + 1
+  && item("Open the report")?.indentationLevel == 2 && item("Example Tool — First Project")?.indentationLevel == 0, "\(real.items.map(\.title))")
+t("...an action: sent to the app, carried with the item", item("Open Example Tool")?.action == #selector(Sink.act(_:)) && item("Open Example Tool")?.target === sink
+  && (item("Open Example Tool")?.representedObject as? Box)?.action == .extOpen(ext: "example.first", url: "http://localhost:9411") && item("Open Example Tool")?.isEnabled == true)
+t("...a line with none: shown, not enabled", item("3 of 8 items ready")?.isEnabled == false && item("3 of 8 items ready")?.action == nil)
+t("...the footer's key and check mark", item("Open dashboard")?.keyEquivalent == "d" && item("Launch at login")?.state == .on)
+let before = ids(real), sub = item("Items")?.submenu, subIds = sub.map(ids) ?? []
+keeper.sync(real, specs(after.lines) + footer)
+t("the next poll, its summary changed: every item the same object, the summary retitled in place",
+  ids(real) == before && item("4 of 8 items ready") != nil && item("3 of 8 items ready") == nil, "\(real.items.map(\.title))")
+t("...the submenu the same object, and its items (a submenu open under the pointer stays open)", sub != nil && item("Items")?.submenu === sub && ids(sub!) == subIds)
+let crashed = snap(#"{"about": {"version": "1.2.3"}, "door": {"up": true, "queue": {}}, "maintenance": null, "lmstudio": {"families": [\#(fam)]}, "peers": [],"#
+                   + #" "crashes": {"down": [{"family": "test/family", "crashed": 1799999500, "state": "loading again"}]}}"#)
+keeper.sync(real, specs(glance(crashed, now: now, extensions: [ExtensionPage(ext: ex!, menu: later)]).lines) + footer)
+t("a hub alert added at the top: one item inserted, every item after it the same object, the submenu with them",
+  real.items.count == before.count + 1 && real.items[1].title.hasPrefix("test/family crashed") && Array(ids(real).dropFirst(2)) == Array(before.dropFirst(1))
+  && item("Items")?.submenu === sub, "\(real.items.map(\.title))")
+keeper.sync(real, specs(after.lines) + footer)
+t("...and gone again: the item removed, the rest kept", ids(real) == before)
 
 print("\(results.filter { $0 }.count) of \(results.count) ok")
 exit(results.allSatisfy { $0 } ? 0 : 1)

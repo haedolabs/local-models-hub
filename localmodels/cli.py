@@ -19,7 +19,11 @@
                                  Refused while a run holds a lease on a loaded model, unless --force
   localmodels on                 switch them on again: the families loaded when switched off are loaded (all replicas)
   localmodels app install | uninstall   the menu-bar app: built here from app/ with the Command Line Tools' swiftc, signed
-                                 ad hoc, in ~/Applications (state icon, on/off per host, two notifications)
+                                 ad hoc, in ~/Applications (state icon, on/off per host, two notifications, and a section
+                                 for each extension)
+  localmodels ext [check]        the extensions the menu-bar app draws (a manifest each in the state folder's extensions/,
+                                 GUIDE.md "Extensions"): each one's menu answering or not; check: every manifest and the
+                                 menu it serves read against the protocol (exit 1 on a problem)
   localmodels name               each project as seen and as shown on every screen, with its batches, jobs and scripts
   localmodels name project <as seen> <shown>            what every screen calls a project (a folder or an X-Project)
   localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
@@ -89,7 +93,7 @@ _HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.pa
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_code.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_extensions.py', 'test_code.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -1206,13 +1210,14 @@ def swiftc():
 
 
 def app_tests():
-    """The app's state logic (app/Glance.swift) against its fixture snapshots. -> (name, ok, last line or the failures)."""
+    """The app's state logic (app/Glance.swift) against its fixture snapshots, and its menu kept in place (app/Menu.swift)
+    with real menu items. -> (name, ok, last line or the failures)."""
     import tempfile
     name = 'test_menubar.swift'
     with tempfile.TemporaryDirectory(prefix='localmodels-app-') as d:
         exe = os.path.join(d, 'tests')
         try:
-            b = subprocess.run([swiftc(), '-swift-version', '5', os.path.join(HOME, 'app', 'Glance.swift'), os.path.join(HOME, 'app', 'tests', 'main.swift'), '-o', exe],
+            b = subprocess.run([swiftc(), '-swift-version', '5', *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'tests/main.swift')), '-o', exe],
                                capture_output=True, text=True, timeout=300)
             if b.returncode: return (name, False, 'build failed: ' + (b.stderr.strip().split('\n') or ['?'])[0][:300])
             p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
@@ -1262,7 +1267,7 @@ def app_cmd(a):
         app = os.path.join(stage, 'Local Models Hub.app'); macos, res = os.path.join(app, 'Contents', 'MacOS'), os.path.join(app, 'Contents', 'Resources')
         os.makedirs(macos); os.makedirs(res)
         b = subprocess.run([sc, '-O', '-swift-version', '5', '-target', f'{os.uname().machine}-apple-macos13.0',
-                            os.path.join(HOME, 'app', 'Glance.swift'), os.path.join(HOME, 'app', 'main.swift'), '-o', os.path.join(macos, APP_EXE)],
+                            *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'main.swift')), '-o', os.path.join(macos, APP_EXE)],
                            capture_output=True, text=True, timeout=600)
         if b.returncode: print('menu-bar app: build failed:\n' + b.stderr.strip()[-1500:]); return 1
         icon = subprocess.run(['sips', '-s', 'format', 'icns', os.path.join(HOME, 'brand', 'logo-1024.png'), '--out', os.path.join(res, 'AppIcon.icns')],
@@ -1271,7 +1276,7 @@ def app_cmd(a):
         with open(os.path.join(app, 'Contents', 'Info.plist'), 'wb') as f:
             plistlib.dump(dict(CFBundleIdentifier=APP_ID, CFBundleName='Local Models Hub', CFBundleDisplayName='Local Models Hub', CFBundleExecutable=APP_EXE,
                                CFBundlePackageType='APPL', CFBundleShortVersionString=VERSION, CFBundleVersion=VERSION, LSMinimumSystemVersion='13.0',
-                               LSUIElement=True, NSHighResolutionCapable=True, LMHubURL=llmshare.HUB, LMHubCLI=cli,
+                               LSUIElement=True, NSHighResolutionCapable=True, LMHubURL=llmshare.HUB, LMHubCLI=cli, LMHubState=llmshare.SHARED,
                                **({'CFBundleIconFile': 'AppIcon'} if icon.returncode == 0 else {})), f)
         s = subprocess.run(['codesign', '--force', '--sign', '-', app], capture_output=True, text=True, timeout=120)
         if s.returncode: print('menu-bar app: ad-hoc signing failed: ' + s.stderr.strip()[-300:]); return 1
@@ -1284,6 +1289,31 @@ def app_cmd(a):
     print(f"menu-bar app {VERSION} {'replaced ' + was if was else 'installed'}: {APP_BUNDLE} (built here, signed ad hoc; its tests: {note})")
     print('  running in the menu bar; Launch at login is in its menu')
     return 0
+
+
+def ext_cmd(a):
+    """localmodels ext [check]: the extensions the menu-bar app draws, each one's menu answering or not; check reads every
+    manifest and the menu it serves against the protocol (localmodels/extensions.py)."""
+    from . import extensions as ex
+    w = [x for x in a if not x.startswith('--')]
+    verb = w[0] if w else ''
+    if verb not in ('', 'check'): print('localmodels ext [check]'); return 2
+    found = ex.load()
+    if not found:
+        print(f'no extensions ({ex.DIR}): a program joins the menu-bar app by writing a manifest there (GUIDE.md, "Extensions")'); return 0
+    bad = 0
+    for x in found:
+        m = x['manifest'] if isinstance(x['manifest'], dict) else {}
+        label = (m.get('name') or x['file']) + (f" — {m['title']}" if m.get('title') else '') + (f" {m['version']}" if m.get('version') else '')
+        probs = list(x['problems'])
+        menu, why = (ex.fetch_menu(m) if not probs else (None, 'manifest not sound'))
+        if verb == 'check' and menu is not None: probs += [f'menu: {p}' for p in ex.validate_menu(menu, m)]
+        state = 'answering' if menu is not None else f'not answering ({why})'
+        print(f"  {label}: {state}" + (f" · {m.get('menu')}" if m.get('menu') else '') + (f" · {len(probs)} problem{'s' if len(probs) != 1 else ''}" if probs else ''))
+        for p in probs[:12]: print(f'      {p}')
+        bad += bool(probs) or (verb == 'check' and menu is None)
+    if verb == 'check': print(f"extensions: {len(found)}, {bad} with a problem" if bad else f'extensions: {len(found)}, all sound')
+    return 1 if (verb == 'check' and bad) else 0
 
 
 def lmstudio_up():
@@ -1600,7 +1630,7 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
-    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force',)), 'app': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force',)), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 
@@ -1657,6 +1687,7 @@ def main(argv):
     if verb == 'maintenance': return maintenance_cmd(a)
     if verb == 'off': return off_cmd(a)
     if verb == 'app': return app_cmd(a)
+    if verb == 'ext': return ext_cmd(a)
     if verb == 'on': return on_cmd()
     if verb == 'present': return present_cmd(a)
     if verb == 'demo': return demo_cmd(a)

@@ -68,6 +68,11 @@ h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* th
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
 .chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px var(--glow); }   /* status lights */
+.chip.ext { font: inherit; color: inherit; text-decoration: none; border: 0; }   /* an extension: a link to its page, or Start */
+a.chip.ext, button.chip.ext { cursor: pointer; } a.chip.ext:hover, button.chip.ext:hover { background: var(--hover); color: var(--ink); }
+button.chip.ext:disabled { cursor: default; } .chip.ext .go { color: var(--muted); }
+.chip.ext.busy i { animation: breathe 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .chip.ext.busy i { animation: none; } }
 .seg { display: inline-flex; background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 2px; }
 .seg button, .btn { font: inherit; border: 0; background: transparent; color: var(--ink-2); padding: 3px 10px; border-radius: 6px; cursor: pointer; }
 .seg button:hover, .btn:hover { background: var(--hover); }
@@ -263,7 +268,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
 <div class="wrap">
   <header>
     <div class="title"><h1><svg xmlns="http://www.w3.org/2000/svg" viewBox="7 -69 1491 72" role="img" aria-label="__HUB_NAME__"><title>__HUB_NAME__</title><path class="a" fill="currentColor" d="M90.5 -15.2L35.4 -15.2L35.4 -66.8L8.4 -66.8L8.4 0L90.5 0ZM146.9 -67.9C123.6 -67.9 102.9 -58.5 102.9 -33.4C102.9 -8.3 123.6 1.1 146.9 1.1C170.2 1.1 189.8 -8.3 189.8 -33.4C189.8 -58.5 170.2 -67.9 146.9 -67.9ZM146.9 -14.3C136.9 -14.3 131.7 -19.7 131.7 -30.4L131.7 -36.4C131.7 -47.1 136.9 -52.5 146.9 -52.5C157 -52.5 162.2 -47 162.2 -36.4L162.2 -30.4C162.2 -19.8 157 -14.3 146.9 -14.3ZM234.7 -33.4C234.7 -46.4 241.3 -52.7 253.3 -52.7C263.5 -52.7 271.6 -49.3 277.1 -45L289 -61.2C280.8 -65.7 266.8 -67.9 251 -67.9C224.7 -67.9 206 -55.3 206 -33.4C206 -11.8 224.3 1.1 250 1.1C265.8 1.1 281.9 -1.1 290.1 -5.6L278.2 -21.8C272.7 -17.5 263.2 -14.1 253 -14.1C241.3 -14.1 234.7 -20.1 234.7 -33.4ZM325.3 0L328.6 -7.6L356 -7.6L359.2 0L386 0L357.6 -66.8L330.6 -66.8L300.9 0ZM342.4 -39.4L342.8 -39.4L349.9 -22.4L335 -22.4ZM482.5 -15.2L427.4 -15.2L427.4 -66.8L400.4 -66.8L400.4 0L482.5 0ZM609.7 -66.8L594.4 -36.2L579.3 -66.8L536.5 -66.8L536.5 0L559 0L559 -47.4L583.5 0L600.5 0L623.7 -46.7L623.7 0L650.7 0L650.7 -66.8ZM713.1 -67.9C689.8 -67.9 669.1 -58.5 669.1 -33.4C669.1 -8.3 689.8 1.1 713.1 1.1C736.4 1.1 756 -8.3 756 -33.4C756 -58.5 736.4 -67.9 713.1 -67.9ZM713.1 -14.3C703.1 -14.3 697.9 -19.7 697.9 -30.4L697.9 -36.4C697.9 -47.1 703.1 -52.5 713.1 -52.5C723.2 -52.5 728.4 -47 728.4 -36.4L728.4 -30.4C728.4 -19.8 723.2 -14.3 713.1 -14.3ZM821.3 0C841.6 0 858.6 -13.6 858.6 -33.4C858.6 -53.2 841.9 -66.8 821.6 -66.8L774.5 -66.8L774.5 0ZM815.2 -51.6C823.8 -51.6 829.9 -44 829.9 -33.4C829.9 -22.8 823.8 -15.2 815.6 -15.2L801.5 -15.2L801.5 -51.6ZM959.1 -15.2L904 -15.2L904 -26.3L943.5 -26.3L943.5 -41.3L904 -41.3L904 -51.6L958.4 -51.6L958.4 -66.8L877 -66.8L877 0L959.1 0ZM1058.6 -15.2L1003.5 -15.2L1003.5 -66.8L976.5 -66.8L976.5 0L1058.6 0ZM1075.6 -45.4C1075.6 -31.3 1087.1 -24 1109.5 -24L1120.7 -24C1125.6 -24 1127.7 -21.9 1127.7 -19.4C1127.7 -16.3 1125.5 -14.6 1119.2 -14.6L1109.6 -14.6C1097.5 -14.6 1089.1 -17 1082.2 -21.4L1072.7 -5.3C1083.9 -1.1 1095.8 1 1107.2 1L1122.8 1C1143.6 1 1153.4 -9.4 1153.4 -22.1C1153.4 -34.8 1144.7 -44 1127.6 -44L1107 -44C1102.8 -44 1100.5 -45.3 1100.5 -48.1C1100.5 -51 1102.8 -52.3 1107.6 -52.3L1116.7 -52.3C1126 -52.3 1134.4 -50.8 1141.4 -47.8L1148.9 -62.3C1142.9 -65.5 1130.9 -67.8 1119.4 -67.8L1104.7 -67.8C1086.8 -67.8 1075.6 -58.5 1075.6 -45.4Z"/><path class="h" fill="#0f52ba" style="fill: var(--brand)" d="M1208.5 -66.8L1208.5 0L1235.5 0L1235.5 -26.3L1265.1 -26.3L1265.1 0L1292.1 0L1292.1 -66.8L1265.1 -66.8L1265.1 -41.3L1235.5 -41.3L1235.5 -66.8ZM1310.6 -33.4C1310.6 -7.2 1330.6 1.1 1352.7 1.1C1374.8 1.1 1393.7 -7.2 1393.7 -33.4L1393.7 -66.8L1367.9 -66.8L1367.9 -30.4C1367.9 -19.8 1362.8 -14.3 1352.7 -14.3C1342.7 -14.3 1337.6 -19.7 1337.6 -30.4L1337.6 -66.8L1310.6 -66.8ZM1496.3 -16.9C1496.3 -24.8 1490.2 -31.2 1478.7 -33.4L1478.7 -33.8C1489 -36 1493.8 -42.8 1493.8 -49.9C1493.8 -61.8 1482.5 -66.8 1464.5 -66.8L1412.2 -66.8L1412.2 0L1467 0C1485.5 0 1496.3 -5.2 1496.3 -16.9ZM1465.1 -46.5C1465.1 -43.6 1462.9 -41.3 1458.2 -41.3L1439.2 -41.3L1439.2 -51.6L1457.8 -51.6C1463 -51.6 1465.1 -49.4 1465.1 -46.5ZM1467.6 -20.8C1467.6 -17.9 1465.5 -15.2 1460.3 -15.2L1439.2 -15.2L1439.2 -26.3L1460.4 -26.3C1465.5 -26.3 1467.6 -23.5 1467.6 -20.8Z"/></svg></h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
-    <div class="h-status"><span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span></div>
+    <div class="h-status"><span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="ext-chips" style="display:contents"></span></div>
     <div class="h-view"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div></div>
     <div class="h-actions"><span class="act-say" id="act-say" role="status" aria-live="polite"></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><button class="btn act" id="power" style="display:none"></button><span id="peer-power" style="display:contents"></span></div>
@@ -1172,6 +1177,80 @@ async function powerSwitch(b, key, peer, post) {     // the click: confirm a swi
   else { delete pend[key]; was[key] = null; b.disabled = false; b.classList.remove('busy'); b.textContent = (peer ? `turn ${peer}` : 'turn models') + (on ? ' on' : ' off'); if (said.get(key) && said.get(key).tone === 'busy') say(key, ''); }
   tickNow();
 }
+// ---- the extensions (GET /hub/extensions): programs on this Mac with a section in the menu-bar app (GUIDE.md
+// "Extensions"), each a chip after the status lights: its page, opened in a new tab; not answering, Start, which runs the
+// start verb its manifest lists (POST /hub/extensions/run) and opens its page in a tab the click opened, once it answers
+let EXT = [];
+const starting = {};             // id -> {at, tab}: a Start sent, its page not answering yet
+const START_WITHIN = 30000;      // a started extension answers within this, or the page says it did not
+const tickExt = () => tick('ext', async () => {
+  try { EXT = (await get('/hub/extensions')).extensions || []; } catch (e) { if (e.status) report('extensions', e); return; }
+  guard('extensions', renderExt);
+});
+function renderExt() {
+  const box = $('ext-chips'), named = {};
+  for (const x of EXT) named[x.name] = (named[x.name] || 0) + 1;
+  for (const x of EXT) {
+    const s = starting[x.id], key = 'ext:' + x.id, name = named[x.name] > 1 ? x.label : x.name;
+    if (s && x.answering) {                                // started: its page in the tab the click opened
+      delete starting[x.id];
+      if (s.tab && !s.tab.closed && x.open) { s.tab.location.href = x.open; say(key, `${name}: started, page opened`, 'done', 8000); }
+      else say(key, `${name}: started`, 'done', 8000);
+    } else if (s && Date.now() - s.at > START_WITHIN) {
+      delete starting[x.id];
+      if (s.tab && !s.tab.closed) s.tab.close();
+      say(key, `${name}: not answering ${START_WITHIN / 1000} s after its start; localmodels ext says why`, 'fail', 20000);
+    }
+    const busy = !!starting[x.id], canStart = !x.answering && x.verbs.includes('start');
+    const tag = busy || canStart ? 'button' : x.answering && x.open ? 'a' : 'span';
+    let c = box.querySelector(`[data-ext="${CSS.escape(x.id)}"]`);
+    if (!c || c.tagName.toLowerCase() !== tag) {
+      const n = el(tag, {class: 'chip ext'}, el('i'), el('span'), el('span', {class: 'go'}));
+      n.dataset.ext = x.id;
+      if (c) c.replaceWith(n); else box.appendChild(n);
+      c = n;
+    }
+    if (tag === 'a') { c.href = x.open; c.target = '_blank'; c.rel = 'noopener'; }
+    if (tag === 'button') c.disabled = busy;
+    c.classList.toggle('busy', busy);
+    c.querySelector('i').style.background = busy ? 'var(--pin)' : !x.answering || x.alerts.length ? 'var(--warning)' : 'var(--good)';
+    c.querySelector('span').textContent = busy ? `${name}: starting…` : x.answering ? name : canStart ? `start ${name}` : `${name}: not answering`;
+    c.querySelector('.go').textContent = tag === 'a' ? '↗' : '';
+    c.title = [x.label + (x.summary ? ': ' + x.summary : ''), ...x.alerts,
+      x.answering ? (x.open ? `Opens ${x.open} in a new tab` : 'Its menu answers; its manifest names no page')
+        : `Not answering: ${x.why || 'no answer'}` + (canStart ? `\nStart runs its start verb (POST /hub/extensions/run), then opens its page` : '')].join('\n');
+  }
+  for (const c of [...box.children]) if (!EXT.some(x => x.id === c.dataset.ext)) c.remove();
+}
+$('ext-chips').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-ext]'); if (!b || b.disabled) return;
+  const x = EXT.find(e => e.id === b.dataset.ext); if (!x) return;
+  const tab = x.open ? window.open('', '_blank') : null;   // opened now, while the click counts, so no blocker stops it
+  if (tab) try {                                           // in the page's own colors until the extension's page replaces it
+    const css = getComputedStyle(document.documentElement), tok = n => css.getPropertyValue(n).trim(), words = `Starting ${x.name.replace(/[<&]/g, '')}…`;
+    tab.document.write(`<!doctype html><meta charset="utf-8"><title>${words}</title><body style="margin:0;padding:24px;background:${tok('--plane')};`
+      + `color:${tok('--muted')};font:13px system-ui,sans-serif">${words}</body>`);
+    tab.document.close();
+  } catch (_) {}
+  starting[x.id] = {at: Date.now(), tab};
+  say('ext:' + x.id, `${x.name}: starting`, 'busy');
+  guard('extensions', renderExt);
+  (async () => {
+    let why = '';
+    try {
+      const r = await fetch('/hub/extensions/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: x.id, verb: 'start'})});
+      if (!r.ok) why = (await r.json().catch(() => ({}))).error || 'HTTP ' + r.status;
+    } catch (e) { why = 'the gateway did not answer'; }
+    if (why) {
+      const s = starting[x.id]; delete starting[x.id];
+      if (s && s.tab && !s.tab.closed) s.tab.close();
+      say('ext:' + x.id, `${x.name}: not started: ${why}`, 'fail', 20000);
+      guard('extensions', renderExt); return;
+    }
+    for (let i = 0; i < START_WITHIN / 1500 && starting[x.id]; i++) { await new Promise(ok => setTimeout(ok, 1500)); await tickExt(); }
+    guard('extensions', renderExt);
+  })();
+});
 $('poll-now').addEventListener('click', async () => {          // the gateway looks at every peer at once, then the page reads it
   const b = $('poll-now'); if (b.disabled) return;
   b.disabled = true; b.classList.add('busy'); b.textContent = 'polling…';
@@ -1277,8 +1356,8 @@ if (document.fonts) {              // everything measured again once the web fon
 }
 let resized; if (window.ResizeObserver) { const ro = new ResizeObserver(() => { clearTimeout(resized); resized = setTimeout(() => guard('charts', renderCharts), 120); });
   for (const id of ['ans', 'tok', 'req', 'mem']) ro.observe($(id)); }       // a box that changed size: its chart fills it again
-tickNow(); tickHistory(); tickRecent();
-setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000); setInterval(() => guard('clock', staleness), 1000);
+tickNow(); tickHistory(); tickRecent(); tickExt();
+setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000); setInterval(tickExt, 5000); setInterval(() => guard('clock', staleness), 1000);
 </script>
 </body>
 </html>

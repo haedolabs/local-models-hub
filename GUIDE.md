@@ -183,6 +183,52 @@ The LaunchDaemon `localmodels peer gpu-limit` writes for a 48 GB host (determini
 - A job: `{"label": "...", "prompt": "...", "schema": {JSON Schema} or null, "max_turns": 16, "max_tokens": 4000, "think": true, "think_schema": false, "retry_empty": 1, "nonempty": false, "wait_down": 3600}`. `"think": false` for lookups and extraction, which complete several times faster; thinking on for checks and judgment (*Thinking*, below). The final step, the answer as JSON matching the schema, runs with thinking off whatever `think` says (`think_schema: true` overrides). An answer whose lists are all empty (whatever its other fields hold) is requested once more without the strict format (the schema in the prompt only), and that answer stands if it matches the schema all the way down (types, required fields, items, enums, `minItems`), else the empty one does (counted as `invalid` in the job's usage); JSON is read from the first object or list in the answer, so words around it do no harm; `"nonempty": true` sets `minItems: 1` on every list from the first request, for answers that can never be empty (*Strict JSON*, below). A request that fails because the model is down is retried with increasing backoff for up to `wait_down` seconds in all. Two jobs with the same label get distinct ones (`a`, `a-2`). A batch requests fresh instances when it starts.
 - `job_status` gives a line per job; `results=true` adds the answers (capped, so a 300-job batch stays readable), `label=...` one job's full answer. A runner that died is reported as such, with its log's tail.
 
+## Extensions: a section in the menu-bar app, a chip on the dashboard
+Any program on this Mac with an HTTP endpoint on localhost can have its own section in the hub's menu-bar app and its own chip on the dashboard, so a person keeps one icon and one page for everything that runs on the local models. The hub never imports an extension, and never starts or stops one on its own: the app reads the manifests, asks each one's menu URL every 5 s (2 s while the menu is open), draws each menu as a section of the menu itself, and acts for it only as below; the dashboard links to its page and runs its `start` verb only when a person presses **start** (*On the dashboard*, below). The app reads the manifests and menus itself, so its sections still show while the gateway is down. Protocol version 1 (`localmodels/extensions.py`).
+
+**Join by writing a manifest**, `~/Library/Application Support/LocalModels/extensions/<id>.json` (a Python program can call `localmodels.extensions.register(manifest)`, which checks it first); **leave by deleting it** (`unregister(id)`):
+
+```json
+{"extension": 1, "id": "mytool.myproject", "name": "My Tool", "title": "My Project", "version": "1.0.0", "maker": "Me",
+ "menu": "http://localhost:8675/api/menu", "open": "http://localhost:8675",
+ "token": "/Users/me/Library/Application Support/MyTool/page.token", "token_header": "X-My-Token",
+ "run": {"command": ["/opt/homebrew/bin/python3", "/path/to/mytool"], "env": {"MYTOOL_PROJECT": "/path"}, "verbs": ["start", "restart"]}}
+```
+
+| Key | |
+|---|---|
+| `extension` | the protocol version, `1` |
+| `id` | lower-case letters, digits, `.`, `_`, `-`; the file's name; one manifest per instance (`tool.project`) |
+| `name`, `title` | the section is headed "name — title"; the dashboard's chip shows the name |
+| `menu` | `http://localhost` or `http://127.0.0.1`, any port: the menu, as JSON |
+| `open` | its page on the same origin: the section's first line (**Open** name), the dashboard chip's link, and where a click on its notification goes |
+| `token`, `token_header` | a file whose contents go in that header (an `X-` name) on every POST the app makes for it; mode 0600 |
+| `run` | a command (absolute path first), its environment, and the only verbs the app and the dashboard may append to it (`start` turns "not answering" into **Start**); `start` should return once the program is on its way (a LaunchAgent's `launchctl kickstart`, say), not run it in the foreground |
+
+**Serve the menu**, `GET <menu>`:
+
+```json
+{"menu": 1, "summary": "3 of 8 items ready",
+ "alerts": [{"title": "Something is due tomorrow", "action": {"open": "/due"}}],
+ "lines": [{"title": "A status line"},
+           {"title": "Open the report", "action": {"open": "/report"}, "indent": 1},
+           {"title": "Export it", "action": {"post": "/api/export", "reveal": true}},
+           {"title": "Leave a note…", "action": {"post": "/api/note", "body": {"via": "menu"}, "input": {"prompt": "A note", "field": "text"}}},
+           {"title": "Items", "children": [{"title": "First item", "action": {"open": "/items/1"}}]},
+           {"title": "Restart it", "action": {"run": "restart", "confirm": "Restart it?"}, "separator": true}],
+ "events": [{"key": "done:42", "title": "Job 42 finished", "body": "all good"}]}
+```
+
+- **The section**, in the menu itself after the hosts (no submenu to open first), drawn as a host is: its name, then indented under it **Open** its page, its `alerts`, its `summary`, and its `lines` (`indent` 0 to 3, drawn one level deeper under the name; `children` for a submenu, at most three deep and 200 lines in all; `separator` before a line takes effect inside a submenu, while the section itself stays one block; past 12 lines of its own, the rest go under **More**). A title longer than 72 characters is cut in the middle, the whole of it in the tooltip, so put the state at a title's end. The menu is updated in place, item by item, so a submenu stays open while its lines change; a menu that misses one poll keeps its last one for 15 s.
+- `alerts` come right after **Open**, in its own section, and light the icon's attention dot and the dashboard chip's light; keep them for what needs the person.
+- `events` become notifications: each `key` once, ever, and none for what was there when the app started.
+- **Actions**, exactly one kind each, with an optional `confirm` question: `{"open": "/path"}` (a page on the extension's own origin, in the browser); `{"post": "/path", "body": {...}, "input": {"prompt", "field", "placeholder"}, "reveal": true}` (a POST of text values to its own origin with its token; `input` asks the person for one line first and sends it as `field`; the answer is JSON: `"ok": false` with `"error"` or `"problems"` is shown, `"path"` is shown in the Finder when `reveal` is set, `"message"` becomes a notification); `{"run": "verb"}` (the manifest's command with that verb, if listed). Anything else, a page or a POST on another origin or a verb not listed, is drawn without an action.
+- An extension that does not answer shows as "not answering", with **Start** when its manifest lists `start`, and a notification after a minute.
+
+**On the dashboard**, each extension is a chip after the status lights: its name, a link to its page in a new tab, its light in the warning tone while it has alerts (they and its summary are the tooltip). One that does not answer and lists `start` shows **start** name: the press opens a tab, the gateway runs the manifest's command with `start` (`POST /hub/extensions/run` with `{"id", "verb"}`: only a verb its manifest lists, only for the dashboard itself or a program on this Mac, never a page from another site or port; in a session of its own, so it outlives the gateway; waited for up to 30 s, its exit code and last words returned), and the tab goes to its page once it answers. `GET /hub/extensions` lists them with whether each menu answers, its summary and alerts (asked at most every 5 s); screenshot mode lists none.
+
+`localmodels ext` lists the extensions and whether each menu answers; `localmodels ext check` also reads every manifest and menu against the protocol (exit 1 on a problem).
+
 ## Records and privacy
 - In `~/Library/Application Support/LocalModels/`: `models.json` (the settings), `models.last-good.json` (the last settings file the gateway read well), `link-events.jsonl` (each change of a peer's state, with its reason and time), `slots/` (one lock per slot), `leases/` (which client holds which model), `inflight/` (each request in flight now), `requests.jsonl` (one line per request: time, project, session, kind, model, instance (`copy`), endpoint, status, seconds, queue time, token counts, the body's size in bytes and its estimated context (`bytes`, `ctx`), why it waited for room (`wait_for`), the step, and a note when the gateway resent or dropped it), `waits.jsonl` (queue waits over 2 s, slot timeouts, refused swaps), `crashes.jsonl` (each crash and recycle), `keeper.json` (the instance manager's state: what it last saw loaded and since when, its read position in LM Studio's log, any model down after a crash, the recycle in progress, the last load LM Studio refused) and, with peers, `link.json` (the gateway's last poll of each peer: state, families, slots; never content) and `peer-token` (the shared secret, mode 0600).
 - Never a prompt, a completion or a file's contents in any of those records: the labels a client chooses (`X-Project`, `X-Run`, `X-Phase`, `X-Step`, a plan's phase names) are recorded as it sent them, so keep them free of content; inline code on a client's command line (`-c`, `-e`) is never taken for its name, and a peer's error text is kept only as the engine's failure words. The one place the hub keeps content is the local agents' job logs, as each project's own record under its name.
