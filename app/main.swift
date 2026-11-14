@@ -1,9 +1,13 @@
 // Local Models Hub, the menu-bar app: a client of the gateway's HTTP endpoints, nothing more. It reads
 // GET /hub/snapshot, shows the state as a template icon and a menu (app/Glance.swift), switches this Mac's and each
 // peer's local models off and on through the endpoints the dashboard uses, and notifies an instance left unloaded after
-// a crash and a peer unreachable for more than a minute. Built on this Mac by `localmodels app install`.
+// a crash and a peer unreachable for more than a minute. It also draws a section for each extension: a program that
+// wrote a manifest in the state folder's extensions/ (GUIDE.md "Extensions") and serves its menu as JSON; the app acts
+// for it only on its own origin or with a verb its manifest lists. The menu is kept in place across polls (app/Menu.swift).
+// Built on this Mac by `localmodels app install`.
 //
-//   --dump <snapshot.json>      print the menu a snapshot gives (no window, no network)
+//   --dump <snapshot.json> [--extensions <pages.json>]   print the menu a snapshot gives, with extensions
+//                               ([{"manifest", "menu", "down_since"}]; no window, no network)
 //   --render-icons <folder>     write each icon state as PNG, on light and dark menu-bar grounds
 //   --unregister-login          remove the login item (localmodels app uninstall)
 import AppKit
@@ -13,6 +17,8 @@ import UserNotifications
 let info = Bundle.main.infoDictionary ?? [:]
 let hubURL = URL(string: (info["LMHubURL"] as? String) ?? "http://localhost:1235")!
 let cliPath = (info["LMHubCLI"] as? String) ?? "/opt/homebrew/bin/localmodels"
+let stateDir = (info["LMHubState"] as? String) ?? (NSHomeDirectory() + "/Library/Application Support/LocalModels")
+let extensionsDir = stateDir + "/extensions"
 
 // ---------------------------------------------------------------- the icon: the chip mark as a template image
 func makeIcon(_ icon: Icon, attention: Bool) -> NSImage {
@@ -62,6 +68,34 @@ func request(_ path: String, body: [String: Any]? = nil, timeout: Double = 5, do
     }.resume()
 }
 
+/// One request to an extension (its menu, or one of its POSTs), by full URL.
+func fetch(_ url: String, token: (header: String, value: String)? = nil, body: [String: String]? = nil, timeout: Double = 5,
+           done: @escaping (Int, [String: Any]?) -> Void) {
+    guard let u = URL(string: url) else { done(0, nil); return }
+    var r = URLRequest(url: u, timeoutInterval: timeout)
+    r.cachePolicy = .reloadIgnoringLocalCacheData
+    if let body = body {
+        r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let t = token { r.setValue(t.value, forHTTPHeaderField: t.header) }
+        r.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    }
+    URLSession.shared.dataTask(with: r) { data, resp, _ in
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        DispatchQueue.main.async { done(code, json) }
+    }.resume()
+}
+
+/// The extensions this Mac has: every sound manifest in the state folder's extensions/, by file name.
+func readExtensions() -> [Extension] {
+    let names = ((try? FileManager.default.contentsOfDirectory(atPath: extensionsDir)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+    return names.compactMap { name in
+        guard let e = readExtension(FileManager.default.contents(atPath: extensionsDir + "/" + name)), name == e.id + ".json" else { return nil }
+        return e
+    }
+}
+
 @discardableResult
 func ask(_ title: String, _ text: String, ok: String, cancel: String? = "Cancel") -> Bool {
     NSApp.activate(ignoringOtherApps: true)
@@ -75,7 +109,10 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let menu = NSMenu()
     var last = glanceDown()
-    var seen = Set<String>(), baseline = true, failures = 0, menuOpen = false, polling = false
+    var seen = Set<String>(), baseline = true, failures = 0, menuOpen = false, polling = false, face = ""
+    var exts: [Extension] = [], extDown: [String: Double] = [:], extLast: [String: (menu: [String: Any], at: Double)] = [:]
+    let grace = 15.0                                      // an extension's menu missed for less than this: its last one shows
+    lazy var keeper = MenuKeeper(target: self, selector: #selector(act(_:)))   // the menu, kept in place (app/Menu.swift)
 
     func applicationDidFinishLaunching(_ n: Notification) {
         menu.delegate = self; menu.autoenablesItems = false
@@ -87,14 +124,33 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     func poll() {
         if polling { return }
         polling = true
-        request("hub/snapshot") { code, json in
+        exts = readExtensions()
+        var pages = exts.map { ExtensionPage(ext: $0, menu: nil) }
+        var snap: [String: Any]? = nil
+        let group = DispatchGroup()
+        group.enter()
+        request("hub/snapshot") { code, json in if code == 200 { snap = json }; group.leave() }
+        for (i, e) in exts.enumerated() {
+            group.enter()
+            fetch(e.menu, timeout: 3) { code, json in
+                let now = Date().timeIntervalSince1970
+                if code == 200, let json = json { pages[i].menu = json; self.extDown[e.id] = nil; self.extLast[e.id] = (json, now) }
+                else {
+                    let since = self.extDown[e.id] ?? now; self.extDown[e.id] = since
+                    if let l = self.extLast[e.id], now - l.at < self.grace { pages[i].menu = l.menu }   // a moment's miss: no flip to "not answering"
+                    else { pages[i].downSince = since }
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
             self.polling = false
-            if code == 200, let json = json {
-                self.failures = 0
-                let g = glance(json)
-                self.notify(fresh(g.events, seen: &self.seen, baseline: self.baseline)); self.baseline = false
-                self.show(g)
-            } else { self.failures += 1; self.show(glanceDown(port: hubURL.port ?? 1235)) }
+            let now = Date().timeIntervalSince1970
+            let g: Glance
+            if let json = snap { self.failures = 0; g = glance(json, now: now, extensions: pages) }
+            else { self.failures += 1; g = glanceDown(port: hubURL.port ?? 1235, extensions: pages, now: now) }
+            self.notify(fresh(g.events, seen: &self.seen, baseline: self.baseline)); self.baseline = false
+            self.show(g)
             let wait = self.menuOpen ? 2.0 : self.failures > 0 ? min(30.0, 5.0 * pow(2.0, Double(self.failures - 1))) : 5.0
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { self.poll() }
         }
@@ -102,25 +158,17 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
 
     func show(_ g: Glance) {
         last = g
-        item.button?.image = makeIcon(g.icon, attention: g.attention)
-        item.button?.setAccessibilityLabel(g.accessibilityLabel)
-        item.button?.toolTip = g.accessibilityLabel
-        menu.removeAllItems()
-        for l in g.lines {
-            if l.separatorBefore { menu.addItem(.separator()) }
-            let m = NSMenuItem(title: l.title, action: l.action == .none ? nil : #selector(act(_:)), keyEquivalent: "")
-            m.target = self; m.isEnabled = l.action != .none; m.representedObject = Box(l.action)
-            if l.action != .none && l.action != .openDashboard && l.action != .startGateway { m.indentationLevel = 1 }
-            menu.addItem(m)
-        }
-        menu.addItem(.separator())
-        let dash = NSMenuItem(title: "Open dashboard", action: #selector(openDashboard), keyEquivalent: "d"); dash.target = self
-        let login = NSMenuItem(title: "Launch at login", action: #selector(toggleLogin), keyEquivalent: ""); login.target = self
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menu.addItem(dash); menu.addItem(login); menu.addItem(.separator())
-        let ver = NSMenuItem(title: "Local Models Hub" + (g.version.isEmpty ? "" : " \(g.version)") + " · Haedo Labs", action: nil, keyEquivalent: ""); ver.isEnabled = false
-        menu.addItem(ver)
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let look = "\(g.icon) \(g.attention)"             // the icon redrawn only when its state changes
+        if look != face { item.button?.image = makeIcon(g.icon, attention: g.attention); face = look }
+        if item.button?.toolTip != g.accessibilityLabel { item.button?.setAccessibilityLabel(g.accessibilityLabel); item.button?.toolTip = g.accessibilityLabel }
+        keeper.sync(menu, specs(g.lines) + [          // every poll (every 2 s while open) changes only what changed
+            Spec(),
+            Spec(line: Line(title: "Open dashboard", action: .openDashboard, indent: 0), key: "d"),
+            Spec(line: Line(title: "Launch at login", action: .toggleLogin, indent: 0), on: SMAppService.mainApp.status == .enabled),
+            Spec(),
+            Spec(line: Line(title: "Local Models Hub" + (g.version.isEmpty ? "" : " \(g.version)") + " · Haedo Labs", indent: 0)),
+            Spec(line: Line(title: "Quit", action: .quit, indent: 0), key: "q"),
+        ])
     }
 
     func menuWillOpen(_ m: NSMenu) { menuOpen = true; poll() }
@@ -140,6 +188,8 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         switch action {
         case .none: break
         case .openDashboard: openDashboard()
+        case .toggleLogin: toggleLogin()
+        case .quit: NSApp.terminate(nil)
         case .startGateway:
             let p = Process(); p.executableURL = URL(fileURLWithPath: cliPath); p.arguments = ["start"]
             p.terminationHandler = { _ in DispatchQueue.main.async { self.poll() } }
@@ -154,7 +204,68 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
                            "It unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there.",
                            ok: "Switch off") { return }
             switchModels(on ? "hub/link/on" : "hub/link/off", ["peer": name], who: "peer \(name)'s local models", on: on)
+        case .extOpen(_, let url):
+            if let u = URL(string: url) { NSWorkspace.shared.open(u) }
+        case .extPost(let id, let path, let body, let confirm, let input, let reveal):
+            guard let e = exts.first(where: { $0.id == id }) else { return }
+            if !confirm.isEmpty && !ask(confirm, e.label, ok: "OK") { return }
+            var b = body
+            if let input = input {
+                guard let text = askText(input.prompt, e.label, placeholder: input.placeholder) else { return }
+                b[input.field] = text
+            }
+            extPost(e, path, b, title: sender.title, reveal: reveal)
+        case .extRun(let id, let verb, let confirm):
+            guard let e = exts.first(where: { $0.id == id }), e.verbs.contains(verb), !e.command.isEmpty else { return }
+            if !confirm.isEmpty && !ask(confirm, e.label, ok: "OK") { return }
+            extRun(e, verb)
         }
+    }
+
+    // ---- extensions: a POST on their own origin with their token, or their command with one of their verbs
+    func askText(_ title: String, _ text: String, placeholder: String) -> String? {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert(); a.messageText = title; a.informativeText = text
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24)); field.placeholderString = placeholder
+        a.accessoryView = field; a.addButton(withTitle: "OK"); a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        guard a.runModal() == .alertFirstButtonReturn else { return nil }
+        let t = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    func extPost(_ e: Extension, _ path: String, _ body: [String: String], title: String, reveal: Bool) {
+        let token = e.token.isEmpty ? nil : (try? String(contentsOfFile: e.token, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        fetch(e.origin + path, token: token.map { (e.tokenHeader, $0) }, body: body, timeout: 120) { code, j in
+            let ok = (200..<300).contains(code) && ((j?["ok"] as? Bool) ?? true)
+            if ok {
+                if reveal, let p = j?["path"] as? String, FileManager.default.fileExists(atPath: p) {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+                }
+                if let words = j?["message"] as? String, !words.isEmpty {
+                    self.notify([Event(key: "ext:\(e.id):done:\(Date().timeIntervalSince1970)", title: e.label, body: words, ext: e.id)])
+                }
+            } else {
+                let problems = (j?["problems"] as? [String]) ?? []
+                ask("\(title): not done", problems.isEmpty ? ((j?["error"] as? String) ?? (code == 0 ? "\(e.label) did not answer." : "HTTP \(code)"))
+                    : problems.prefix(8).joined(separator: "\n"), ok: "OK", cancel: nil)
+            }
+            self.poll()
+        }
+    }
+
+    func extRun(_ e: Extension, _ verb: String) {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: e.command[0]); p.arguments = Array(e.command.dropFirst()) + [verb]
+        var env = ProcessInfo.processInfo.environment; for (k, v) in e.env { env[k] = v }; p.environment = env
+        let out = Pipe(); p.standardOutput = out; p.standardError = out
+        p.terminationHandler = { t in
+            let words = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                if t.terminationStatus != 0 { ask("\(e.label): \(verb) did not finish", words.trimmingCharacters(in: .whitespacesAndNewlines), ok: "OK", cancel: nil) }
+                self.poll()
+            }
+        }
+        do { try p.run() } catch { ask("\(e.label): \(verb) did not start", "\(e.command[0]): \(error.localizedDescription)", ok: "OK", cancel: nil) }
     }
 
     func switchModels(_ path: String, _ body: [String: Any], who: String, on: Bool) {
@@ -184,7 +295,7 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
             for e in events {
-                let c = UNMutableNotificationContent(); c.title = e.title; c.body = e.body
+                let c = UNMutableNotificationContent(); c.title = e.title; c.body = e.body; c.userInfo = ["ext": e.ext]
                 center.add(UNNotificationRequest(identifier: e.key, content: c, trigger: nil))
             }
         }
@@ -192,19 +303,37 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification,
                                 withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) { done([.banner, .list]) }
     func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse,
-                                withCompletionHandler done: @escaping () -> Void) { openDashboard(); done() }
+                                withCompletionHandler done: @escaping () -> Void) {
+        let id = (r.notification.request.content.userInfo["ext"] as? String) ?? ""
+        DispatchQueue.main.async {                        // an extension's event opens its page; the hub's, the dashboard
+            if let e = self.exts.first(where: { $0.id == id }), let u = URL(string: e.open.isEmpty ? e.origin : e.open) { NSWorkspace.shared.open(u) }
+            else { self.openDashboard() }
+        }
+        done()
+    }
 }
-
-final class Box: NSObject { let action: Action; init(_ a: Action) { action = a } }
 
 // ---------------------------------------------------------------- the command line
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--dump"), i + 1 < args.count {
     guard let data = FileManager.default.contents(atPath: args[i + 1]),
           let snap = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { print("not a snapshot: \(args[i + 1])"); exit(2) }
-    let g = glance(snap)
+    var pages: [ExtensionPage] = []
+    if let j = args.firstIndex(of: "--extensions"), j + 1 < args.count,
+       let d = FileManager.default.contents(atPath: args[j + 1]), let raw = try? JSONSerialization.jsonObject(with: d) as? [[String: Any]] {
+        for r in raw {
+            guard let m = r["manifest"], let md = try? JSONSerialization.data(withJSONObject: m), let e = readExtension(md) else { print("  (a manifest not sound: skipped)"); continue }
+            pages.append(ExtensionPage(ext: e, menu: r["menu"] as? [String: Any], downSince: (r["down_since"] as? NSNumber)?.doubleValue))
+        }
+    }
+    let g = glance(snap, extensions: pages)
     print("icon: \(g.icon == .serving ? "serving" : "idle")\(g.attention ? " + attention" : "") · \(g.accessibilityLabel)")
-    for l in g.lines { if l.separatorBefore { print("  ---") }; print("  " + l.title + (l.action == .none ? "" : "   [\(l.action)]")) }
+    func dump(_ l: Line, _ depth: Int) {                  // a submenu one tab in; each line at its drawn indentation
+        print(String(repeating: "\t", count: depth) + "  " + String(repeating: "    ", count: drawnIndent(l)) + l.title
+              + (l.children.isEmpty ? "" : "  ▸") + (l.action == .none ? "" : "   [\(l.action)]"))
+        for k in l.children { if k.separatorBefore { print(String(repeating: "\t", count: depth + 1) + "  ---") }; dump(k, depth + 1) }
+    }
+    for l in g.lines { if l.separatorBefore { print("  ---") }; dump(l, 0) }
     for e in g.events { print("  event: \(e.title): \(e.body)") }
     exit(0)
 }

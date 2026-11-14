@@ -83,6 +83,14 @@ def _cached(key, seconds, fn):
         return val
 
 
+def extensions():
+    """The extensions for the dashboard's launcher (localmodels/extensions.py, GET /hub/extensions), their menus asked at
+    most every 5 s; none in screenshot mode, where only the projects kept are named."""
+    if names.presenting(): return []
+    from . import extensions as ext
+    return _cached('extensions', 5, ext.view)
+
+
 # ---------------------------------------------------------------- now
 def about(home=None):
     """The dashboard's corner: {version, license, copyright, copyright_url, source}, read from the hub's own LICENSE and

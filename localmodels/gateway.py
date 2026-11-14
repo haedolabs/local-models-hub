@@ -740,6 +740,17 @@ class Door(http.server.BaseHTTPRequestHandler):
                 try: plan = runs.declare(project, j.get('run'), j.get('phases'), end=bool(j.get('end')))
                 except ValueError as e: return self._send(400, dict(error=str(e)))
                 return self._send(200, dict(ok=True, plan=plan))
+            if route == '/hub/extensions':                                          # the extensions, each answering or not (the dashboard's launcher)
+                return self._send(200, dict(extensions=web.extensions()))
+            if route == '/hub/extensions/run' and method == 'POST':                 # one of an extension's own verbs, on a person's click (Start)
+                try: j = json.loads(self._body() or b'{}')
+                except ValueError: j = None
+                if not isinstance(j, dict) or not isinstance(j.get('id'), str) or not isinstance(j.get('verb'), str):
+                    return self._send(400, dict(error='the body must be a JSON object: {"id": <extension>, "verb": <one its manifest lists>}'))
+                from . import extensions
+                code, out = extensions.run(j['id'], j['verb'])
+                web._cache.pop('extensions', None)                                  # the launcher reads it afresh
+                return self._send(code, out)
             if route == '/hub/errors':                                              # what the error record holds (localmodels errors)
                 return self._send(200, dict(errors=errors.recent((q.get('minutes') or [1440])[0], 200)))
             if route == '/hub/client-error' and method == 'POST':                     # the dashboard's own render errors
@@ -756,7 +767,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
-        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/link/off, POST /hub/link/on, POST /hub/client-error'))
+        return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, /hub/extensions, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/link/off, POST /hub/link/on, POST /hub/extensions/run, POST /hub/client-error'))
 
 
 class Server(http.server.ThreadingHTTPServer):
