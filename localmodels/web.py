@@ -129,14 +129,14 @@ def _snapshot():
     job = view.get('job')
     fams = []
     for f in lm['families']:
-        cps, downs = [], crashes.down_copies(f['id'])
+        cps, downs, stalls = [], crashes.down_copies(f['id']), crashes.stalled_copies(f['id'])
         for c in f['copies']:
             hold = [dict(project=p, n=n) for p, n in holders.get(c['id'], collections.Counter()).most_common()]
             other = max(0, c.get('busy', 0) - sum(h['n'] for h in hold))         # held by a program that went straight in
             if other: hold.append(dict(project='direct to LM Studio', n=other))
             cps.append(dict(id=c['id'], state=c['state'], parallel=c['parallel'], busy=c.get('busy', 0), context=c['context'],
                             size=c.get('size'), holders=hold, served=view['copies'].get(c['id']),
-                            recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs,
+                            recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs, stalled=c['id'] in stalls,
                             ctx=dict(load=loads.get(c['id'], 0), budget=admission.budget(c['id']))))
         fams.append(dict(id=f['id'], at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps,
                          waiting_room=sum(n for m, n in room.items() if llmshare.family(m) == f['id'])))
@@ -145,8 +145,8 @@ def _snapshot():
                door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting_here()),
                lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age())),
                settings_error=llmshare.settings_error(), write_problem=llmshare.write_problem(),
-               crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7))),
-               recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10])),
+               crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7)), stalled=crashes.stalled()),
+               recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10]), held=recycle.held_back()),
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],
                claude=[dict(c, uses=any(u.get('session') == c['id'] for u in users)) for c in cs],
                mac=dash.mac(), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))

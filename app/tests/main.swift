@@ -17,6 +17,7 @@ func snap(_ json: String) -> [String: Any] {
 let now = 1_800_000_000.0
 let fam = #"{"id": "test/family", "busy": 3, "at_once": 8}"#
 let peerUp = #"{"name": "m4pro", "state": "up", "off": false, "since": 1799999000, "families": {"test/family": {"match": true, "busy": 1, "slots": 4}}}"#
+let peerDown0 = #"{"name": "m4pro", "state": "down", "since": 1799999000, "why": "no route", "families": {}}"#
 
 print("menu-bar app: the snapshot read into the icon, the menu and the notifications")
 
@@ -38,8 +39,14 @@ t("switched off: the icon is idle and says so", off.icon == .idle && off.summary
 t("switched off: the switch turns them on", off.lines.contains(Line(title: "Turn local models on", action: .local(on: true))), "\(off.lines.map(\.title))")
 t("switched off: this Mac's line says since when", off.lines.contains { $0.title.hasPrefix("This Mac — local models switched off since ") })
 
-let viaPeer = glance(snap(#"{"door": {"queue": {}}, "maintenance": {"off": true, "phase": "on", "start": 1799990000}, "lmstudio": {"families": []}, "peers": [\#(peerUp)], "crashes": {"down": []}}"#), now: now)
-t("this Mac off, the peer up: still serving through the peer", viaPeer.icon == .serving && viaPeer.summary == "1 of 4 slots active", viaPeer.summary)
+let refused = glance(snap(#"{"door": {"queue": {}}, "maintenance": {"off": true, "phase": "on", "start": 1799990000}, "lmstudio": {"families": [\#(fam)]}, "peers": [\#(peerUp)], "crashes": {"down": []}}"#), now: now)
+t("switched off with a peer up: every request gets 503, so nothing serves (the peer's slots are not counted)", refused.icon == .idle && refused.summary == "local models switched off", refused.summary)
+let viaPeer = glance(snap(#"{"door": {"queue": {}}, "maintenance": {"off": true, "peers": true, "phase": "on", "start": 1799990000}, "lmstudio": {"families": [\#(fam)]}, "peers": [\#(peerUp)], "crashes": {"down": []}}"#), now: now)
+t("switched off to peers only, the peer up: serving through the peer alone, this Mac's instances not counted", viaPeer.icon == .serving && viaPeer.summary == "1 of 4 slots active on peers", viaPeer.summary)
+t("peers only: this Mac's line says so, and its switch turns the local models on", viaPeer.lines.contains { $0.title.hasPrefix("This Mac — local models off since ") && $0.title.hasSuffix("requests go to peers") }
+  && viaPeer.lines.contains(Line(title: "Turn local models on", action: .local(on: true))), "\(viaPeer.lines.map(\.title))")
+let alone = glance(snap(#"{"door": {"queue": {}}, "maintenance": {"off": true, "peers": true, "phase": "on", "start": 1799990000}, "lmstudio": {"families": []}, "peers": [\#(peerDown0)], "crashes": {"down": []}}"#), now: now)
+t("peers only with no peer reachable: idle, and says why", alone.icon == .idle && alone.summary == "local models off; no peer reachable", alone.summary)
 
 let window = glance(snap(#"{"door": {"queue": {}}, "maintenance": {"off": false, "phase": "on", "start": 1799990000, "end": 1800001000}, "lmstudio": {"families": []}, "peers": [], "crashes": {"down": []}}"#), now: now)
 t("in a maintenance window: no switch for this Mac (the window ends it)", !window.lines.contains { if case .local = $0.action { return true }; return false }, "\(window.lines.map(\.title))")
@@ -64,6 +71,9 @@ var seen = Set<String>()
 t("the first glance after launch notifies nothing (a baseline)", fresh(crash.events, seen: &seen, baseline: true).isEmpty)
 t("the same event later: not notified again", fresh(crash.events, seen: &seen, baseline: false).isEmpty)
 t("a new event: notified once", fresh(down.events, seen: &seen, baseline: false).count == 1 && fresh(down.events, seen: &seen, baseline: false).isEmpty)
+
+let stalledSnap = glance(snap(#"{"door": {"queue": {}}, "maintenance": null, "lmstudio": {"families": [\#(fam)]}, "peers": [], "crashes": {"down": [], "stalled": [{"copy": "test/family", "at": 1799999500, "why": "stalled: test"}]}}"#), now: now)
+t("a stalled instance: an alert that says it is being reloaded, attention", stalledSnap.attention && stalledSnap.lines.contains { $0.title.hasPrefix("test/family stalled at ") && $0.title.hasSuffix("; reloading") }, "\(stalledSnap.lines.map(\.title))")
 
 let errs = glance(snap(#"{"door": {"queue": {}}, "maintenance": null, "lmstudio": {"families": []}, "peers": [], "crashes": {"down": []}, "errors": {"count": 2, "minutes": 60}, "settings_error": "families: not an object"}"#), now: now)
 t("recorded errors and a settings error: alerts", errs.attention && errs.lines.contains { $0.title == "2 errors recorded in the last 60 min" }

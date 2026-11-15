@@ -35,7 +35,9 @@ agent.batch does; or `localmodels recycle`), and a copy past that share of its b
 starts on fresh copies. One copy at a time; never while its family has a copy down or missing; two minutes between two
 recycles of a family, except for a copy past its threshold, which drains 30 s after its sibling is back (GAP_HARD: while
 one copy drains the other takes every request, so it reaches its own threshold sooner); a crash during a drain ends it
-(the reload is the recycle: crashes.loaded); a drain that has not emptied in 10 minutes is given up and tried again 10 minutes later. A copy
+(the reload is the recycle: crashes.loaded); a drain that has not emptied in 10 minutes is given up and that copy is tried again 10
+minutes later (its sibling may be recycled meanwhile), and a copy the watchdog finds stalled (watchdog.py) is reloaded first
+without a drain (a stall job: its requests were cut and sent again; LM Studio never calls a stalled engine idle). A copy
 loaded with other settings than the family's (LM Studio's window, its just-in-time loading) is recycled the same way, so
 the family comes back to its settings.
 
@@ -48,8 +50,9 @@ import time
 from . import crashes, llmshare
 
 DEFAULT = dict(tokens=300_000, written=150_000, soft=220_000, before_batch=0.5, requests=0)
-DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try again after; between two recycles of a family; a fresh-start request lasts
+DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain given up; try that copy again after; between two recycles of a family; a fresh-start request lasts
 GAP_HARD = 30             # seconds after a family's last recycle before a copy past its threshold drains (GAP holds the rest)
+STALL_GRACE = 30          # seconds a stall job waits for the slots of its cut requests to be let go before it reloads anyway
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
 _held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
 
@@ -139,13 +142,21 @@ def drift(row, f):
 
 def _r(st):
     r = st.setdefault('recycle', {})
-    for k, v in (('job', None), ('last', {}), ('fresh', {}), ('retry_after', 0)):
+    for k, v in (('job', None), ('last', {}), ('fresh', {}), ('retry_after', 0), ('retry', {})):
         r.setdefault(k, v)
     return r
 
 
+def _retry(r, now=None):
+    """The copies whose last recycle was given up, each with the time it may be tried again: {copy: t}. One copy's failed
+    drain no longer holds back its sibling's recycle (a copy that never drained kept the other past 3,000,000 tokens)."""
+    now = now or time.time()
+    return {c: t for c, t in (r.get('retry') or {}).items() if t > now}
+
+
 def job():
-    """The recycle in progress, or None: {copy, family, state: draining|reloading, since, why, counts, share}."""
+    """The recycle in progress, or None: {copy, family, state: draining|reloading, since, why, counts, share, stall}.
+    stall: the copy stalled (watchdog.py), so it is reloaded without waiting for a drain."""
     return ((crashes._read().get('recycle') or {}).get('job')) or None
 
 
@@ -159,16 +170,30 @@ def plan(rows, busy=None, flying=None):
     """One look (the keeper's): mark the copy that is due for a recycle, if any. rows: what LM Studio holds now; busy: the
     slots held per copy (llmshare.busy_slots); flying: the context in flight per copy, in tokens (admission.in_flight, from
     the gateway's in-flight markers), which counts toward the processed threshold, so a copy that its requests in flight
-    would carry past it drains now, not once they have. -> words or None."""
+    would carry past it drains now, not once they have. A copy the watchdog marked stalled comes first, whatever its count:
+    a stall job, which reloads it without a drain (its requests were cut and sent again), its older sibling first when
+    LM Studio would resolve its name to that sibling. -> words or None."""
     from . import admission
     busy = busy or {}
     st = crashes._read(fresh=True)
     r = st.get('recycle') or {}
-    if r.get('job') or time.time() < (r.get('retry_after') or 0): return None
+    stalled = st.get('stalled') or {}
+    j = r.get('job')
+    if j:
+        if j['copy'] in stalled and not j.get('stall'):                  # the copy draining stalled: its drain would never empty
+            with crashes._state() as st2:
+                rr = _r(st2)
+                if not rr['job'] or rr['job']['copy'] != j['copy']: return None
+                rr['job'].update(stall=True, stall_at=time.time(), why=f"{(stalled[j['copy']] or {}).get('why') or 'stalled'} (it was draining: {j['why']})")
+            return f"{j['copy']}: stalled while draining; reloaded without waiting for the drain"
+        return None
+    now, retry = time.time(), _retry(r)
     seen, down, have = st.get('seen') or {}, st.get('down') or {}, {x['id']: x for x in rows}
+    _held.clear()
+    w = _stall_job(rows, stalled, seen, down, have, retry, now)
+    if w: return w
     flying = admission.in_flight() if flying is None else flying
     best = None
-    _held.clear()
     for base, f in (llmshare.settings().get('families') or {}).items():
         th = thresholds(f)
         if not th or base in down: continue
@@ -178,6 +203,7 @@ def plan(rows, busy=None, flying=None):
         if after < GAP_HARD: continue
         fresh = time.time() - (r.get('fresh') or {}).get(base, 0) < FRESH_FOR
         for i in ids:
+            if i in stalled or i in retry: continue                      # its stall job above; its last recycle given up: later
             c = counts(i, _since(seen, i))
             s, ahead = share(c, th), int(flying.get(i) or 0)
             sp = share(dict(c, tokens=c['tokens'] + ahead), th) if ahead else s
@@ -211,6 +237,35 @@ def plan(rows, busy=None, flying=None):
     return f'{copy}: draining for recycle ({why})'
 
 
+def _stall_job(rows, stalled, seen, down, have, retry, now):
+    """The job for the copy that stalled first, if one may start now: -> words or None (plan's first look)."""
+    from . import watchdog
+    for copy, s in sorted(stalled.items(), key=lambda kv: (kv[1] or {}).get('at') or 0):
+        base = llmshare.family(copy)
+        if copy not in have or copy in retry: continue                   # gone (the crash path has it), or its last reload failed: later
+        d = down.get(base)
+        if d and d.get('state') in ('loading again', 'waiting for room'): continue   # a crash reload in the family first
+        n = len(watchdog.recent(base, now))
+        if n > watchdog.CAP:
+            _held[base] = (f'{copy} stalled {n} times within {watchdog.WINDOW // 60} min: left out of routing, not reloaded again '
+                           f'until the hour has passed; reload by hand: localmodels use {base}')
+            continue
+        why, target, stall = (s or {}).get('why') or 'stalled', copy, True
+        older = oldest_first(rows, copy)
+        if older:                                                        # an unload by its name would take `older`: that one goes first
+            target, stall = older, older in stalled
+            why = f'{older} first, so that {copy} becomes the oldest instance of its model key (LM Studio unloads the oldest by that name); {copy} {why}'
+            if older in retry: continue
+        c = counts(target, _since(seen, target))
+        th = thresholds((llmshare.settings().get('families') or {}).get(base)) or DEFAULT
+        with crashes._state() as st2:
+            rr = _r(st2)
+            if rr['job']: return None
+            rr['job'] = dict(copy=target, family=base, state='draining', since=now, why=why, counts=c, share=round(share(c, th), 2), stall=stall, **({'stall_at': now} if stall else {}))
+        return f"{target}: {'reloading, stalled' if stall else 'draining for recycle'} ({why})"
+    return None
+
+
 def oldest_first(rows, copy):
     """When this copy's identifier is also its model key (a family's first copy), LM Studio's server resolves an unload by
     that name to the oldest-loaded instance of the key, whichever its identifier (measured: its REST API and `lms unload`
@@ -223,30 +278,34 @@ def oldest_first(rows, copy):
 
 
 def ready(rows, busy):
-    """Whether the draining copy has nothing in flight: no slot held on it, and LM Studio calls it idle. -> (job, True/False)."""
+    """Whether the draining copy has nothing in flight: no slot held on it, and LM Studio calls it idle. A stall job does
+    not wait for LM Studio's word (a stalled engine never reads as idle): the slots of its cut requests let go, or
+    STALL_GRACE seconds. -> (job, True/False)."""
     j = job()
     if not j: return None, False
     row = next((x for x in rows if x['id'] == j['copy']), None)
     held = busy.get(llmshare._safe(j['copy']), 0)
+    if j.get('stall'): return j, held == 0 or time.time() - (j.get('stall_at') or j.get('since') or 0) >= STALL_GRACE
     return j, held == 0 and (row is None or row['state'] == 'IDLE')
 
 
 def given_up(copy, why, states=('draining', 'reloading')):
-    """The recycle of this copy ends without a reload (recorded as 'recycle given up', with why); it is tried again after
-    RETRY seconds, and meanwhile the copy serves as before. -> whether a job ended."""
+    """The recycle of this copy ends without a reload (recorded as 'recycle given up', with why); that copy is tried again
+    after RETRY seconds, and meanwhile it serves as before (a stalled one stays out of routing). -> whether a job ended."""
     with crashes._state() as st:
         r = _r(st)
         j = r['job']
         if not j or j['copy'] != copy or j['state'] not in states: return False
         crashes._record(dict(event='recycle given up', family=j['family'], model=copy, why=str(why)[:300]))
         r['job'], r['retry_after'] = None, time.time() + RETRY
+        r['retry'] = dict(_retry(r), **{copy: time.time() + RETRY})
     return True
 
 
 def give_up_if_stuck():
     """A drain that has not emptied in DRAIN_MAX seconds is let go; the copy is tried again after RETRY seconds. -> words or None."""
     j = job()
-    if not j or j['state'] != 'draining' or time.time() - j['since'] < DRAIN_MAX: return None
+    if not j or j['state'] != 'draining' or j.get('stall') or time.time() - j['since'] < DRAIN_MAX: return None
     given_up(j['copy'], f'still active after {DRAIN_MAX // 60} min of draining', states=('draining',))
     return f"{j['copy']}: still active after {DRAIN_MAX // 60} min of draining; recycle deferred {RETRY // 60} min"
 
@@ -265,11 +324,16 @@ def done(copy, ok, seconds, words=''):
         if r['job'] and r['job']['copy'] == copy: j = r['job']
         base = (j or {}).get('family') or llmshare.family(copy)
         c = (j or {}).get('counts') or {}
-        if ok:
+        if ok and (j or {}).get('stall'):                                # a stalled copy back: the end of that incident, not a recycle
+            crashes._record(dict(event='loaded again', family=base, models=[copy], seconds=round(seconds, 1), by='the hub', after='stall'))
+        elif ok:
             crashes._record(dict(event='recycled', family=base, model=copy, requests=c.get('requests'), written=c.get('written'), prompt=c.get('prompt'),
                                  tokens=c.get('tokens'), hours=round((time.time() - c['since']) / 3600, 2) if c.get('since') else None,
                                  seconds=round(seconds, 1), why=(j or {}).get('why')))
+        if ok:
             st.setdefault('seen', {}).setdefault(copy, {}).update(loaded=True, since=time.time(), at=time.time())
+            (st.get('stalled') or {}).pop(copy, None)
+            (r.get('retry') or {}).pop(copy, None)
             r['last'][base] = time.time()
             r['fresh'].pop(base, None)
         else:
@@ -314,5 +378,6 @@ def recent(days=7):
 def words(j):
     """A recycle in progress, in a line."""
     if not j: return ''
+    if j.get('stall'): return f"{j['copy']}: reloading after a stall ({'unload and reload in progress' if j['state'] == 'reloading' else 'its cut requests letting go of their slots'}; {j['why']})"
     state = 'draining: no new requests routed to it until in-flight requests complete' if j['state'] == 'draining' else 'unload and reload in progress'
     return f"{j['copy']}: recycling ({state}; {j['why']})"

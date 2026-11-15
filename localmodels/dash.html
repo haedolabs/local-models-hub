@@ -271,7 +271,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
     <div class="h-status"><span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="ext-chips" style="display:contents"></span></div>
     <div class="h-view"><span>Window:</span>
       <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div></div>
-    <div class="h-actions"><span class="act-say" id="act-say" role="status" aria-live="polite"></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><button class="btn act" id="power" style="display:none"></button><span id="peer-power" style="display:contents"></span></div>
+    <div class="h-actions"><span class="act-say" id="act-say" role="status" aria-live="polite"></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><button class="btn act" id="power" style="display:none"></button><button class="btn act" id="peers-only" style="display:none" title="Switch this Mac's local models off and send every request to the peers (POST /hub/off {&quot;peers&quot;: true}): its instances are unloaded once the requests on them finish, nothing is cut, and a request no peer can take gets 503 until turned on">peers only</button><span id="peer-power" style="display:contents"></span></div>
   </header>
   <div>
     <div id="banner"><b>Gateway unreachable.</b> <span class="ink2">Start it with <code>localmodels start</code>; this page reconnects automatically.</span></div>
@@ -666,6 +666,7 @@ function renderNow() {
   const pw = $('power');                                 // this Mac's local models off or on (POST /hub/off, /hub/on)
   pw.style.display = '';
   powerButton(pw, 'here', mt, S.switching, '', 'turn models');
+  $('peers-only').style.display = ps.length && !(mt && mt.off && mt.peers) && !pend.here && !pw.disabled ? '' : 'none';   // local off, work on the peers (from on, or from off)
   const pp = $('peer-power');                           // each peer's local models off or on from here (POST /hub/link/off, /hub/link/on)
   for (const p of ps) {
     let b = pp.querySelector(`[data-peer="${CSS.escape(p.name)}"]`);
@@ -678,12 +679,13 @@ function renderNow() {
   renderSaid();
   // stat tiles
   const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
-  let busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
-  const hosts = [`this Mac ${busy}/${cap}`];
+  const offHere = !!(mt && mt.off), refused = !!(mt && mt.phase === 'on' && !mt.peers);   // switched off: this Mac's slots take nothing; refusing: nothing does
+  let busy = offHere ? 0 : fams.reduce((s, f) => s + f.busy, 0), cap = offHere ? 0 : fams.reduce((s, f) => s + f.at_once, 0);
+  const hosts = [offHere ? 'this Mac off' : `this Mac ${busy}/${cap}`];
   for (const p of (S.peers || []).filter(p => p.state === 'up')) {
     let b = 0, c = 0;
     for (const f of Object.values(p.families || {})) if (f.match) { b += f.busy || 0; c += f.slots || 0; }
-    if (c) { busy += b; cap += c; hosts.push(`${p.name} ${b}/${c}`); }
+    if (c && !refused) { busy += b; cap += c; hosts.push(`${p.name} ${b}/${c}`); }
   }
   $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} slots`));
   $('k-ans').title = hosts.join(' · ');
@@ -715,8 +717,8 @@ function renderNow() {
 
 const TITLE = document.title;
 function renderTitle(busy, cap, waiting) {    // a background tab still tells the state: active of slots, queued, switched off, alerts
-  const n = $('alerts').children.length, off = S.maintenance && S.maintenance.off;
-  document.title = [off ? 'off' : `${busy}/${cap} active`, waiting ? `${waiting} queued` : '', n ? `${n} alert${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ') + ' – ' + TITLE;
+  const n = $('alerts').children.length, off = S.maintenance && S.maintenance.off && !S.maintenance.peers;
+  document.title = [off ? 'off' : `${busy}/${cap} active` + (S.maintenance && S.maintenance.peers ? ' on peers' : ''), waiting ? `${waiting} queued` : '', n ? `${n} alert${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ') + ' – ' + TITLE;
 }
 let fresh = 0;                                // when the last snapshot arrived (this browser's clock)
 function staleness() {
@@ -786,6 +788,9 @@ function renderAlerts() {
              : el('span', {}, d.state === 'waiting for room' ? `Reload pending: insufficient memory${d.why ? ' (' + d.why + ')' : ''}; requests for it are held.`
                                                               : 'Reloading; remaining replicas keep serving, requests for it are held.'))));
   }
+  for (const x of (S.crashes && S.crashes.stalled) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
+    el('span', {}, el('b', {}, `${x.copy} stalled at ${clock(x.at)}`), ' ', el('span', {class: 'ink2'}, `(${x.why}). `), 'Out of routing, its requests resent; the instance manager reloads it.')));
+  for (const w of Object.values((S.recycle && S.recycle.held) || {})) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, w)));
   if (S.recycle && S.recycle.words) out.push(el('div', {class: 'alert info', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '↻'), el('span', {}, S.recycle.words)));
   for (const p of S.peers || []) {
     const said = [];
@@ -816,7 +821,8 @@ function renderModels() {
   const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
     el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.label || d.state}`))));
   const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id))), mt = S.maintenance;
-  const why = mt && mt.off ? `This Mac: local models switched off since ${clock(mt.start)}` + (mt.unloaded ? ', no instance loaded' : ', unloading once the requests in flight finish')
+  const why = mt && mt.off ? `This Mac: local models switched off since ${clock(mt.start)}` + (mt.unloaded ? ', no instance loaded' : mt.peers ? ', unloading once the requests in flight here finish' : ', unloading once the requests in flight finish')
+      + (mt.peers ? '; requests go to peers only' : '; requests get 503')
     : mt && mt.phase === 'on' ? `This Mac: in maintenance; the instance manager loads nothing until it ends` : '';
   if (why) down.unshift(el('div', {class: 'fam-note'}, why + (there.length || fams.length ? '' : '.')));
   if (!fams.length) { box.replaceChildren(...down, why || down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
@@ -839,7 +845,9 @@ function renderModels() {
         b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
         return b;
       }));
-      const state = c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
+      const stallJob = S.recycle && S.recycle.job && S.recycle.job.copy === c.id && S.recycle.job.stall;
+      const state = c.stalled || stallJob ? el('span', {class: 'badge down', title: ((S.crashes && S.crashes.stalled) || []).filter(x => x.copy === c.id).map(x => x.words).join('\n') || (stallJob ? S.recycle.words : '')}, c.recycling === 'reloading' ? 'stalled: reloading' : 'stalled: out of routing')
+        : c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
         : el('span', {title: c.ctx && c.ctx.budget ? `context in flight ${full(c.ctx.load)} of a budget of ${full(c.ctx.budget)} tokens (admission by context size)` : ''},
             (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`
             + (c.ctx && c.ctx.budget && c.busy ? ` · ${compact(c.ctx.load)}/${compact(c.ctx.budget)} context` : ''),
@@ -1141,7 +1149,7 @@ function powerButton(b, key, mt, sw, peer, verb) {
   const finished = before && before.busy;
   if (finished || pend[key]) {
     delete pend[key];
-    if (st.off) say(key, name + `switched off at ${clock(mt.unloaded || mt.start)}: every instance unloaded; requests get 503`, 'done', 10000);
+    if (st.off) say(key, name + `switched off at ${clock(mt.unloaded || mt.start)}: every instance unloaded; ` + (mt.peers ? 'requests go to peers only' : 'requests get 503'), 'done', 10000);
     else if (sw && sw.phase === 'done' && !sw.ok) say(key, name + `switched on, but not every load succeeded: ${sw.words}`, 'fail', 30000);
     else say(key, name + `switched on${sw && sw.words ? ': ' + sw.words : ''}; requests are admitted`, 'done', 10000);
   }
@@ -1264,6 +1272,20 @@ $('poll-now').addEventListener('click', async () => {          // the gateway lo
 });
 $('power').addEventListener('click', () => powerSwitch($('power'), 'here', '',
   body => fetch($('power').dataset.off === '1' ? '/hub/on' : '/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})));
+$('peers-only').addEventListener('click', async () => {    // this Mac's local models off, every request to the peers
+  const b = $('peers-only'); if (b.disabled) return;
+  const mt = S && S.maintenance, already = !!(mt && mt.off);
+  if (!confirm(already ? "Send every request to the peers while this Mac's local models stay off?\nA request no peer can take gets 503 until turned on."
+    : "Switch this Mac's local models off and send every request to the peers?\nIts instances are unloaded once the requests on them finish; a request no peer can take gets 503 until turned on.")) return;
+  b.disabled = true; say('here', 'peers only: sending', 'busy');
+  let r = null;
+  try { r = await fetch('/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({peers: true})}); } catch (e) { r = null; }
+  const j = r ? await r.json().catch(() => ({})) : {};
+  b.disabled = false;
+  if (r && r.ok) { pend.here = {want: 'off', at: Date.now()}; say('here', 'peers only: ' + (j.note || 'request accepted'), 'busy'); }
+  else say('here', 'nothing switched: ' + (j.error || (r ? 'HTTP ' + r.status : 'the gateway did not answer')), 'fail', 20000);
+  tickNow();
+});
 $('peer-power').addEventListener('click', ev => {          // a peer's local models off or on
   const b = ev.target.closest('button[data-peer]'); if (!b) return;
   const name = b.dataset.peer, on = b.dataset.off === '1';

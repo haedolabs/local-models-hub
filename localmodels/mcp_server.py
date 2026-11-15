@@ -21,7 +21,7 @@ INSTRUCTIONS = (
     "never directly to LM Studio's port 1234: the gateway runs admission control across all clients, attributes each request to its project and session, and "
     "logs metadata only (never content). The project's name on the hub's screens is set once with the name tool. Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
     "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA, and a run in phases X-Phase, X-Phase-Total and X-Phase-Done (its plan: POST /hub/runs) for an estimate per phase and for the whole run. The status tool lists the loaded models and their total concurrent slots (at_once): "
-    "a batch should keep that many requests in flight (the gateway queues the rest). For bulk read-only jobs, use ask and batch here "
+    "a batch should keep that many requests in flight (the gateway queues the rest; 0 while this Mac's local models are switched off and requests get 503). For bulk read-only jobs, use ask and batch here "
     "(local agents with read-only tools scoped to your project's folder) instead of Claude multi-agent workflows. "
     "Treat their answers as leads to verify, not verdicts. Never stop LM Studio's server; before unloading or reloading a model, call "
     "swap_check, and if it names anyone, do not swap. Report briefly.")
@@ -30,7 +30,7 @@ FOLDER = {'type': 'string', 'description': "a folder inside this session's proje
 TOOLS = [
     {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each instance\'s tokens since load against its '
      'recycle threshold), the gateway, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every client using a model by '
-     'project and Claude session (batches with their progress), crashes and recycles, and the last hour by project.',
+     'project and Claude session (batches with their progress), crashes, stalled instances and recycles, the switched-off state (peers only: requests go to the peers), and the last hour by project.',
      'inputSchema': _o({})},
     {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (endpoints, "
      "leases, swaps, local agents, logs). section=... reads one part; no section: the Now section and the section list.",
@@ -96,7 +96,14 @@ def status():
         from . import errors; errors.record('mcp status: recycle view', e, source='mcp')
     from . import maint
     mt = maint.view()
-    if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
+    if mt: out['maintenance'] = mt['words'] + ('. Requests go to the peers only (at_once counts their slots), 503 with Retry-After when none can take one.' if mt.get('peers') else
+                                               '. Requests now get 503 with Retry-After (at_once 0).' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
+    try:
+        from . import crashes
+        st_ = crashes.stalled()
+        if st_: out['stalled'] = [s['words'] for s in st_]
+    except Exception as e:
+        from . import errors; errors.record('mcp status: stalled instances', e, source='mcp')
     if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error()
     if s['door'].get('write_problem'): out['records_not_written'] = s['door']['write_problem']
     from . import cli

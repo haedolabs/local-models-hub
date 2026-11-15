@@ -26,7 +26,8 @@ in the log counts as crashed when it is a family in models.json; otherwise it is
   reloading()   while a crashed model is being loaded again, the door holds requests that only it could answer (up to
                 10 minutes) instead of passing on LM Studio's "no model loaded"; down_copies() names the copies to route
                 around while the others answer.
-  history()     the crashes of the last days, a model's copies that crashed together as one (the dash, localmodels crashes).
+  history()     the crashes of the last days, a model's copies that crashed together as one (the dash, localmodels crashes),
+                and the stalls the watchdog found (watchdog.py; stall(), stalled_copies(): keeper.json "stalled").
   scan()        crashes in LM Studio's logs from before the hub watched for them.
 
 Kept in ~/Library/Application Support/LocalModels/: crashes.jsonl (time, model, LM Studio's own error words, what the
@@ -49,6 +50,11 @@ MISS = 20                        # seconds a copy must be missing from the listi
 WAKE = threading.Event()         # the door sets it when a request fails: the keeper looks at once, not in 20 s
 
 STAMP = re.compile(r'^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]\[(\w+)\](?:\[([^\]]+)\])?')
+# The server's own lines on taking a request for an instance, written before the engine does anything (seen in November's
+# logs: "Running chat completion on conversation ...", "Running api/v1/chat on history ...", "Running Anthropic messages
+# API ...", "Generating synchronous v1/responses response", "Streaming response"); a WARN or an ERROR line is the server's too.
+ACCEPTED = ('Running ', 'Generating synchronous', 'Streaming ')
+STEP = 'Prompt processing progress'    # the engine's line about every second while it reads a prompt
 CAUSE = re.compile(r'^- Caused By: (?:Error: )?(The model has crashed.{0,120})')
 ERROR = re.compile(r'^([A-Za-z_][\w.]*(?:Error|Exception)): (.{0,300})')
 FATAL = re.compile(r'Fatal Python error: (.{1,80})')
@@ -84,7 +90,9 @@ def parse(lines, ctx=None):
     """Lines of LM Studio's server log -> (crashes [{at, model, cause, error}], events [(at, 'loadModel' | 'unloadModel' |
     'serverStart', key or id)], the engine's last fatal error (at, words) or None). Keeps only LM Studio's and the engine's
     own error words, never a request's content: an exception's message is kept only when it is about the engine (Metal,
-    memory, a signal), else just its name."""
+    memory, a signal), else just its name. For the watchdog it also notes, in ctx, when each tag (an instance's
+    identifier) last had an engine line ('engine': {tag: at}: an INFO or DEBUG line tagged with it, other than the
+    server's ACCEPTED), the last engine step ('step') and the last line of any kind ('line'): times only."""
     ctx = _ctx if ctx is None else ctx
     crashes, events, fatal = [], [], None
     for line in lines:
@@ -92,6 +100,12 @@ def parse(lines, ctx=None):
             m = STAMP.match(line)
             if not m: continue
             ctx['at'], ctx['model'] = _t(m.group(1)), (m.group(3) if m.group(2) == 'ERROR' else None)
+            ctx['line'] = ctx['at']
+            if m.group(3) and m.group(2) in ('INFO', 'DEBUG') and '[Endpoint=' not in line:
+                text = line[m.end():].lstrip()
+                if not text.startswith(ACCEPTED):
+                    ctx.setdefault('engine', {})[m.group(3)] = ctx['at']
+                    if text.startswith(STEP): ctx['step'] = ctx['at']
             if '[Endpoint=' in line:
                 x = LOADING.search(line)
                 if x: events.append((ctx['at'], x.group(1), x.group(2)))
@@ -238,6 +252,14 @@ def watch(rows, listed_at=None, busy=None, now=None):
         found, events, fatal = parse(_new_lines(st))
         seen, down, last = st.setdefault('seen', {}), st.setdefault('down', {}), st.setdefault('last', {})
         if fatal: st['fatal'] = dict(at=fatal[0], words=fatal[1])
+        eng = st.setdefault('engine', {})                                 # each instance's last engine line (watchdog.py)
+        for i, at in (_ctx.pop('engine', None) or {}).items():
+            if i in seen or i in have: eng[i] = max(at, eng.get(i, 0))
+        for i in [i for i in eng if i not in seen and i not in have]: del eng[i]
+        for k, src in (('log_line', 'line'), ('log_step', 'step')):
+            if _ctx.get(src): st[k] = max(_ctx[src], st.get(k) or 0)
+        for c in [c for c in (st.get('stalled') or {}) if c not in have and (api is None or c not in api)]:
+            del st['stalled'][c]                                          # a stalled instance gone: the crash path or its reload has it
         unloaded = {m for _, verb, m in events if verb == 'unloadModel'}
         restarted = any(verb == 'serverStart' for _, verb, _ in events)
         # a copy named in a crash line is down, whatever the listing in hand says; one crash per copy per life
@@ -332,7 +354,7 @@ def loaded(base, ids, ok, seconds, words=''):
         d = (st.get('down') or {}).get(base)
         if ok:
             _record(dict(event='loaded again', family=base, models=ids, seconds=round(seconds, 1), by='the hub'))
-            for i in ids: st.setdefault('reloads', {}).setdefault(i, []).append(time.time())
+            for i in ids: st.setdefault('reloads', {}).setdefault(i, []).append(time.time()); (st.get('stalled') or {}).pop(i, None)
             if d:                                            # the crash is over when every copy it took is back
                 d['models'] = [m for m in d.get('models') or [] if m not in ids]
                 if not d['models']: del st['down'][base]
@@ -385,11 +407,13 @@ def reload_proven(base):
 
 
 def loaded_now(ids):
-    """The hub loaded these copies this moment (a swap, a kept copy, a recycle): their counts start again."""
+    """The hub loaded these copies this moment (a swap, a kept copy, a recycle, a stalled one's reload): their counts start
+    again, and a stall is over."""
     with _state() as st:
         for i in ids:
             st.setdefault('seen', {}).setdefault(i, {}).update(loaded=True, since=time.time(), at=time.time())
             st.get('missing', {}).pop(i, None)
+            (st.get('stalled') or {}).pop(i, None)
 
 
 def unloaded_now(ids):
@@ -399,8 +423,52 @@ def unloaded_now(ids):
         for i in ids:
             if i in st.get('seen', {}): st['seen'][i]['loaded'] = False
             st.get('missing', {}).pop(i, None)
+            (st.get('stalled') or {}).pop(i, None)
             for d in (st.get('down') or {}).values():
                 if i in (d.get('models') or []): d['models'].remove(i)
+
+
+def switched_off(why='local models switched off'):
+    """The local models are switched off (models.off_pass): crash recovery, stalls and a recycle under way are moot until
+    they are switched on (which loads what was loaded, and starts the keeper's picture afresh), so none lingers on the
+    screens meanwhile: each family down is recorded as cancelled, with why. -> whether anything was cleared."""
+    with _state() as st:
+        r = st.get('recycle') or {}
+        if not (st.get('down') or st.get('stalled') or r.get('job')): return False
+        for base in list(st.get('down') or {}): _record(dict(event='cancelled', family=base, why=why))
+        if r.get('job'): _record(dict(event='recycle given up', family=r['job'].get('family'), model=r['job'].get('copy'), why=why))
+        st['down'], st['stalled'], r['job'] = {}, {}, None
+    return True
+
+
+# ---------------------------------------------------------------- stalled instances (watchdog.py)
+def stall(copy, why, inflight=0):
+    """The watchdog found this instance stalled: the door sends it nothing and cuts the requests in flight on it, and the
+    instance manager reloads it (recycle.plan). Recorded once per stall (event 'stall'). -> whether it was new."""
+    with _state() as st:
+        s = st.setdefault('stalled', {})
+        if copy in s: return False
+        s[copy] = dict(at=time.time(), why=str(why)[:300], family=llmshare.family(copy), inflight=int(inflight or 0))
+        since = (st.get('seen', {}).get(copy) or {}).get('since')
+        _record(dict(event='stall', model=copy, family=llmshare.family(copy), cause=str(why)[:300], error=None,
+                     served=_served(copy, since), found='as it happened'))
+    return True
+
+
+def stalled_copies(model=None):
+    """The instances marked stalled now, of this model's family (or all): the door routes around them and cuts what is in
+    flight on them."""
+    s = _read().get('stalled') or {}
+    if model is None: return set(s)
+    base = llmshare.family(model)
+    return {c for c in s if llmshare.family(c) == base}
+
+
+def stalled():
+    """The stalled instances in words, for the screens: [{copy, family, at, why, inflight, words}]."""
+    return [dict(v, copy=c, words=f"{c} stalled at {time.strftime('%H:%M', time.localtime(v.get('at') or 0))}: {v.get('why')}; "
+                                  'out of routing, its requests resent; the instance manager reloads it')
+            for c, v in sorted((_read(fresh=True).get('stalled') or {}).items())]
 
 
 def swapped(to):
@@ -410,6 +478,7 @@ def swapped(to):
             if base == llmshare.family(to): _record(dict(event='back', family=base, by='localmodels use'))
             else: _record(dict(event='cancelled', family=base, why=f'superseded by a swap to {to}'))
             del st['down'][base]
+        st['stalled'] = {}                                   # a swap unloads and loads them all
 
 
 def after_maintenance(rows):
@@ -422,6 +491,7 @@ def after_maintenance(rows):
         seen = {i: dict(s, loaded=True) for i, s in (st.get('seen') or {}).items() if i in have}
         for i in have: seen.setdefault(i, dict(loaded=True, since=now))
         st['seen'], st['down'], st['missing'] = seen, {}, {}
+        st['stalled'] = {i: v for i, v in (st.get('stalled') or {}).items() if i in have}
 
 
 def nudge():
@@ -489,12 +559,13 @@ def _state_words(base, state, why):
 
 def history(days=7):
     """The crashes of the last days, newest first, a model's copies that crashed together as one: [{at, family, models,
-    which, error, cause, found, served, failed (requests that got an error), back, by, seconds, state, why, then (words)}]."""
+    which, error, cause, found, served, failed (requests that got an error), back, by, seconds, state, why, then (words),
+    stall}]. An instance the watchdog found stalled (event 'stall') is one too, with stall=True."""
     out = []
     for r in records(days):
         fam, ev = r.get('family') or llmshare.family(r.get('model')), r.get('event')
-        if ev == 'crash':
-            x = next((x for x in out if x['family'] == fam and r['at'] - x['at'] < 120), None)
+        if ev in ('crash', 'stall'):
+            x = next((x for x in out if x['family'] == fam and r['at'] - x['at'] < 120 and x['stall'] == (ev == 'stall') and not x['back']), None)
             if x:
                 if r.get('model') not in x['models']: x['models'].append(r.get('model'))
                 x['error'] = x['error'] or r.get('error')
@@ -502,7 +573,7 @@ def history(days=7):
                 continue
             out.append(dict(at=r['at'], family=fam, models=[r.get('model')], error=r.get('error'), cause=r.get('cause'), found=r.get('found'),
                             served=[dict(r['served'], model=r.get('model'))] if r.get('served') else [], back=None, by=None,
-                            seconds=None, state=None, why=None))
+                            seconds=None, state=None, why=None, stall=ev == 'stall'))
             continue
         if ev in ('recycled', 'recycle given up'): continue
         x = next((x for x in reversed(out) if x['family'] == fam and x['at'] <= r['at'] and not x['back'] and x['state'] != 'cancelled'), None)
@@ -510,16 +581,18 @@ def history(days=7):
         if ev in ('loaded again', 'back'): x.update(back=r['at'], by=r.get('by'), seconds=r.get('seconds'), state=None, why=None)
         elif ev in ('left down', 'cancelled'): x.update(state=ev, why=r.get('why'))
     bad = [q for q in llmshare.requests_log(days * 24 + 1) if (q.get('status') or 0) >= 400]
-    now = _read(fresh=True).get('down') or {}
+    st = _read(fresh=True)
+    now, st_stalled = st.get('down') or {}, st.get('stalled') or {}
     for x in out:
         x['which'] = _which(x['family'], x['models'])
         end = x['back'] or (x['at'] + HOLD)
         x['failed'] = sum(1 for q in bad if llmshare.family(q.get('copy') or q.get('model')) == x['family'] and x['at'] - 5 <= q.get('at', 0) <= end)
         d = now.get(x['family'])
-        if d and not x['back'] and x['state'] != 'cancelled' and abs((d.get('crashed') or 0) - x['at']) < 120: x['state'], x['why'] = d.get('state'), d.get('why')
+        if d and not x['back'] and x['state'] != 'cancelled' and not x['stall'] and abs((d.get('crashed') or 0) - x['at']) < 120: x['state'], x['why'] = d.get('state'), d.get('why')
         if x['back']:
             x['then'] = (f"reloaded by the instance manager after {_dur(x['back'] - x['at'])}" if x['by'] == 'the hub' else
                          f"back after {_dur(x['back'] - x['at'])}, loaded " + ('outside the gateway' if x['by'] == 'someone else' else f"by {x['by']}"))
+        elif x['stall']: x['then'] = 'out of routing, its requests resent; reload pending' if set(x['models']) & set(st_stalled) else 'not reloaded by the hub (gone or loaded outside it)'
         else: x['then'] = _state_words(x['family'], x['state'], x['why']) or 'not reloaded yet'
     return list(reversed(out))
 
@@ -527,7 +600,8 @@ def history(days=7):
 def brief(x):
     """One crash in a few words, for an 80-column dash: '02 Mar 04:15, both replicas · back after 18 s'."""
     when = time.strftime('%d %b %H:%M', time.localtime(x['at']))
-    return f"{when}, {x['which']} · " + (f"back after {_dur(x['back'] - x['at'])}" + (' (instance manager)' if x['by'] == 'the hub' else '') if x['back'] else LABEL.get(x['state'], x['state']) or 'not back yet')
+    return f"{when}, {x['which']}{' stalled' if x.get('stall') else ''} · " + (f"back after {_dur(x['back'] - x['at'])}" + (' (instance manager)' if x['by'] == 'the hub' else '') if x['back'] else
+                                                                            'reload pending' if x.get('stall') else LABEL.get(x['state'], x['state']) or 'not back yet')
 
 
 def words(x):
