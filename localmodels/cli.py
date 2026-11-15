@@ -17,6 +17,9 @@
                                  once the requests in flight finish, and nothing is loaded, reloaded or started (crash
                                  recovery, load_at_start, LM Studio's server) until `localmodels on`; kept across restarts.
                                  Refused while a run holds a lease on a loaded model, unless --force
+  localmodels off --peers [reason ...]   the same here, while the gateway keeps admitting requests and sends every one to
+                                 its peers' slots (503 with Retry-After when no peer can take it); nothing is cut and no
+                                 lease refuses it: this Mac's instances are unloaded once the requests on them finish
   localmodels on                 switch them on again: the families loaded when switched off are loaded (all replicas)
   localmodels app install | uninstall   the menu-bar app: built here from app/ with the Command Line Tools' swiftc, signed
                                  ad hoc, in ~/Applications (state icon, on/off per host, two notifications, and a section
@@ -166,6 +169,16 @@ def status():
           + (' · stale code: localmodels install' if d['up'] and d['stale'] else ''))
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
+    if mt and mt.get('off'):
+        n = llmshare.at_once()
+        print(f"  requests: sent to peers only, {n} slot{'s' if n != 1 else ''} free for this gateway (at_once)" if mt.get('peers') else
+              '  requests: refused (503 with Retry-After) until switched on; at_once 0. To keep work going on the peers: localmodels off --peers')
+    try:
+        from . import crashes, watchdog
+        for s in crashes.stalled(): print('  ' + s['words'])
+        w = watchdog.view()
+        if w and lm['families']: print('  ' + w)
+    except Exception as e: print(f'  (could not read the watchdog: {e})')   # not recorded: shown to the person running the command
     if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()}')
     if d.get('write_problem'): print(f"  RECORDS NOT WRITTEN: {d['write_problem']}")
     for line in peer_lines(d['up']): print(line)
@@ -1123,11 +1136,13 @@ def maintenance_cmd(a):
 
 
 def off_cmd(a):
-    """localmodels off [--force] [reason ...]: switch off, then wait (up to 10 min) for the instance manager's unload."""
+    """localmodels off [--peers] [--force] [reason ...]: switch off (to peers only), then wait (up to 10 min) for the
+    instance manager's unload."""
     from . import maint, models
-    code, body = models.switch_off('--force' in a, ' '.join(x for x in a if not x.startswith('--')))
+    code, body = models.switch_off('--force' in a, ' '.join(x for x in a if not x.startswith('--')), peers_only='--peers' in a)
     if code != 200: print(f"nothing switched off: {body.get('error')}"); return 3
     print(maint.words(maint.read()))
+    if body.get('note') and ('peer' in body['note'] or body['note'].startswith('requests now')): print('  ' + body['note'])
     end, last = time.time() + 600, None
     while time.time() < end:
         off = maint.switched_off()
@@ -1630,7 +1645,7 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
-    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force',)), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 

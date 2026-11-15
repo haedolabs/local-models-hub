@@ -916,6 +916,220 @@ def test_switch_off(box):
     (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
      models.server_up, crashes.MISS, L.SWAP_LOCK, L.read_ok, L.inflight, L.swap_blockers) = real
 
+def test_watchdog():
+    print("the watchdog: an instance still listed whose engine stopped (LM Studio's log), read per instance")
+    from localmodels import watchdog
+    log = ['[2026-11-13 03:38:30][INFO][qwen/qwen3.6-35b-a3b] Prompt processing progress: 99.3%',
+           '[2026-11-13 03:38:37][INFO][qwen/qwen3.6-35b-a3b] Done reasoning. Reasoned for 0.2 seconds.',
+           '[2026-11-13 03:38:40][INFO][qwen/qwen3.6-35b-a3b:2] Generated prediction: {',
+           '  "id": "chatcmpl-x",',
+           '[2026-11-13 03:38:53][INFO][qwen/qwen3.6-35b-a3b] Running chat completion on conversation with 2 messages.',
+           '[2026-11-13 03:38:54][WARN][qwen/qwen3.6-35b-a3b] Reasoning setting \'low\' is not supported by model',
+           '[2026-11-13 03:38:55][INFO][qwen/qwen3.6-35b-a3b] Running Anthropic messages API on conversation with 3 messages.',
+           '[2026-11-13 03:38:56][INFO][qwen/qwen3.6-35b-a3b] Generating synchronous v1/responses response',
+           '[2026-11-13 03:39:02][INFO][LMSAuthenticator][Client=lms-cli][Endpoint=listLoaded] Listing loaded models',
+           '[2026-11-13 03:39:05][DEBUG] Received request: GET to /api/v0/models']
+    ctx = {}
+    crashes.parse(log, ctx)
+    T = lambda s: time.mktime(time.strptime('2026-11-13 ' + s, '%Y-%m-%d %H:%M:%S'))
+    t("each instance's last engine line; the server's lines on taking a request (any API) and its WARN lines do not count",
+      ctx.get('engine', {}).get(B) == T('03:38:37') and ctx['engine'].get(C2) == T('03:38:40'), ctx.get('engine'))
+    t('the last engine step and the last line of any kind', ctx.get('step') == T('03:38:30') and ctx.get('line') == T('03:39:05'), (ctx.get('step'), ctx.get('line')))
+    fams, listed = {B: {}}, {B, C2}
+    now = T('03:41:00')
+    eng = {B: T('03:38:37'), C2: T('03:40:59')}
+    mark = lambda c, s, ep='completions', answer=3000: dict(state='answering', copy=c, answering_since=s, ep=ep, answer=answer)
+    hung = [mark(B, T('03:37:58')), mark(B, T('03:38:03')), mark(B, T('03:38:22')), mark(B, T('03:38:53'))]
+    got = watchdog.look(hung + [mark(C2, T('03:40:30'))], eng, T('03:41:00'), T('03:41:00'), fams, listed, now=now)
+    t('a request sent 127 s ago and no engine line since (the first-token rule): stalled, in words; its busy sibling is not',
+      list(got) == [B] and 'after a request was sent' in got[B][0] and got[B][1] == 4, got)
+    got = watchdog.look(hung, eng, T('03:40:40'), T('03:40:40'), fams, listed, now=now)
+    t('...measured against the newest line LM Studio wrote, not the clock: 107 s of log is not yet a stall', got == {}, got)
+    t("...and nothing at all while LM Studio's log has shown no engine step within a day", watchdog.look(hung, eng, now, now - 90000, fams, listed, now=now) == {})
+    eng2 = dict(eng, **{B: T('03:38:54')})
+    t('an engine line after the newest request: not the first-token rule', watchdog.look(hung, eng2, now, now, fams, listed, now=now) == {})
+    four = [mark(B, T('03:28:00'))] * 4
+    got = watchdog.look(four, {B: T('03:31:00')}, T('03:41:01'), T('03:41:01'), fams, listed, now=now)
+    t('every slot busy and no engine line for 601 s (the silence rule): stalled', list(got) == [B] and 'with 4 requests in flight' in got[B][0], got)
+    t('...600 s of silence is within the limit at 599', watchdog.look(four, {B: T('03:31:02')}, T('03:41:01'), T('03:41:01'), fams, listed, now=now) == {})
+    long8k = [mark(B, T('03:28:00'), answer=8000)] + [mark(B, T('03:28:00'))] * 3
+    t('an answer of 8,000 tokens in flight: the silence limit is the time it takes at 8 tokens a second (1,000 s), not 600',
+      watchdog.look(long8k, {B: T('03:31:00')}, T('03:41:01'), T('03:41:01'), fams, listed, now=now) == {}
+      and list(watchdog.look(long8k, {B: T('03:31:00')}, T('03:47:41'), T('03:47:41'), fams, listed, now=now)) == [B])
+    unset = [mark(B, T('03:00:00'), answer=0)] * 4
+    t('an answer with no max_tokens: 30 min at most, not less', watchdog.look(unset, {B: T('03:01:00')}, T('03:30:59'), T('03:30:59'), fams, listed, now=now) == {}
+      and list(watchdog.look(unset, {B: T('03:01:00')}, T('03:31:01'), T('03:31:01'), fams, listed, now=now)) == [B])
+    t('an embedding, a copy on a peer, an instance no longer listed, a request still queued: never judged',
+      watchdog.look([mark(B, T('03:30:00'), 'embeddings'), mark(f'{B} on m4pro', T('03:30:00')), mark('gone/model', T('03:30:00')),
+                     dict(state='queued', copy=None, since=T('03:30:00'))], {}, now, now, {B: {}, 'gone/model': {}}, listed, now=now) == {})
+    t('a family with "watchdog": false is not judged; its own limits are taken',
+      watchdog.look(hung, eng, now, now, {B: dict(watchdog=False)}, listed, now=now) == {}
+      and list(watchdog.look(hung, eng, T('03:39:30'), T('03:39:30'), {B: dict(watchdog=dict(first=30))}, listed, now=now)) == [B])
+    t('the defaults: 120 s to a first engine line, 600 s of silence', watchdog.thresholds({}) == dict(first=120, silent=600) and watchdog.thresholds(dict(watchdog=False)) is None)
+
+
+def test_stalls(box):
+    print('a stalled instance: out of routing, reloaded without a drain (its older sibling first), at most 3 an hour; a failed drain holds back no sibling')
+    from localmodels import llmshare as L, models, watchdog
+    real = L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, L.SWAP_LOCK, L.read_ok, L.inflight
+    L.read_ok = lambda: True
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=dict(tokens=800000, soft=560000, before_batch=0.5))}
+    L.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
+    L.SWAP_LOCK = os.path.join(box, 'swap4.lock')
+    order, busy, flight, stuck = [B, C2], {'held': {}}, [], set()     # stuck: what LM Studio still calls GENERATING (a stalled engine)
+    L.loaded = lambda fresh=False, force=False: [row(i, state='GENERATING' if i in stuck else 'IDLE') for i in order]
+    L.api_models = lambda timeout=3: {i: 65536 for i in order}
+    L.busy_slots = lambda: dict(busy['held'])
+    L.inflight = lambda: list(flight)
+    loads, unloads = [], []
+    def fake_load(key, ident, context, parallel):
+        loads.append(ident); crashes.loaded_now([ident])
+        if ident not in order: order.append(ident)              # loaded last: the newest instance
+        return True, 'ok'
+    def fake_unload(ident):                                    # LM Studio resolves a bare model key to its oldest instance
+        took = order[0] if ident == B else ident
+        unloads.append(took); order.remove(took); return True, ''
+    models.load, models.unload = fake_load, fake_unload
+    models._lms, models.free_gb, models.ensure_server = (lambda *a, **k: (True, '')), (lambda: 100.0), (lambda *a, **k: True)
+    crashes.after_maintenance([row(B), row(C2)])               # a fresh picture: both loaded, nothing down, the log read from its end
+    reset(time.time() - 600)
+    now = time.time()
+    with crashes._state() as st:                              # LM Studio's log as crashes.watch leaves it: copy 1 silent since a request was sent
+        st.update(engine={B: now - 300, C2: now - 2}, log_line=now - 1, log_step=now - 1)
+    flight[:] = [dict(state='answering', copy=B, answering_since=now - 250, ep='completions')] * 4
+    n0 = len([r for r in crashes.records(1) if r.get('event') == 'stall'])
+    stuck.add(B)
+    t('the first-token rule finds copy 1 stalled: marked, recorded once', watchdog.check([row(B), row(C2)], fam) and crashes.stalled_copies() == {B}
+      and len([r for r in crashes.records(1) if r.get('event') == 'stall']) == n0 + 1 and not watchdog.check([row(B), row(C2)], fam), crashes.stalled_copies())
+    busy['held'] = {L._safe(B): 4}                             # its requests not yet let go: the job waits for them
+    words = models.keep()
+    j = recycle.job()
+    t('copy 1 is the oldest, so its own stall job: not reloaded while its cut requests still hold their slots', j and j['copy'] == B and j.get('stall') and not unloads, (j, words))
+    t('...the screens say it is reloading after a stall', 'reloading after a stall' in recycle.words(j) and crashes.stalled()[0]['copy'] == B, recycle.words(j))
+    busy['held'] = {}; flight.clear()
+    words = models.keep()
+    rec = [r for r in crashes.records(1) if r.get('event') == 'loaded again' and r.get('after') == 'stall']
+    t('the slots let go: unloaded and loaded again at once (LM Studio still says GENERATING), the stall over, recorded as back, not as a recycle',
+      unloads == [B] and loads == [B] and recycle.job() is None and not crashes.stalled_copies() and rec, (unloads, loads, words))
+    hist = [x for x in crashes.history(1) if x.get('stall')]
+    t('the crash history shows the stall and its reload', hist and hist[0]['back'] and 'reloaded by the instance manager' in hist[0]['then'] and 'stalled' in crashes.brief(hist[0]), hist[:1])
+
+    unloads.clear(); loads.clear(); order[:] = [C2, B]           # copy 1 stalls while copy 2 is the older instance
+    with crashes._state() as st: st['recycle']['last'] = {}
+    crashes.stall(B, 'stalled: test')
+    busy['held'] = {L._safe(C2): 1}                            # copy 2 has a request of its own to finish first
+    words = models.keep()
+    j = recycle.job()
+    busy['held'] = {}
+    t("copy 1 stalled while copy 2 is older (LM Studio unloads the oldest by copy 1's name): copy 2 drains first, copy 1 stays out of routing",
+      j and j['copy'] == C2 and not j.get('stall') and 'so that ' + B + ' becomes the oldest' in j['why'] and B in crashes.stalled_copies() and not unloads, (j, words))
+    for _ in range(3): models.keep()
+    t('then copy 2 recycled, and copy 1, now the oldest, reloaded after its stall', unloads == [C2, B] and loads == [C2, B] and not crashes.stalled_copies(), (unloads, loads))
+
+    unloads.clear(); loads.clear(); order[:] = [B, C2]
+    with crashes._state() as st:                              # copy 2 draining for a recycle, its drain never emptying
+        st['recycle']['job'] = dict(copy=C2, family=B, state='draining', since=time.time() - 60, why='test', counts={}, share=1.2)
+    busy['held'] = {L._safe(C2): 4}
+    crashes.stall(C2, 'stalled: test')
+    words = models.keep()
+    t('the copy draining stalls: its job becomes a stall job, which waits STALL_GRACE at most for the slots', recycle.job().get('stall') and any('stalled while draining' in w for w in words), words)
+    t('...not before', not unloads, unloads)
+    with crashes._state() as st: st['recycle']['job']['stall_at'] = time.time() - recycle.STALL_GRACE - 1
+    words = models.keep(); busy['held'] = {}
+    t('...then reloaded although slots are still held (a program of its own can hold one on a stalled engine)', unloads == [C2] and loads == [C2] and recycle.job() is None, (unloads, words))
+
+    unloads.clear(); loads.clear()
+    for k in range(3): crashes._record(dict(at=time.time() - 60 * (k + 1), event='stall', model=B, family=B, cause='test'))
+    crashes.stall(B, 'stalled: again')
+    words = models.keep()
+    t('a fourth stall of a family within an hour: left out of routing, not reloaded, in words for a person', not unloads and B in crashes.stalled_copies()
+      and 'times within 60 min' in (recycle.held_back().get(B) or '') and 'localmodels use' in recycle.held_back()[B], (unloads, recycle.held_back()))
+    crashes.loaded_now([B])
+    t('a load of it by anyone ends the stall', not crashes.stalled_copies())
+
+    unloads.clear(); loads.clear(); reset(time.time() - 3 * 3600); order[:] = [B, C2]
+    with crashes._state() as st:                              # copy 1's drain was given up a minute ago; copy 2 is past its threshold
+        st['recycle']['retry'] = {B: time.time() + 540}; st['recycle']['retry_after'] = time.time() + 540
+    served(C2, 130)
+    words = models.keep()
+    t("one copy's given-up drain holds back no sibling: copy 2, past its threshold, is recycled meanwhile", unloads == [C2] and loads == [C2], (unloads, loads, words))
+    served(B, 130); unloads.clear(); loads.clear()
+    with crashes._state() as st: st['recycle']['last'] = {}
+    words = models.keep()
+    t('...and copy 1 waits out its own pause', not unloads, (unloads, words))
+    L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server, L.SWAP_LOCK, L.read_ok, L.inflight = real
+    with crashes._state() as st: st['down'], st['stalled'], st['recycle'] = {}, {}, dict(job=None, last={}, fresh={}, retry_after=0, retry={})
+
+
+def test_peers_only(box):
+    print('switched off to peers only: requests admitted for the peers, nothing loaded here, this Mac unloaded once its own requests end, at_once the peers alone')
+    from localmodels import llmshare as L, maint, models, peers
+    maint.OFF, maint.SWITCHING = os.path.join(box, 'off-p.json'), os.path.join(box, 'switching-p.json')
+    real = (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
+            models.server_up, L.SWAP_LOCK, L.read_ok, L.inflight, L.swap_blockers, peers.view, peers.capacity, L.parallel_of)
+    L.read_ok = lambda: True
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False, load_at_start=True)}
+    L.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
+    L.SWAP_LOCK = os.path.join(box, 'swap5.lock')
+    api = {'ids': {B: 65536, C2: 65536}}
+    L.loaded = lambda fresh=False, force=False: [row(i) for i in api['ids']]
+    L.api_models = lambda timeout=3: dict(api['ids'])
+    L.parallel_of = lambda m: 4
+    held, flight = {'slots': {}}, []
+    L.busy_slots = lambda: dict(held['slots'])
+    L.inflight = lambda: list(flight)
+    L.swap_blockers = lambda ids: ['analysis holds a lease on qwen/qwen3.6-35b-a3b']
+    peer_up = [dict(name='m4pro', state='up', families={B: dict(match=True, cap=4, slots=4)})]
+    peers.view, peers.capacity = (lambda max_age=30: [dict(p) for p in peer_up]), (lambda model: 4 if peer_up and peer_up[0]['state'] == 'up' else 0)
+    loads, unloads = [], []
+    def fake_load(key, ident, context, parallel):
+        loads.append(ident); api['ids'] = dict(api['ids'], **{ident: 65536}); return True, 'ok'
+    def fake_unload(ident):
+        unloads.append(ident); api['ids'] = {k: v for k, v in api['ids'].items() if k != ident}; return True, ''
+    models.load, models.unload = fake_load, fake_unload
+    models._lms, models.free_gb, models.server_up, models.ensure_server = (lambda *a, **k: (True, '')), (lambda: 100.0), (lambda *a, **k: True), (lambda *a, **k: True)
+    reset(time.time() - 600)
+    t('on: at_once counts this Mac and the peer', L.at_once(B) == 12, L.at_once(B))
+    code, body = models.switch_off(peers_only=True)
+    m = maint.read()
+    t('peers only: switched off even with a run holding a lease (nothing is cut, nothing refused)', code == 200 and m['off'] and m['peers'] and 'peers' in body['note'], (code, body))
+    t('...the instance manager pauses (maintenance on), the gateway does not refuse, the header says peers-only',
+      maint.on() and not maint.refusing() and maint.peers_only() and maint.header(m).startswith('peers-only') and 'peers only' in maint.words(m), (maint.header(m), maint.words(m)))
+    t('at_once: the peer alone (4), never this Mac\'s instances, still listed', L.at_once(B) == 4 and L.at_once() == 4, (L.at_once(B), L.at_once()))
+    flight[:] = [dict(state='answering', copy=f'{B} on m4pro', answering_since=time.time()), dict(state='answering', copy=B, answering_since=time.time())]
+    words = models.keep()
+    t('a request still answering on this Mac: nothing unloaded yet, and it says so', not unloads and any('on this Mac' in w for w in words), words)
+    flight[:] = [dict(state='answering', copy=f'{B} on m4pro', answering_since=time.time()), dict(state='queued', copy=None)]
+    held['slots'] = {L._safe(B): 1}
+    words = models.keep()
+    t('...nor while a slot is held here (a program of its own)', not unloads, words)
+    held['slots'] = {}
+    words = models.keep()
+    t('only requests on the peer: every instance here unloaded (they never end, so they are not waited for)',
+      unloads and not api['ids'] and maint.switched_off().get('unloaded') and any('peers only' in w for w in words + [maint.words(maint.read())]), (unloads, words))
+    with crashes._state() as st: st['down'] = {B: dict(crashed=time.time() - 4000, models=[C2], state='left down', why='test', since=time.time() - 4000, retry_at=time.time() - 4000)}
+    api['ids'] = {B: 65536}                                    # one loaded by hand: no replica added
+    loads.clear(); words = models.keep(); models.keep()
+    t('nothing loads here: no crash reload (a family left down), no missing replica, no load_at_start', not loads, loads)
+    rec = [r for r in crashes.records(1) if r.get('event') == 'cancelled']
+    t('...and the family left down is cancelled, recorded, off the screens (switching on starts afresh)', not crashes.down() and rec and rec[-1].get('why') == 'local models switched off'
+      and any('cancelled' in w for w in words), (crashes.down(), rec[-1:], words))
+    api['ids'] = {}
+    code, body = models.switch_off()
+    t('off without peers: the same record, now refusing (at_once 0)', code == 200 and maint.refusing() and not maint.peers_only() and L.at_once(B) == 0 and L.at_once() == 0, (code, body))
+    code, body = models.switch_off(peers_only=True)
+    t('and back to peers only', code == 200 and maint.peers_only() and maint.read()['unloaded'], (code, body))
+    peer_up[0]['state'] = 'down'
+    t('peers only with the peer down: at_once 0, and switching to it says requests get 503', L.at_once(B) == 0 and 'no peer is reachable' in models._peer_words(), models._peer_words())
+    peer_up[0]['state'] = 'up'
+    t('the screens say where requests go, and count only this Mac\'s requests for the unload', maint.view()['peers'] is True)
+    words = models.switch_on()
+    t('on: the record goes and the families loaded before are loaded again', maint.switched_off() is None and loads == [B], (loads, words))
+    with crashes._state() as st: st['down'] = {}
+    (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
+     models.server_up, L.SWAP_LOCK, L.read_ok, L.inflight, L.swap_blockers, peers.view, peers.capacity, L.parallel_of) = real
+
+
 def test_privacy_check(box):
     print('publish: the privacy check reads every commit the push sends against a word list kept outside the repo')
     import subprocess
@@ -1307,6 +1521,9 @@ def main():
         test_runs()
         test_maintenance(box)
         test_switch_off(box)
+        test_watchdog()
+        test_stalls(box)
+        test_peers_only(box)
         test_privacy_check(box)
         test_about(box)
         test_progress(box)

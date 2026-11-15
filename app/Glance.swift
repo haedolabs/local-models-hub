@@ -275,15 +275,18 @@ func hubGlance(_ snap: [String: Any], now: Double) -> Glance {
     let mt = snap["maintenance"] as? [String: Any]
     let off = (mt?["off"] as? Bool) ?? false
     let inMaintenance = !off && str(mt?["phase"]) == "on"
+    let peersOnly = off && ((mt?["peers"] as? Bool) ?? false)       // this Mac's models off, every request sent to the peers
+    let refusing = str(mt?["phase"]) == "on" && !peersOnly          // every request gets 503: no slot anywhere takes one
 
     // this Mac's slots
     let fams = list(dict(snap["lmstudio"])["families"])
-    let localBusy = fams.reduce(0) { $0 + int($1["busy"]) }, localSlots = fams.reduce(0) { $0 + int($1["at_once"]) }
+    let localBusy = off ? 0 : fams.reduce(0) { $0 + int($1["busy"]) }, localSlots = off ? 0 : fams.reduce(0) { $0 + int($1["at_once"]) }
     var busy = localBusy, slots = localSlots
 
     // the hosts: this Mac, then each peer
     var hosts: [Line] = []
-    let here = off ? "This Mac — local models switched off since \(clockText(num(mt?["start"]) ?? now))"
+    let here = peersOnly ? "This Mac — local models off since \(clockText(num(mt?["start"]) ?? now)); requests go to peers"
+        : off ? "This Mac — local models switched off since \(clockText(num(mt?["start"]) ?? now))"
         : inMaintenance ? "This Mac — in maintenance" + (mt?["end"] is NSNumber ? " until \(clockText(num(mt?["end"])!))" : "")
         : localSlots > 0 ? "This Mac — \(localBusy)/\(localSlots) active" : "This Mac — no instance loaded"
     hosts.append(Line(title: here, separatorBefore: true))
@@ -301,7 +304,7 @@ func hubGlance(_ snap: [String: Any], now: Double) -> Glance {
         var title: String, action = Action.none
         switch state {
         case "up":
-            busy += b; slots += s
+            if !refusing { busy += b; slots += s }
             title = s > 0 ? "\(name) — \(b)/\(s) active" : "\(name) — no matching instance loaded"
             action = .peer(name: name, on: false)
         case "maintenance" where pOff:
@@ -333,6 +336,9 @@ func hubGlance(_ snap: [String: Any], now: Double) -> Glance {
                                   body: "\(fam) crashed at \(clockText(at)): \(str(d["why"]))"))
         }
     }
+    for x in list(dict(snap["crashes"])["stalled"]) {               // an engine that stopped while still listed (watchdog.py)
+        alerts.append("\(str(x["copy"])) stalled at \(clockText(num(x["at"]) ?? now)); reloading")
+    }
     if let e = snap["errors"] as? [String: Any], int(e["count"]) > 0 {
         alerts.append("\(int(e["count"])) error\(int(e["count"]) == 1 ? "" : "s") recorded in the last \(int(e["minutes"])) min")
     }
@@ -341,8 +347,8 @@ func hubGlance(_ snap: [String: Any], now: Double) -> Glance {
 
     g.icon = slots > 0 ? .serving : .idle
     g.attention = !alerts.isEmpty
-    g.summary = slots > 0 ? "\(busy) of \(slots) slots active" + (queued > 0 ? " · \(queued) queued" : "")
-        : off ? "local models switched off" : "no instance loaded"
+    g.summary = slots > 0 ? "\(busy) of \(slots) slots active" + (peersOnly ? " on peers" : "") + (queued > 0 ? " · \(queued) queued" : "")
+        : peersOnly ? "local models off; no peer reachable" : off ? "local models switched off" : inMaintenance ? "in maintenance" : "no instance loaded"
     g.lines = [Line(title: g.summary.prefix(1).uppercased() + g.summary.dropFirst())]
         + alerts.map { Line(title: $0, action: .openDashboard) }
         + hosts

@@ -830,6 +830,26 @@ def test_two_doors(box):
         t('localmodels peer on <name>: switched on there', code == 0 and not os.path.exists(off_file) and 'switching on' in out, (code, out))
         t('localmodels peer off with no name: usage, exit 2', peer_cli('off')[0] == 2)
         L.poll(force=True)
+
+        print('two doors: this Mac switched off to peers only')
+        from localmodels import maint
+        maint.OFF, maint.SWITCHING = os.path.join(front_dir, 'off.json'), os.path.join(front_dir, 'switching.json')
+        code, j = front('/hub/off', dict(peers=True))
+        plan(A); plan(B)
+        out = together(('q1', {}), ('q2', {}), ('q3', {}))
+        t("peers only: every request answered by the peer (the third waits for one of its 2 slots), this Mac's LM Studio sees none",
+          code == 200 and all(v_[0] == 200 for v_ in out.values()) and not A.seen and sorted(s_[1] for s_ in B.seen) == ['q1', 'q2', 'q3'],
+          (code, {k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
+        t("at_once: the peer's 2 slots alone, this Mac's 2 not counted", llmshare.at_once(F) == 2 and llmshare.at_once() == 2, (llmshare.at_once(F), llmshare.at_once()))
+        snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=10).read())
+        t('the dashboard\'s snapshot says peers only, in words', (snap.get('maintenance') or {}).get('peers') is True and 'peers only' in ((snap.get('maintenance') or {}).get('words') or ''), snap.get('maintenance'))
+        code, j = front('/hub/on', {})
+        for _ in range(100):
+            if not maint.switched_off(): break
+            time.sleep(0.2)
+        plan(A); plan(B)
+        code, r, h = ask('q4')
+        t('on: answered here again, this Mac first', code == 200 and [s_[1] for s_ in A.seen] == ['q4'] and not B.seen, (code, A.seen, B.seen))
         proc.terminate(); proc.wait(10)
         plan(A, 'slow', 'slow', 'ok'); plan(B)
         out = together(('g1', {}), ('g2', {}), ('g3', {}))

@@ -6,8 +6,9 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 - `localmodels/gateway.py` — the gateway: attributes each request, acquires a slot, forwards to LM Studio, logs one line, holds and resends across a crash.
 - `localmodels/llmshare.py` — the sharing rules: slot locks, leases, the swap lock, the model listing, the readers of the shared state.
 - `localmodels/models.py`, `crashes.py`, `recycle.py` — the instance manager: replicas kept loaded, crashed instances reloaded, instances recycled before the crash threshold; `crashes.ENGINE_WORDS`, the one list of the engine's failure words.
+- `localmodels/watchdog.py` — the stall watchdog: an instance still listed whose engine wrote nothing in LM Studio's log (a request answering 120 s with no engine line since it was sent, or 600 s of silence with requests in flight) is taken out of routing, its requests cut and resent by the gateway, and reloaded by a stall job (`recycle.py`).
 - `localmodels/admission.py` — admission by context size: each request's estimated context, each instance's budget of context in flight from its model's cost per token and the Mac's memory.
-- `localmodels/runs.py`, `maint.py` — run and phase progress with finish times, run plans (`/hub/runs`) and per-phase estimates in tokens per item; maintenance windows and the switched-off state (`localmodels off` / `on`; a peer's, `localmodels peer off` / `on <name>`).
+- `localmodels/runs.py`, `maint.py` — run and phase progress with finish times, run plans (`/hub/runs`) and per-phase estimates in tokens per item; maintenance windows and the switched-off state (`localmodels off` / `on`, `off --peers`: requests sent to the peers only; a peer's, `localmodels peer off` / `on <name>`).
 - `localmodels/peers.py` — other Macs' gateways as more replicas of a family: the shared token, a peer's report, the front's link (polls, backoff, free slots, model fingerprints), the network checks.
 - `localmodels/agent.py` — local agents: the tool loop, read-only file tools, JSON answers, retries.
 - `localmodels/mcp_server.py` — the MCP tools and the detached job runner.

@@ -6,8 +6,9 @@ all than one copy of eight (GUIDE.md, "Where to send requests"). So:
   keep()   whenever a family's first copy is loaded, its other copies are loaded too, with the same context and slots
            and no time limit. The door runs it at its start and every 20 s. Nothing is loaded from nothing (a Mac with no
            model loaded stays free), except a model that crashed: LM Studio does not reload one, so the keeper does
-           (crashes.py: at most 3 times an hour). A copy is recycled before the work at which the engine has crashed
-           (recycle.py). Nothing is unloaded for being idle.
+           (crashes.py: at most 3 times an hour). A copy whose engine stalled is taken out of routing and reloaded
+           (watchdog.py). A copy is recycled before the work at which the engine has crashed (recycle.py). Nothing is
+           unloaded for being idle.
   use()    a swap: refused while another run is using anything it would unload; then the rest is unloaded and the model
            loaded, with all its copies when it is a family. Swapping away drops the second copy with the first, so the
            other model has the room; swapping back brings both.
@@ -32,7 +33,7 @@ family is loaded at start, so one loader runs, never two.
 """
 import json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
-from . import crashes, errors, llmshare, maint, peers, recycle
+from . import crashes, errors, llmshare, maint, peers, recycle, watchdog
 
 GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resource guardrail', re.I)
 GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # sets the GPU's limit at every boot (a person installs it)
@@ -306,8 +307,12 @@ def keep():
             if not llmshare.read_ok(): return did
             busy = llmshare.busy_slots(); back = crashes.watch(rows, listed_at=began, busy=busy)
     except Exception as e: back = []; did.append(f'crash watcher failed: {type(e).__name__}: {e}'); errors.record('instance manager: crash watcher', e)
+    try: did += watchdog.check(rows, fams)                  # an instance still listed whose engine stopped: out of routing, reloaded below
+    except Exception as e: did.append(f'watchdog failed: {type(e).__name__}: {e}'); errors.record('instance manager: watchdog', e)
     have = {r['id'] for r in rows}
-    down = set((crashes._read(fresh=True).get('down') or {}))
+    downs = crashes._read(fresh=True).get('down') or {}
+    down = set(downs)
+    reloading = {b for b, d in downs.items() if d.get('state') in ('loading again', 'waiting for room')}
     todo = []
     for b, f in fams.items():
         if b not in have or b in down: continue             # the first copy is not loaded, or the crash machinery has the family
@@ -326,7 +331,8 @@ def keep():
         if w: did.append(w)
     except Exception as e: did.append(f'recycle planner failed: {type(e).__name__}: {e}'); errors.record('instance manager: recycle planner', e)
     job, ready = recycle.ready(rows, busy)
-    if down: job, ready = None, False                        # a family down after a crash: its reload first, no recycle in the same pass
+    if job and (job['family'] in reloading if job.get('stall') else down): job, ready = None, False   # a crash reload first, no recycle in the
+    # same pass; a stalled copy waits only for a reload under way in its family, not for a sibling left down (it serves nothing as it is)
     if not todo and not back and not boot and not (job and ready): return did
     with llmshare.swapping(wait=0) as got:
         if not got: return did                              # a swap is under way: the next pass looks again
@@ -432,18 +438,39 @@ def _load_back(families, have, after):
     return did
 
 
-def switch_off(force=False, why=''):
+def _peer_words():
+    """Words when no peer can take requests now (switched off to peers only then refuses them all), else ''."""
+    v = peers.view()
+    if not v: return 'no peer is configured (localmodels peer add <name> <address>): every request gets 503 until one is'
+    if not any(p.get('state') == 'up' for p in v): return 'no peer is reachable now: requests get 503 until one is (' + '; '.join(p.get('words') or p['name'] for p in v) + ')'
+    return ''
+
+
+def switch_off(force=False, why='', peers_only=False):
     """Switch the local models off (POST /hub/off, localmodels off): refused (409) while a run holds a lease on a loaded
-    model, unless forced. -> (HTTP code, body)."""
-    if maint.switched_off(): return 200, dict(ok=True, note='already switched off', maintenance=maint.view())
+    model, unless forced. peers_only (localmodels off --peers): the gateway keeps admitting requests and sends them to its
+    peers, so no run loses its model and nothing is refused for a lease; this Mac's instances are unloaded once the requests
+    in flight on them finish. Already off: the mode changes when it differs. -> (HTTP code, body)."""
+    cur = maint.switched_off()
+    if cur and bool(cur.get('peers')) == bool(peers_only): return 200, dict(ok=True, note='already switched off', maintenance=maint.view())
+    if cur:
+        maint.switch_off([], why=why, peers=peers_only)
+        crashes.nudge()
+        w = _peer_words() if peers_only else ''
+        return 200, dict(ok=True, note=('requests now go to peers only' if peers_only else 'requests now get 503; peers are no longer used') + (f'; {w}' if w else ''),
+                         maintenance=maint.view())
     rows = llmshare.loaded(fresh=True)
     ids = [r['id'] for r in rows]
-    blockers = llmshare.swap_blockers(ids) if ids else []
+    blockers = llmshare.swap_blockers(ids) if ids and not peers_only else []
     if blockers and not force:
-        return 409, dict(ok=False, blockers=blockers, error='in use: ' + '; '.join(blockers) + ' (force to switch off anyway)')
+        return 409, dict(ok=False, blockers=blockers, error='in use: ' + '; '.join(blockers) + ' (force to switch off anyway, or switch to peers only)')
     fams = set((llmshare.settings().get('families') or {}).keys())
-    maint.switch_off(sorted({llmshare.family(i) for i in ids} & fams), why=why)
+    maint.switch_off(sorted({llmshare.family(i) for i in ids} & fams), why=why, peers=peers_only)
     crashes.nudge()                                          # in the gateway: the instance manager unloads now, not in 20 s
+    if peers_only:
+        w = _peer_words()
+        return 200, dict(ok=True, note='switched off, peers only: new requests go to the peers; every instance here is unloaded once the requests in flight on it finish'
+                         + (f'; {w}' if w else ''), maintenance=maint.view())
     return 200, dict(ok=True, note='switched off: new requests get 503; every instance is unloaded once the requests in flight finish',
                      maintenance=maint.view())
 
@@ -451,15 +478,21 @@ def switch_off(force=False, why=''):
 def off_pass(off):
     """Switched off (maint.switch_off): once no request is in flight, unload every instance LM Studio lists, under the swap
     lock, and see it gone from LM Studio's own listing; then record it done, so a model a person loads by hand afterwards
-    is left alone. Until then each pass tries again. -> words."""
-    if off.get('unloaded'): return ['switched off: instance manager paused (no loads, reloads, recycles or server starts)']
-    n = len(llmshare.inflight())
-    if n: return [f'switching off: waiting for {n} request{"s" if n != 1 else ""} in flight to finish before unloading']
+    is left alone. Until then each pass tries again. Peers only: the requests going to peers never end, so it waits only
+    for those on this Mac's own instances (their in-flight markers, and every slot held on them, a program's own included).
+    -> words."""
+    did = ['switched off: crash recovery, stalls and the recycle under way cancelled (switching on starts them afresh)'] if crashes.switched_off() else []
+    if off.get('unloaded'):
+        return did + [('switched off, peers only: requests go to the peers' if off.get('peers') else 'switched off')
+                      + '; instance manager paused (no loads, reloads, recycles or server starts)']
+    if off.get('peers'):                                     # slot locks are this Mac's alone: a peer's slots are counted by the link
+        n = max(len(maint.local_work()), sum(llmshare.busy_slots().values()))
+    else: n = len(llmshare.inflight())
+    if n: return did + [f'switching off: waiting for {n} request{"s" if n != 1 else ""} in flight' + (' on this Mac' if off.get('peers') else '') + ' to finish before unloading']
     if not server_up():
-        maint.off_done(off['at'], "LM Studio's server is not running: nothing loaded"); return ["switched off: LM Studio's server is not running, nothing to unload"]
-    did = []
+        maint.off_done(off['at'], "LM Studio's server is not running: nothing loaded"); return did + ["switched off: LM Studio's server is not running, nothing to unload"]
     with llmshare.swapping(wait=0) as got:
-        if not got: return ['switching off: a swap is under way; the unload is tried on the next pass']
+        if not got: return did + ['switching off: a swap is under way; the unload is tried on the next pass']
         for _ in range(12):
             now = _listed()
             if now is None: return did + ["switching off: LM Studio's listing did not answer; the unload is tried on the next pass"]

@@ -40,7 +40,7 @@ OOM = 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memor
 
 class Fake(http.server.BaseHTTPRequestHandler):
     """A pretend LM Studio: answers by a plan ('ok', 'crash', 'bad', 'odd', 'slow', 'reset'), and remembers who asked, in order."""
-    plan, seen, slow, on_odd, on_unload = [], [], 3.0, None, None
+    plan, seen, slow, on_odd, on_unload, hang = [], [], 3.0, None, None, 8.0
     lock = threading.Lock()
 
     def log_message(self, *a): pass
@@ -56,6 +56,18 @@ class Fake(http.server.BaseHTTPRequestHandler):
             except OSError: pass
             self.close_connection = True; return
         if what == 'slow': time.sleep(Fake.slow)
+        if what in ('hang', 'sse-hang'):                     # a stalled engine: nothing comes, then the door cuts the connection
+            if what == 'sse-hang':
+                self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+                self.wfile.write(b'data: {"choices":[{"delta":{"content":"One"}}]}\n\n'); self.wfile.flush()
+            end = time.time() + Fake.hang
+            while time.time() < end:
+                time.sleep(0.1)
+                try:
+                    if self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b'': break   # the door hung up
+                except BlockingIOError: pass
+                except OSError: break
+            self.close_connection = True; return
         if what == 'sse-cut':                                 # a stream that breaks off after one chunk, no [DONE]
             self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
             self.wfile.write(b'data: {"choices":[{"delta":{"content":"One"}}]}\n\n'); self.wfile.flush()
@@ -476,6 +488,79 @@ def run(box):
         plan()
         code, r, h = ask(tag='switched-on')
         t('on: answered again', code == 200, (code, r))
+
+        print('the door: switched off to peers only (POST /hub/off {"peers": true}), with no peer to take anything')
+        code, body = hub_post('/hub/off', {'peers': True})
+        t('peers only: 200 at once, no lease refuses it', code == 200 and maint.peers_only(), (code, body))
+        plan()
+        code, r, h = ask(tag='peers-only')
+        err = (r or {}).get('error') if isinstance(r, dict) else None
+        t('a request no peer can take: 503 with Retry-After 30 s, the header says peers-only, nothing sent to this Mac\'s LM Studio',
+          code == 503 and h.get('Retry-After') == str(gateway.RETRY_AFTER) and (h.get('X-Hub-Maintenance') or '').startswith('peers-only') and not Fake.seen,
+          (code, h.get('Retry-After'), h.get('X-Hub-Maintenance'), Fake.seen))
+        row_ = rows_logged()[0]
+        t('...and the row says why, in words', 'peers only' in (row_.get('note') or '') and 'no peer can take' in (row_.get('note') or ''), row_.get('note'))
+        t("peers only: the door never starts LM Studio's server either", gateway.start_lmstudio('test') is False)
+        code, body = hub_post('/hub/on', {})
+        end = time.time() + 20
+        while maint.switched_off() and time.time() < end: time.sleep(0.2)
+        plan()
+        code, r, h = ask(tag='peers-only-on')
+        t('on: answered here again', code == 200 and Fake.seen and Fake.seen[0][1] == 'peers-only-on', (code, Fake.seen))
+
+        print('the door: an instance that stalls (watchdog.py): its request cut and sent again, nothing new routed to it')
+        plan('hang', 'ok'); Fake.hang = 10.0
+        got = {}
+        th = threading.Thread(target=lambda: got.update(zip(('code', 'r', 'h'), ask(tag='stuck')))); th.start()
+        time.sleep(1.2)
+        on = [m_.get('copy') for m_ in llmshare.inflight() if m_.get('state') == 'answering']
+        crashes.stall(on[0] if on else F, 'stalled: test')
+        th.join(30)
+        row_ = rows_logged()[0]
+        t('a request on an instance marked stalled is cut within a second or two and answered by its sibling',
+          got.get('code') == 200 and [s_[0] for s_ in Fake.seen] == [F, F2] and (got.get('r') or {}).get('choices', [{}])[0].get('message', {}).get('content') == 'OK stuck'
+          and row_.get('seconds', 99) < 6, (got.get('code'), Fake.seen, row_.get('seconds')))
+        t('the row: answered by the sibling, two tries, resent because the instance stalled', row_.get('copy') == F2 and row_.get('tries') == 2
+          and 'resent' in (row_.get('note') or '') and 'stalled' in row_['note'], {k: row_.get(k) for k in ('copy', 'tries', 'note')})
+        plan()
+        code, r, h = ask(tag='after-stall')
+        t('while it is stalled, new requests go to its sibling', code == 200 and Fake.seen and Fake.seen[0][0] == F2, (code, Fake.seen))
+        plan('sse-hang'); Fake.hang = 10.0
+        crashes.loaded_now([F]); crashes.stall(F2, 'stalled: test'); time.sleep(1.1)
+        got = {}
+        def stream():
+            s_ = raw(F, 'stuck-stream', kind='test', stream=True); s_.settimeout(30); data = b''
+            while True:
+                part = s_.recv(65536)
+                if not part: break
+                data += part
+            s_.close(); got['data'] = data
+        th = threading.Thread(target=stream); th.start()
+        time.sleep(1.2)
+        crashes.stall(F, 'stalled: test')
+        th.join(30)
+        row_ = rows_logged()[0]
+        t('a stream under way on an instance that stalls: cut at once, ending with an error event, the row says stalled',
+          b'"content":"One"' in got.get('data', b'') and b'stream truncated' in got.get('data', b'') and 'stalled: stream cut' in (row_.get('note') or ''), (got.get('data', b'')[-100:], row_.get('note')))
+        old_hold, crashes.HOLD = crashes.HOLD, 2
+        plan(); t0 = time.time()
+        code, r, h = ask(tag='both-stalled')
+        t('every instance stalled: held while they are reloaded, then 503 with Retry-After, nothing forwarded',
+          code == 503 and h.get('Retry-After') and 2 <= time.time() - t0 < 6 and not Fake.seen, (code, round(time.time() - t0, 1), Fake.seen))
+        crashes.HOLD = old_hold
+        crashes.loaded_now([F, F2])
+        plan()
+        code, r, h = ask(tag='reloaded')
+        t('reloaded: the stall is over, served again', code == 200 and not crashes.stalled_copies(), (code, crashes.stalled_copies()))
+        old_wait, old_resend = gateway.UPSTREAM_WAIT, gateway.RESEND_WAIT
+        gateway.UPSTREAM_WAIT, gateway.RESEND_WAIT = 1, 1
+        plan('slow', 'ok'); Fake.slow = 2.5
+        code, r, h = ask(tag='timeout')
+        row_ = rows_logged()[0]
+        gateway.UPSTREAM_WAIT, gateway.RESEND_WAIT = old_wait, old_resend; Fake.slow = 3.0
+        t("no answer from LM Studio within the gateway's wait: said as that, never as a closed connection, and sent again",
+          code == 200 and row_.get('tries') == 2 and 'no response from LM Studio within 1 s' in (row_.get('note') or ''), (code, row_.get('note')))
+        time.sleep(2)
 
         print("the door: every API LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, LM Studio's own)")
         def streamed(what, path):

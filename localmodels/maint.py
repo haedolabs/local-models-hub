@@ -19,6 +19,11 @@ reloads and recycles nothing, and a front skips this Mac as a peer. In addition 
 instance once no request is in flight (models.off_pass), once; a model a person loads by hand afterwards is left alone.
 The Claude Code hook says nothing while switched off (one line on every prompt for days would be noise); a refused request
 says why.
+
+Peers only (`localmodels off --peers`, the dashboard's "peers only"): this Mac's local models switched off as above (off.json
+with peers=True: nothing is loaded, reloaded or started here, every instance is unloaded once the requests in flight on it
+finish), while the gateway keeps admitting requests and sends every one to its peers' slots; a request no peer can take
+gets 503 with Retry-After. refusing() is what the gateway reads: maintenance that is on, or switched off without peers.
 """
 import json, os, re, time
 
@@ -44,7 +49,7 @@ def _write(rec, path=None):
 
 
 def switched_off():
-    """The off record ({at, why, before, unloaded}) while the local models are switched off, else None."""
+    """The off record ({at, why, before, unloaded, peers}) while the local models are switched off, else None."""
     try: m = os.path.getmtime(OFF)
     except OSError: return None
     if m != _off_cache['mtime']:
@@ -54,14 +59,25 @@ def switched_off():
     return _off_cache['rec']
 
 
-def switch_off(before, why='', now=None):
-    """Switch the local models off: `before` is the families loaded now (loaded again by switch_on). -> the record.
-    Already off: the record as it is."""
+def switch_off(before, why='', now=None, peers=False):
+    """Switch the local models off: `before` is the families loaded now (loaded again by switch_on); peers: requests go to
+    the peers meanwhile instead of getting 503. -> the record. Already off: the record as it is, its mode changed when
+    `peers` differs (since, what was loaded before and the unload stand)."""
     rec = switched_off()
-    if rec: return rec
-    rec = dict(v=1, at=now or time.time(), why=llmshare.clean(why, 120) or '', before=sorted(set(before or [])), unloaded=None)
+    if rec:
+        if bool(rec.get('peers')) != bool(peers):
+            rec = dict(rec, peers=bool(peers), mode_at=now or time.time())
+            _write(rec, OFF)
+        return rec
+    rec = dict(v=1, at=now or time.time(), why=llmshare.clean(why, 120) or '', before=sorted(set(before or [])), unloaded=None, peers=bool(peers))
     _write(rec, OFF)
     return rec
+
+
+def peers_only():
+    """The off record while the local models are switched off and requests go to the peers (localmodels off --peers), else None."""
+    rec = switched_off()
+    return rec if rec and rec.get('peers') else None
 
 
 def off_done(at, words=''):
@@ -121,7 +137,7 @@ def read(now=None):
     reads as maintenance that is on, with no end (off=True)."""
     off = switched_off()
     if off: return dict(v=1, off=True, phase='on', set_at=off['at'], start=off['at'], end=None, minutes=0, why=off.get('why') or '',
-                        unloaded=off.get('unloaded'), before=off.get('before') or [])
+                        unloaded=off.get('unloaded'), before=off.get('before') or [], peers=bool(off.get('peers')))
     rec = _raw()
     if not rec: return None
     now = now or time.time()
@@ -178,9 +194,17 @@ def tick(inflight, rows, now=None):
 
 
 def on(now=None):
-    """The record while maintenance is on, else None."""
+    """The record while maintenance is on (switched off included, peers only too), else None: the instance manager and the
+    gateway load, reload, recycle and start nothing on this Mac."""
     m = read(now=now)
     return m if m and m['phase'] == 'on' else None
+
+
+def refusing(now=None):
+    """The record while the gateway refuses new requests (503 with Retry-After): maintenance that is on, or the local
+    models switched off without peers. Peers only admits them (to the peers' slots). Else None."""
+    m = on(now=now)
+    return m if m and not m.get('peers') else None
 
 
 def retry_after(m, now=None):
@@ -201,6 +225,9 @@ def words(m, now=None):
     if not m: return ''
     now = now or time.time()
     why = f": {m['why']}" if m.get('why') else ''
+    if m.get('off') and m.get('peers'):
+        return (f"local models switched off since {_clock(m['start'])}{why}; requests go to peers only"
+                + ('' if m.get('unloaded') else ' (unloading once the requests in flight here finish)') + '; turn on: localmodels on')
     if m.get('off'):
         return (f"local models switched off since {_clock(m['start'])}{why}"
                 + ('' if m.get('unloaded') else ' (unloading once the requests in flight finish)') + '; turn on: localmodels on')
@@ -214,6 +241,7 @@ def header(m, now=None):
     """The X-Hub-Maintenance header: 'announced; starts=...; until=...; why=...' (ISO local times), or None."""
     if not m: return None
     iso = lambda t: time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(t))
+    if m.get('off') and m.get('peers'): return f"peers-only; switched-off; since={iso(m['start'])}; why=local models switched off, requests go to peers"
     if m.get('off'): return f"on; switched-off; since={iso(m['start'])}; why=local models switched off"
     parts = ['after-batches' if m['phase'] == 'waiting' else m['phase']]
     if m.get('start') is not None and m['phase'] == 'announced': parts.append(f"starts={iso(m['start'])}")
@@ -227,8 +255,14 @@ def view(now=None):
     """What the screens show: {phase, start, end, minutes, why, words}, or None."""
     m = read(now=now)
     return dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), minutes=m['minutes'], why=m.get('why'), words=words(m, now),
-                off=bool(m.get('off')), unloaded=m.get('unloaded'),
-                inflight=len(llmshare.inflight()) if m.get('off') and not m.get('unloaded') else None) if m else None
+                off=bool(m.get('off')), unloaded=m.get('unloaded'), peers=bool(m.get('peers')),
+                inflight=(len(local_work()) if m.get('peers') else len(llmshare.inflight())) if m.get('off') and not m.get('unloaded') else None) if m else None
+
+
+def local_work(marks=None):
+    """The requests in flight on this Mac's own instances (answering on one, not on a peer's): what an unload while
+    switched off to peers only waits for. marks: llmshare.inflight() (read now when None)."""
+    return [d for d in (llmshare.inflight() if marks is None else marks) if d.get('state') == 'answering' and d.get('copy') and ' on ' not in str(d['copy'])]
 
 
 def notice(now=None):

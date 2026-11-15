@@ -242,7 +242,7 @@ def validate(d):
         if not isinstance(f, dict): raise ValueError(f'family {name!r} must be an object')
         for k in ('copies', 'context', 'parallel'):
             if k in f and not _number(f[k], positive=True, whole=True): raise ValueError(f'{name}: "{k}" must be a whole number above 0, not {f[k]!r}')
-        for k in ('recycle', 'admit'):
+        for k in ('recycle', 'admit', 'watchdog'):
             v = f.get(k)
             if k in f and not (isinstance(v, bool) or isinstance(v, dict) and all(_number(x) for x in v.values())):
                 raise ValueError(f'{name}: "{k}" must be true, false or an object of numbers, not {v!r}')
@@ -320,23 +320,30 @@ def copies(model, fresh=False):
 
 
 def at_once(model=None):
-    """How many answers a model's loaded copies give at once in all (two copies of 4: 8). model None: the loaded model
-    that gives the most. Batches through the hub send this many."""
-    rows = loaded()
+    """How many answers a model's loaded copies give at once in all (two copies of 4: 8), with the slots its peers have
+    free for this Mac. model None: the loaded model that gives the most. Batches through the hub send this many. 0 while
+    the gateway refuses every request (maintenance that is on, or the local models switched off); switched off to peers
+    only, the peers' slots alone (0 when none is up)."""
+    try:
+        from . import maint
+        if maint.refusing(): return 0
+        here_too = not maint.peers_only()
+    except Exception as e: here_too = True; _error('at_once: maintenance', e)
+    rows = loaded() if here_too else []
     if model is None:
         fams = {family(r['id']) for r in rows}
         try:
             from . import peers                              # the families this Mac's peers serve for it count too
             fams |= {f for p in peers.view() for f in (p.get('families') or {})}
         except Exception as e: _error('at_once: peer families', e)
-        return max([at_once(f) for f in fams] or [1])
+        return max([at_once(f) for f in fams] or [1 if here_too else 0])
     ids = {r['id'] for r in rows}
     here = sum(parallel_of(c) for c in copies(model) if c in ids)
     try:
         from . import peers
         there = peers.capacity(model)
     except Exception as e: there = 0; _error('at_once: peer capacity', e)
-    return (here + there) or parallel_of(model)
+    return (here + there) or (parallel_of(model) if here_too else 0)
 
 
 @contextlib.contextmanager
