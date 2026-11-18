@@ -75,8 +75,10 @@
   localmodels start | stop | restart     the gateway (start is a no-op when running; restart waits for no requests in flight)
   localmodels gateway            run the gateway in the foreground (what launchd runs)
   localmodels mcp                the MCP server (Claude Code starts it)
-  localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
-                                 the version stamped, committed, tagged and pushed (--dry: the checks only)
+  localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check, the privacy and secrets
+                                 checks, then the version stamped, committed, tagged and pushed (--dry: the checks only)
+  localmodels prepush            git's pre-push hook (install writes it): the privacy and secrets checks on every push,
+                                 and no rewrite or deletion of a remote branch (LOCALMODELS_ALLOW_REWRITE=1 on purpose)
   localmodels help | -h | --help anywhere: this text. An option a verb does not take, or a value it cannot use, runs
                                  nothing (exit 2); --name=value is read as --name value, --dry-run as --dry
 """
@@ -816,6 +818,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
                     f"and add the maintenance hook to {SETTINGS_FILE} (silent unless maintenance is set)")
         print(f"would link the localmodels command into the first writable of {', '.join(BINS)}")
         if retire_loader(dry=True): print(retire_loader(dry=True))
+        print(f"would write the pre-push hook in {os.path.join(HOME, '.git', 'hooks')} (the privacy and secrets checks on every push)")
         print('nothing written (--dry)')
         return 0
     os.makedirs(LOGS, exist_ok=True)
@@ -896,6 +899,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
             with open(SIGNPOST_FILE, 'a') as f: f.write(('' if not text or text.endswith('\n') else '\n') + SIGNPOST + '\n')
             print(f'4. the signpost line added to {SIGNPOST_FILE}')
         print('   ' + set_hook(True))
+    print('   ' + set_prepush_hook())
     src = os.path.join(HOME, 'bin', 'localmodels')
     for d in BINS:
         link = os.path.join(d, 'localmodels')
@@ -1458,17 +1462,53 @@ _SHA = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?$')
 _HUNK = re.compile(r'@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
-def private_check(repo, words_file, tip='HEAD'):
+def private_check(repo, words_file, tip='HEAD', remote='origin'):
     """What the next push to origin makes public, read against the private word list: every commit on `tip` that no
     origin ref holds (all of them before the first push), each on its own: the lines it adds (a merge against each
     parent), the names of the files it adds or renames, its message, and the message of each annotated tag on it
     (`--follow-tags` sends those). A word a later commit replaced is still in the commit that added it. ->
     {status ('skipped', 'clean' or 'hits'), since ('origin', or None before the first push), lines, files, commits,
     hits: [(where, text)]}; RuntimeError when a git command fails, so a failure never reads as clean."""
-    out = dict(status='skipped', since=None, lines=0, files=0, commits=0, hits=[])
     wl = read_words(words_file)
-    if wl is None: return out
+    if wl is None: return dict(status='skipped', since=None, lines=0, files=0, commits=0, hits=[])
     words, allows = wl
+
+    def held(text):
+        for a in allows: text = a.sub(' ', text)
+        return any(w.search(text) for w in words)
+    return _scan_push(repo, tip, held, held, remote)
+
+
+SECRETS = [re.compile(p) for p in (                      # credential formats with a fixed prefix: few false alarms
+    r'\bgh[pousr]_[A-Za-z0-9]{36,}', r'\bgithub_pat_[A-Za-z0-9_]{60,}',               # GitHub tokens
+    r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b',                                                  # AWS access key ids
+    r'-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----',                                        # PEM and OpenSSH private keys
+    r'\bxox[abposr]-[A-Za-z0-9-]{10,}', r'https://hooks\.slack\.com/services/T[A-Za-z0-9/]+',   # Slack
+    r'\bsk-ant-[A-Za-z0-9_-]{20,}', r'\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}',            # Anthropic, OpenAI
+    r'\bAIza[0-9A-Za-z_-]{35}\b',                                                      # Google API keys
+    r'\b[rs]k_live_[0-9A-Za-z]{24,}', r'\bnpm_[A-Za-z0-9]{36}\b', r'\bhf_[A-Za-z0-9]{34,}\b',   # Stripe, npm, Hugging Face
+    r'\b(?:password|passwd|secret|api[_-]?key|token)\s*[:=]\s*["\'][^"\'\s]{12,}["\']',   # a literal assigned to such a name
+)]
+SECRET_FILES = re.compile(r'(?:^|/)(?:\.env(?:\.[^/]*)?|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|\.netrc|\.pypirc|'
+                          r'[^/]*\.(?:pem|p12|pfx|key|keystore|jks|mobileprovision))$', re.I)
+RUNS_CODE = re.compile(r'(?:^|/)(?:\.github/(?:workflows|actions)/.*|action\.ya?ml|package\.json|\.npmrc|setup\.py|'
+                       r'setup\.cfg|pyproject\.toml|Makefile|\.gitlab-ci\.yml|\.circleci/.*)$')
+SECRET_OK = re.compile(r'\.env\.(?:example|sample|template)$')
+
+
+def secret_check(repo, tip='HEAD', remote='origin'):
+    """What the next push sends, read for credentials (SECRETS: tokens and keys by their fixed formats), files that hold
+    them by name (SECRET_FILES), and files that make code run on GitHub or on install (RUNS_CODE: workflows, package
+    manifests and their install scripts; this repository runs nothing there, so a new one is a change to look at, the way
+    a planted CI step is the usual route to a repository's secrets). Same commits and same answer as private_check."""
+    names = lambda n: bool(SECRET_FILES.search(n) and not SECRET_OK.search(n)) or bool(RUNS_CODE.search(n))
+    return _scan_push(repo, tip, lambda text: any(p.search(text) for p in SECRETS), names, remote)
+
+
+def _scan_push(repo, tip, held, held_name, remote='origin'):
+    """The commits on `tip` that no ref of `remote` holds, each read on its own: the lines it adds, the names of the files
+    it adds or renames, its message, and the annotated tags on it; `held(text)` and `held_name(name)` say what is a hit."""
+    out = dict(status='clean', since=None, lines=0, files=0, commits=0, hits=[])
 
     def git(*a, stdin=None):
         r = subprocess.run(['git', '-C', repo, '-c', 'core.quotePath=false', *a], input=stdin, capture_output=True,
@@ -1476,16 +1516,12 @@ def private_check(repo, words_file, tip='HEAD'):
         if r.returncode: raise RuntimeError(f"git {a[0]}: {(r.stderr or r.stdout).strip()[:300]}")
         return r.stdout
 
-    def held(text):
-        for a in allows: text = a.sub(' ', text)
-        return any(w.search(text) for w in words)
-
     seen = set()
 
     def hit(where, text, key):                         # once, under the oldest commit that has it (a merge repeats its parents' lines)
         if key not in seen: seen.add(key); out['hits'].append((where, text))
-    out['since'] = 'origin' if git('for-each-ref', '--count=1', 'refs/remotes/origin').strip() else None
-    shas = git('rev-list', '--reverse', tip, '--not', '--remotes=origin').split()
+    out['since'] = remote if git('for-each-ref', '--count=1', f'refs/remotes/{remote}').strip() else None
+    shas = git('rev-list', '--reverse', tip, '--not', f'--remotes={remote}').split()
     sha, path, n, old, new, names = '', '', 0, 0, 0, set()
     patch = git('diff-tree', '--stdin', '--patch-with-raw', '-m', '-r', '--root', '-M', '--unified=0', '--no-color', '--no-ext-diff',
                 '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', stdin=''.join(s + '\n' for s in shas)) if shas else ''
@@ -1504,7 +1540,7 @@ def private_check(repo, words_file, tip='HEAD'):
             if f[0].split()[-1][:1] in ('A', 'R'):
                 name = _unquote(f[-1])
                 if name not in names: names.add(name); out['files'] += 1
-                if held(name): hit(f'{sha[:7]} file name {name}', name, ('name', name))
+                if held_name(name): hit(f'{sha[:7]} file name {name}', name, ('name', name))
         elif line.startswith('+++ '):
             p = _unquote(line[4:].rstrip('\t'))
             path = p[2:] if p.startswith('b/') else p
@@ -1526,6 +1562,77 @@ def private_check(repo, words_file, tip='HEAD'):
                 if held(line): hit(f'tag {name}', line.strip()[:160], ('tag', name, line))
     out['status'] = 'hits' if out['hits'] else 'clean'
     return out
+
+
+def secret_words(sc):
+    """The secrets check's hits as lines a person acts on."""
+    out = [f'{where}: {text}' for where, text in sc['hits'][:30]]
+    if len(sc['hits']) > 30: out.append(f"... and {len(sc['hits']) - 30} more")
+    return out + ['a credential stays in the commit that added it, so amend, squash or rebase that commit before it leaves this Mac,',
+                  'and revoke the credential if it was ever pushed; a file that runs code on GitHub or on install (RUNS_CODE in',
+                  'localmodels/cli.py) is a change to that rule: add its path there on purpose, in its own commit']
+
+
+ZERO = '0' * 40
+HOOK_MARK = 'localmodels pre-push hook'
+
+
+def prepush(a, stdin=None):
+    """git's pre-push hook (written by `localmodels install`): every push from this checkout, plain `git push` included,
+    gets the privacy and secrets checks publish runs, and a push that would rewrite or delete the branch on the remote is
+    refused (LOCALMODELS_ALLOW_REWRITE=1 for one done on purpose). git passes the remote's name and URL as arguments and
+    one line a ref on stdin: <local ref> <local sha> <remote ref> <remote sha>. -> 0 to let the push go, 1 to stop it."""
+    remote = a[0] if a else 'origin'
+    git = lambda *x: subprocess.run(['git', *x], capture_output=True, text=True)
+    repo = git('rev-parse', '--show-toplevel').stdout.strip() or os.getcwd()
+    why, tips = [], []
+    for line in (stdin if stdin is not None else sys.stdin.read()).split('\n'):
+        f = line.split()
+        if len(f) != 4: continue
+        lref, lsha, rref, rsha = f
+        if lsha == ZERO:
+            if rref.startswith('refs/heads/') and os.environ.get('LOCALMODELS_ALLOW_REWRITE') != '1':
+                why.append(f'the push deletes {rref} on {remote}')
+            continue
+        if rsha != ZERO and os.environ.get('LOCALMODELS_ALLOW_REWRITE') != '1':
+            if git('-C', repo, 'cat-file', '-e', rsha).returncode:
+                why.append(f'{remote} holds {rsha[:7]} on {rref}, which this checkout does not have: fetch and look at it first '
+                           f'(git fetch {remote}; git log {lsha[:7]}..{remote}/{rref.split("/")[-1]})')
+            elif rref.startswith('refs/heads/') and git('-C', repo, 'merge-base', '--is-ancestor', rsha, lsha).returncode:
+                why.append(f'the push rewrites {rref} on {remote} (a force push)')
+        tips.append(lsha)
+    for tip in tips:
+        try:
+            pc = private_check(repo, PRIVATE_WORDS, tip=tip, remote=remote)
+            sc = secret_check(repo, tip=tip, remote=remote)
+        except RuntimeError as e: why.append(f'could not read what the push sends: {e}'); continue
+        why += [f'private word: {w}: {t}' for w, t in pc['hits'][:20]]
+        if sc['hits']: why += secret_words(sc)
+    if why:
+        print('localmodels pre-push: push stopped', file=sys.stderr)
+        for w in why: print(f'  {w}', file=sys.stderr)
+        print('  (LOCALMODELS_ALLOW_REWRITE=1 lets a rewrite or a deletion through on purpose; the checks themselves have no bypass)', file=sys.stderr)
+        return 1
+    return 0
+
+
+def set_prepush_hook(repo=None):
+    """The pre-push hook in this checkout's .git/hooks (worktrees share it), calling this hub's command, so a push
+    from any session gets the checks. A hook that is not this one is left in place and named. -> words."""
+    repo = repo or HOME
+    gitdir = os.path.join(repo, '.git')
+    if not os.path.isdir(gitdir): return f'no pre-push hook: {repo} is not a git checkout'
+    path = os.path.join(gitdir, 'hooks', 'pre-push')
+    body = (f'#!/bin/sh\n# {HOOK_MARK} (written by localmodels install): the privacy and secrets checks on every push\n'
+            f'exec "{PY}" "{os.path.join(HOME, "bin", "localmodels")}" prepush "$@"\n')
+    try: cur = open(path).read()
+    except OSError: cur = None
+    if cur == body: return f'the pre-push hook is in place ({path})'
+    if cur is not None and HOOK_MARK not in cur: return f'a pre-push hook of its own is at {path}: left as it is, so pushes are not checked'
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f: f.write(body)
+    os.chmod(path, 0o755)
+    return f'the pre-push hook {"updated" if cur else "written"}: every push from this checkout gets the privacy and secrets checks ({path})'
 
 
 def preflight(repo, want, current, branch):
@@ -1614,6 +1721,13 @@ def publish(a):
     else:
         print(f"   clean: {pc['lines']} added lines, {pc['files']} new file names and {pc['commits']} commit messages, in "
               + ('the commits not yet on origin' if pc['since'] else 'every commit (nothing is on origin yet)'))
+    print('   the secrets check:')
+    try: sc = secret_check(HOME, tip=head)
+    except RuntimeError as e: print(f'   could not read what the push sends ({e}); nothing published'); return 1
+    if sc['hits']:
+        for line in secret_words(sc): print('   ' + line)
+        print('   nothing published'); return 1
+    print('   clean: no credential, no key file, no file that runs code on GitHub or on install')
     if '--dry' in a: print(f'--dry: the checks only; nothing stamped, committed or pushed (this release would be {want})'); return 0
     try:
         release = stamp(HOME, want, head)
@@ -1746,6 +1860,7 @@ def main(argv):
         if not a: print('localmodels agent-run <folder>'); return 2
         return mcp_server.run_folder(a[0])
     if verb == 'publish': return publish(a)
+    if verb == 'prepush': return prepush(a)
     if verb == 'help': print(__doc__.strip()); return 0
     if verb == 'version': print(VERSION); return 0
     print(f'unknown: {verb} (localmodels help)'); return 2
