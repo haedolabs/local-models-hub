@@ -1137,7 +1137,7 @@ def test_privacy_check(box):
     repo, origin = os.path.join(box, 'repo'), os.path.join(box, 'origin.git'); os.makedirs(repo)
     g = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout
     subprocess.run(['git', 'init', '-q', '--bare', origin], check=True)
-    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T'); g('config', 'commit.gpgsign', 'false')
+    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T'); g('config', 'commit.gpgsign', 'false'); g('config', 'tag.gpgsign', 'false')
     open(os.path.join(repo, 'a.txt'), 'w').write('old line written by Pat Sample\n')
     g('add', '.'); g('commit', '-q', '-m', 'first')
     words = os.path.join(box, 'words.txt')
@@ -1229,13 +1229,100 @@ def test_privacy_check(box):
     g('tag', '-a', 'v1.0.5', '-m', 'old'); t('a tag that exists here is refused', P('1.0.5') and 'v1.0.5' in P('1.0.5'), P('1.0.5')); g('tag', '-d', 'v1.0.5')
     other = os.path.join(box, 'other-clone'); subprocess.run(['git', 'clone', '-q', origin, other], check=True)
     o = lambda *a: subprocess.run(['git', '-C', other, *a], capture_output=True, text=True, check=True).stdout
-    o('config', 'user.email', 't@example.org'); o('config', 'user.name', 'T'); o('config', 'commit.gpgsign', 'false')
+    o('config', 'user.email', 't@example.org'); o('config', 'user.name', 'T'); o('config', 'commit.gpgsign', 'false'); o('config', 'tag.gpgsign', 'false')
     o('tag', '-a', 'v1.0.6', '-m', 'pushed elsewhere'); o('push', '-q', 'origin', 'v1.0.6')
     w6 = P('1.0.6')
     t('a tag that is already on origin is refused', w6 and 'origin' in w6, w6)
     t('a new version with origin contained in HEAD: nothing to say', P('1.0.7') is None, P('1.0.7'))
     open(os.path.join(other, 'later.txt'), 'w').write('x\n'); o('add', '.'); o('commit', '-q', '-m', 'pushed from elsewhere'); o('push', '-q', 'origin', 'HEAD:main')
     t('origin has a commit this branch lacks: refused (pull first), nothing stamped', P('1.0.7') and 'pull' in P('1.0.7'), P('1.0.7'))
+
+
+def test_secret_check(box):
+    print('publish and every push: the secrets check reads what the push sends for credentials, key files and code that runs on GitHub')
+    import subprocess
+    from localmodels import cli
+    box = os.path.join(box, 'secrets'); os.makedirs(box)
+    repo, origin = os.path.join(box, 'repo'), os.path.join(box, 'origin.git'); os.makedirs(repo)
+    g = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout
+    subprocess.run(['git', 'init', '-q', '--bare', origin], check=True)
+    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T')
+    g('config', 'commit.gpgsign', 'false'); g('config', 'tag.gpgsign', 'false')
+    def commit(files, msg='c'):
+        for name, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(repo, name)) or repo, exist_ok=True)
+            open(os.path.join(repo, name), 'w').write(text)
+        g('add', '-A'); g('commit', '-q', '-m', msg)
+    commit({'a.txt': 'plain text, a password field named in prose, sk-short\n', '.env.example': 'KEY=\n'})
+    r = cli.secret_check(repo)
+    t('plain text and an example env file: clean, every commit read before the first push', r['status'] == 'clean' and r['since'] is None and r['commits'] == 1, r)
+    g('remote', 'add', 'origin', origin); g('push', '-q', 'origin', 'main')
+    token = 'gh' + 'p_' + 'A1b2C3d4' * 5                     # built here, so this file holds no token itself
+    commit({'conf.py': f'TOKEN = "{token}"\n'})
+    hits = cli.secret_check(repo)['hits']
+    t('a GitHub token in an added line is caught, named by its commit and line', any('conf.py:1' in w for w, _ in hits), hits)
+    g('reset', '-q', '--hard', 'origin/main')
+    commit({'notes.md': '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----\nabc\n'})
+    t('a private key block is caught', any('notes.md' in w for w, _ in cli.secret_check(repo)['hits']))
+    g('reset', '-q', '--hard', 'origin/main')
+    commit({'keys/id_ed25519': 'x\n', 'prod.env': 'x\n', '.env': 'x\n', 'cert.pem': 'x\n'})
+    names = [w for w, _ in cli.secret_check(repo)['hits']]
+    t('key files by name: id_ed25519, .env and *.pem caught', all(any(n in w for w in names) for n in ('id_ed25519', '.env', 'cert.pem')), names)
+    g('reset', '-q', '--hard', 'origin/main')
+    commit({'.github/workflows/ci.yml': 'on: push\n'}, 'ci: refresh build cache')
+    hits = cli.secret_check(repo)['hits']
+    t('a workflow file is caught (this repository runs nothing on GitHub)', any('.github/workflows/ci.yml' in w for w, _ in hits), hits)
+    g('reset', '-q', '--hard', 'origin/main')
+    commit({'package.json': '{}\n'})
+    t('a package manifest (install scripts run on npm install) is caught', any('package.json' in w for w, _ in cli.secret_check(repo)['hits']))
+    g('reset', '-q', '--hard', 'origin/main')
+    commit({'b.txt': 'nothing\n'}, f'key {token}')
+    t('a token in a commit message is caught (it goes public with the history)', any(w.startswith('commit ') for w, _ in cli.secret_check(repo)['hits']))
+
+    print('every push: the pre-push hook runs the checks and refuses a rewrite of the remote branch')
+    words = os.path.join(box, 'words.txt'); open(words, 'w').write('zephyr\n')
+    real, here = cli.PRIVATE_WORDS, os.getcwd()
+    cli.PRIVATE_WORDS = words
+    os.chdir(repo)
+    try:
+        g('reset', '-q', '--hard', 'origin/main')
+        base = g('rev-parse', 'origin/main').strip()
+        commit({'c.txt': 'fine\n'})
+        tip = g('rev-parse', 'HEAD').strip()
+        line = lambda lsha, rsha: f'refs/heads/main {lsha} refs/heads/main {rsha}\n'
+        t('a clean fast-forward push goes', cli.prepush(['origin'], line(tip, base)) == 0)
+        commit({'d.txt': 'the zephyr notes\n'})
+        t('a private word in the push stops it', cli.prepush(['origin'], line(g('rev-parse', 'HEAD').strip(), base)) == 1)
+        g('reset', '-q', '--hard', 'origin/main'); commit({'e.txt': f'{token}\n'})
+        t('a credential in the push stops it', cli.prepush(['origin'], line(g('rev-parse', 'HEAD').strip(), base)) == 1)
+        g('reset', '-q', '--hard', 'origin/main'); commit({'f.txt': 'x\n'})
+        g('push', '-q', 'origin', 'main'); g('fetch', '-q', 'origin')
+        pushed = g('rev-parse', 'HEAD').strip()
+        g('reset', '-q', '--hard', 'HEAD~1'); commit({'g.txt': 'y\n'})
+        other = g('rev-parse', 'HEAD').strip()
+        t('a force push that rewrites the remote branch is refused', cli.prepush(['origin'], line(other, pushed)) == 1)
+        os.environ['LOCALMODELS_ALLOW_REWRITE'] = '1'
+        try: t('...and goes with LOCALMODELS_ALLOW_REWRITE=1, on purpose', cli.prepush(['origin'], line(other, pushed)) == 0)
+        finally: os.environ.pop('LOCALMODELS_ALLOW_REWRITE')
+        t('a commit on the remote this checkout has never seen: refused (fetch and look first)', cli.prepush(['origin'], line(other, 'ab' * 20)) == 1)
+        t('deleting the remote branch is refused', cli.prepush(['origin'], f'(delete) {cli.ZERO} refs/heads/main {pushed}\n') == 1)
+        g('reset', '-q', '--hard', pushed)
+        hook = os.path.join(repo, '.git', 'hooks', 'pre-push')
+        words1 = cli.set_prepush_hook(repo)
+        t('install writes the hook, calling this checkout\'s command', 'written' in words1 and cli.HOOK_MARK in open(hook).read() and os.access(hook, os.X_OK), words1)
+        t('a second install leaves it as it is', 'in place' in cli.set_prepush_hook(repo))
+        env = dict(os.environ, LOCALMODELS_PRIVATE_WORDS=words)
+        commit({'h.txt': f'{token}\n'})
+        r = subprocess.run(['git', '-C', repo, 'push', '-q', 'origin', 'main'], capture_output=True, text=True, env=env)
+        t('a plain git push with a credential is stopped by the hook, and nothing reaches the remote', r.returncode != 0 and 'push stopped' in r.stderr
+          and subprocess.run(['git', '--git-dir', origin, 'rev-parse', 'main'], capture_output=True, text=True).stdout.strip() == pushed, (r.returncode, r.stderr[-300:]))
+        g('reset', '-q', '--hard', pushed); commit({'i.txt': 'ok\n'})
+        r = subprocess.run(['git', '-C', repo, 'push', '-q', 'origin', 'main'], capture_output=True, text=True, env=env)
+        t('a clean plain git push goes through the hook', r.returncode == 0, r.stderr[-300:])
+        open(hook, 'w').write('#!/bin/sh\nexit 0\n')
+        t('a hook of another tool is left in place and named', 'left as it is' in cli.set_prepush_hook(repo) and 'exit 0' in open(hook).read())
+    finally:
+        cli.PRIVATE_WORDS = real; os.chdir(here)
 
 
 def test_about(box):
@@ -1525,6 +1612,7 @@ def main():
         test_stalls(box)
         test_peers_only(box)
         test_privacy_check(box)
+        test_secret_check(box)
         test_about(box)
         test_progress(box)
         test_run_plans(box)
