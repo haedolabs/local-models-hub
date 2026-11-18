@@ -21,6 +21,16 @@ def t(name, good, note=''):
     ok.append(bool(good)); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
 
 
+def until(fn, secs):
+    """fn() polled until it is truthy or `secs` pass -> its last value: a state the gateway reaches on its own thread is
+    waited for, not sampled after a fixed sleep (a busy Mac delays it by seconds)."""
+    end = time.time() + secs
+    while True:
+        v = fn()
+        if v or time.time() >= end: return v
+        time.sleep(0.05)
+
+
 SSE = {   # streams as LM Studio sends them: each ends with its own last event, none with [DONE] (only OpenAI's chat does)
     'anthropic': [('message_start', dict(type='message_start', message=dict(id='m', model=F, usage=dict(input_tokens=12, output_tokens=1)))),
                   ('content_block_delta', dict(type='content_block_delta', index=0, delta=dict(type='text_delta', text='OK'))),
@@ -207,9 +217,9 @@ def run(box):
         with crashes._state() as st: st['down'] = {F: dict(crashed=time.time(), models=[F, F2], state='loading again')}
         got, t0 = {}, time.time()
         th = threading.Thread(target=lambda: got.update(zip(('code', 'r', 'h'), ask(tag='e')))); th.start()
-        time.sleep(2)
-        marks = llmshare.inflight()
+        marks = until(lambda: [m for m in llmshare.inflight() if m.get('state') == 'held: reloading after a crash'], 15)   # held, then 2 s
         held_state = marks and marks[0].get('state')
+        time.sleep(2)
         with crashes._state() as st: st['down'] = {}
         th.join(30)
         row_ = rows_logged()[0]
@@ -268,15 +278,18 @@ def run(box):
         ghost_rows = [r_ for r_ in rows_logged(6) if r_.get('status') == 499]
         t('a program that hung up while waiting is dropped, not sent', 'ghost' not in tags and len(ghost_rows) == 1 and 'client closed' in ghost_rows[0].get('note', ''), (tags, [g.get('note') for g in ghost_rows]))
         t('the chat request got the next free slot before the batch request that came first', tags.index('chat') < tags.index('batch'), tags)
-        plan('slow'); Fake.slow = 5.0
+        plan('slow'); Fake.slow = 8.0; t_leave = time.time()
         s = raw(F, 'leaver', kind='test')
-        time.sleep(1.2); s.close()                                   # gives up during the answer
-        time.sleep(2.5)
-        freed = llmshare.busy_slots()
-        row_ = rows_logged()[0]
+        time.sleep(1.2); s.close()                                   # gives up during the answer, 6.8 s before LM Studio would finish it
+
+        def let_go():
+            f_, r_ = llmshare.busy_slots(), rows_logged()[0]
+            return (not f_.get(llmshare._safe(F)) and r_.get('status') == 499 and 'during the response' in (r_.get('note') or '')) and (f_, r_)
+        got_ = until(let_go, 5)
+        freed, row_ = got_ or (llmshare.busy_slots(), rows_logged()[0])
         t('a program that hangs up during a long answer: the door hangs up on LM Studio, the slot is free within seconds',
-          not freed.get(llmshare._safe(F)) and row_.get('status') == 499 and 'during the response' in (row_.get('note') or ''), (freed, row_.get('status'), row_.get('note')))
-        time.sleep(2.5); Fake.slow = 3.0
+          bool(got_), (freed, row_.get('status'), row_.get('note')))
+        time.sleep(max(0, t_leave + Fake.slow + 0.5 - time.time())); Fake.slow = 3.0
         plan('slow', 'slow'); Fake.slow = 6.0
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'busy{i}', kind='batch')) for i in range(2)]
         for x in ths: x.start()
@@ -358,7 +371,7 @@ def run(box):
         held = lambda: (len(os.listdir(llmshare.INFLIGHT)) if os.path.isdir(llmshare.INFLIGHT) else 0, sum(e['n'] for e in gateway._live.values()))
         plan(); time.sleep(0.3)
         code, r, h = ask(tag='inf', max_tokens=1e999)
-        t('a request whose max_tokens is not finite (1e999) is answered, and leaves no marker or lease count behind', code == 200 and held() == (0, 0), (code, held()))
+        t('a request whose max_tokens is not finite (1e999) is answered, and leaves no marker or lease count behind', code == 200 and until(lambda: held() == (0, 0), 5), (code, held()))
         real_est, admission.estimate = admission.estimate, lambda *a, **k: 1 / 0
         try: code, r, h = ask(tag='broken')
         finally: admission.estimate = real_est
