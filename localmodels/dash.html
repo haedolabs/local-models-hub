@@ -53,9 +53,11 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-even
 body { font: 13px/1.4 "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; overflow: hidden; }
 .wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
 @media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 20px; }   /* name | status, then view | actions */
+header { display: grid; grid-template-columns: minmax(0, auto) minmax(50%, 1fr); align-items: center; gap: 6px 20px; }   /* name | status, then view | actions: the status keeps half the row, the subtitle gives way first */
 .h-status, .h-actions, .h-view { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .h-status, .h-actions { justify-content: flex-end; }
+.h-status { min-width: 0; } .h-status .chip { max-width: 100%; min-width: 0; }   /* a long status ends in an ellipsis, its whole text the tooltip */
+.h-status .chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn.act { color: var(--ink); box-shadow: 0 0 0 1px var(--pin); }   /* an action that changes the hub, never mistaken for a view setting */
 #foot-left { display: inline-flex; gap: 12px; align-items: baseline; }
 h1 { margin: 0; line-height: 0; }
@@ -63,8 +65,8 @@ h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* th
 #accent { font: inherit; font-size: 12px; color: var(--ink-2); background: transparent; border: 0; border-radius: 6px; padding: 1px 4px; box-shadow: 0 0 0 1px var(--ring); cursor: pointer; }
 #accent-own { width: 22px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: none; cursor: pointer; vertical-align: middle; }
 #accent-own::-webkit-color-swatch-wrapper { padding: 0; } #accent-own::-webkit-color-swatch { border: 0; border-radius: 4px; }
-.title { display: flex; align-items: center; gap: 14px; }
-.sub { color: var(--muted); }
+.title { display: flex; align-items: center; gap: 14px; min-width: 0; white-space: nowrap; } .title h1 { flex: none; }   /* the name never shrinks */
+.sub { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
 .chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px var(--glow); }   /* status lights */
@@ -662,6 +664,7 @@ function renderNow() {
   }
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
+  mc.title = mt ? mt.words : '';
   if (mt) { mc.querySelector('span').textContent = mt.off ? mt.words.replace(/; turn on: localmodels on$/, '') : mt.words; mc.querySelector('i').style.background = mt.off ? 'var(--other)' : mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
   const pw = $('power');                                 // this Mac's local models off or on (POST /hub/off, /hub/on)
   pw.style.display = '';
