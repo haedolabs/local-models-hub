@@ -7,6 +7,7 @@ grows the room for an answer cut off, keeps labels distinct, and never lets one 
 import email.message, io, json, os, shutil, sys, tempfile, time, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import agent, llmshare
 
 ok = []
@@ -44,6 +45,7 @@ def main():
     box = tempfile.mkdtemp(prefix='localmodels-agenttest-')
     try: run(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 
@@ -64,6 +66,17 @@ def run(box):
     r = agent.run_job(dict(label='a', prompt='say fine'), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t('a 503 with Retry-After: waits that long and asks again', r['ok'] and r['answer'] == 'fine' and r['usage']['retries'] == 1 and len(s.calls) == 2 and time.time() - t0 >= 1, (r.get('error'), len(s.calls)))
     t('every request names its step for the dash (X-Step)', s.calls[0]['headers'].get('X-Step', '').startswith('a: '), s.calls[0]['headers'])
+    posted = []
+    llmshare.hub_post = lambda path, body=None, timeout=5: posted.append((path, body))
+    s = Script([dict(content='one'), dict(content='two')]); agent.post = s
+    agent.batch([dict(label='p1', prompt='x'), dict(label='p2', prompt='y')], 'm', NO_TOOLS, NO_CALL, 'test', parallel=1, out_dir=os.path.join(box, 'phased'),
+                quiet=True, run='survey', phase='D')
+    llmshare.hub_post = lambda *a, **k: None
+    hs = [c['headers'] for c in s.calls]
+    t('a batch in a run\'s phase: each request names the run and phase, its size, and the items done before it',
+      [(h.get('X-Run'), h.get('X-Phase'), h.get('X-Phase-Total'), h.get('X-Phase-Done')) for h in hs] == [('survey', 'D', '2', '0'), ('survey', 'D', '2', '1')], hs)
+    t('and declares its phase and size to the hub (POST /hub/runs)', ('/hub/runs', dict(run='survey', phases=[dict(name='D', items=2)], project='test', end=False)) in posted, posted)
+    t('each request still names its own step (X-Step)', all(h.get('X-Step', '').startswith(('p1: ', 'p2: ')) for h in hs), hs)
     s = Script([http_error(400, '{"error": "Error: The model has crashed without additional information."}'), dict(content='fine')]); agent.post = s
     r = agent.run_job(dict(label='b', prompt='x'), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t("LM Studio's 400 'the model has crashed': asked again", r['ok'] and r['usage']['retries'] == 1, r.get('error'))
@@ -103,6 +116,21 @@ def run(box):
     s = Script([dict(content='found'), dict(content='', reasoning_content='{"items": ["in the think block"]}')]); agent.post = s
     r = agent.run_job(dict(label='j', prompt='list', schema=SCHEMA), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t('JSON that landed in reasoning_content is read', r['result'] == {'items': ['in the think block']}, r.get('result'))
+    counted = {'type': 'object', 'properties': {'items': {'type': 'array', 'items': {'type': 'string'}}, 'count': {'type': 'integer'}}, 'required': ['items', 'count']}
+    s = Script([dict(content='found'), dict(content='{"items": [], "count": 0}'), dict(content='{"items": ["a.py"], "count": 1}')]); agent.post = s
+    r = agent.run_job(dict(label='p', prompt='list', schema=counted), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('every list empty beside a number: asked once more, as for an answer that lists nothing', r['result'] == {'items': ['a.py'], 'count': 1} and r['usage']['empty'] == 1,
+      (r.get('result'), r['usage'].get('empty')))
+    s = Script([dict(content='found'), dict(content='{"items": []}'), dict(content='{"items": "a.py line 3"}')]); agent.post = s
+    r = agent.run_job(dict(label='q', prompt='list', schema=SCHEMA), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('a plain answer that does not match the schema (text where a list goes) gives way to the empty one, and is counted',
+      r['result'] == {'items': []} and r['usage'].get('invalid') == 1, (r.get('result'), r['usage'].get('invalid')))
+    s = Script([dict(content='found'), dict(content='[]'), dict(content='Here is the list, as asked:\n["a.py", "b.py"]')]); agent.post = s
+    r = agent.run_job(dict(label='r', prompt='list', schema={'type': 'array', 'items': {'type': 'string'}}), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('a list written after a line of words is read', r['result'] == ['a.py', 'b.py'], r.get('result'))
+    t('the schema check reads nested types, enums and minItems', agent.valid({'a': [{'k': 'x'}]}, {'type': 'object', 'required': ['a'], 'properties': {'a': {'type': 'array', 'minItems': 1,
+      'items': {'type': 'object', 'required': ['k'], 'properties': {'k': {'enum': ['x', 'y']}}}}}}) and not agent.valid({'a': [{'k': 'z'}]}, {'type': 'object', 'properties': {'a': {'type': 'array',
+      'items': {'type': 'object', 'properties': {'k': {'enum': ['x', 'y']}}}}}}) and not agent.valid({'n': True}, {'type': 'object', 'properties': {'n': {'type': 'integer'}}}))
 
     print('the agent engine: a batch')
     t('labels are made distinct', [j['label'] for j in agent.unique_labels([dict(label='a'), dict(label='a'), dict(label='b/c')])] == ['a', 'a-2', 'b-c'])

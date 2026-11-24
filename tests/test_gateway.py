@@ -7,9 +7,10 @@ before batches in the queue, a chunked request body, a route with a trailing sla
 LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
 loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_gateway.py
 """
-import fcntl, select, http.server, json, os, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
+import fcntl, select, http.server, json, os, re, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import admission, crashes, gateway, llmshare, recycle
 
 F, F2 = 'test/family', 'test/family:2'
@@ -18,6 +19,16 @@ ok = []
 
 def t(name, good, note=''):
     ok.append(bool(good)); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
+
+
+def until(fn, secs):
+    """fn() polled until it is truthy or `secs` pass -> its last value: a state the gateway reaches on its own thread is
+    waited for, not sampled after a fixed sleep (a busy Mac delays it by seconds)."""
+    end = time.time() + secs
+    while True:
+        v = fn()
+        if v or time.time() >= end: return v
+        time.sleep(0.05)
 
 
 SSE = {   # streams as LM Studio sends them: each ends with its own last event, none with [DONE] (only OpenAI's chat does)
@@ -39,13 +50,14 @@ OOM = 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memor
 
 class Fake(http.server.BaseHTTPRequestHandler):
     """A pretend LM Studio: answers by a plan ('ok', 'crash', 'bad', 'odd', 'slow', 'reset'), and remembers who asked, in order."""
-    plan, seen, slow, on_odd = [], [], 3.0, None
+    plan, seen, slow, on_odd, on_unload, hang = [], [], 3.0, None, None, 8.0
     lock = threading.Lock()
 
     def log_message(self, *a): pass
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if self.path.lower().endswith('/unload') and Fake.on_unload: Fake.on_unload(body)   # the instance leaves the listing
         with Fake.lock:
             what = Fake.plan.pop(0) if Fake.plan else 'ok'
             Fake.seen.append((body.get('model'), body.get('tag'), what))
@@ -54,6 +66,18 @@ class Fake(http.server.BaseHTTPRequestHandler):
             except OSError: pass
             self.close_connection = True; return
         if what == 'slow': time.sleep(Fake.slow)
+        if what in ('hang', 'sse-hang'):                     # a stalled engine: nothing comes, then the door cuts the connection
+            if what == 'sse-hang':
+                self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+                self.wfile.write(b'data: {"choices":[{"delta":{"content":"One"}}]}\n\n'); self.wfile.flush()
+            end = time.time() + Fake.hang
+            while time.time() < end:
+                time.sleep(0.1)
+                try:
+                    if self.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b'': break   # the door hung up
+                except BlockingIOError: pass
+                except OSError: break
+            self.close_connection = True; return
         if what == 'sse-cut':                                 # a stream that breaks off after one chunk, no [DONE]
             self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
             self.wfile.write(b'data: {"choices":[{"delta":{"content":"One"}}]}\n\n'); self.wfile.flush()
@@ -93,6 +117,7 @@ def main():
     box = tempfile.mkdtemp(prefix='localmodels-doortest-')
     try: run(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 
@@ -116,8 +141,9 @@ def run(box):
     gateway.UP, gateway.PORT = f'http://127.0.0.1:{up.server_address[1]}', door.server_address[1]
     url = f'http://localhost:{gateway.PORT}'
 
-    def ask(model=F, tag=None, kind='test', timeout=60, path='/v1/chat/completions', headers=None, pad=0, max_tokens=None):
-        body = dict(model=model, messages=[{'role': 'user', 'content': 'x' * pad}] if pad else [], tag=tag, **({'max_tokens': max_tokens} if max_tokens else {}))
+    def ask(model=F, tag=None, kind='test', timeout=60, path='/v1/chat/completions', headers=None, pad=0, max_tokens=None, messages=None):
+        body = dict(model=model, messages=messages if messages is not None else [{'role': 'user', 'content': 'x' * pad}] if pad else [], tag=tag,
+                    **({'max_tokens': max_tokens} if max_tokens else {}))
         req = urllib.request.Request(url + path, data=json.dumps(body).encode(),
                                      headers={'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': kind, **(headers or {})})
         try: r = urllib.request.urlopen(req, timeout=timeout); return r.status, json.load(r), dict(r.headers)
@@ -193,9 +219,9 @@ def run(box):
         with crashes._state() as st: st['down'] = {F: dict(crashed=time.time(), models=[F, F2], state='loading again')}
         got, t0 = {}, time.time()
         th = threading.Thread(target=lambda: got.update(zip(('code', 'r', 'h'), ask(tag='e')))); th.start()
-        time.sleep(2)
-        marks = llmshare.inflight()
+        marks = until(lambda: [m for m in llmshare.inflight() if m.get('state') == 'held: reloading after a crash'], 15)   # held, then 2 s
         held_state = marks and marks[0].get('state')
+        time.sleep(2)
         with crashes._state() as st: st['down'] = {}
         th.join(30)
         row_ = rows_logged()[0]
@@ -260,15 +286,18 @@ def run(box):
         ghost_rows = [r_ for r_ in rows_logged(6) if r_.get('status') == 499]
         t('a program that hung up while waiting is dropped, not sent', 'ghost' not in tags and len(ghost_rows) == 1 and 'client closed' in ghost_rows[0].get('note', ''), (tags, [g.get('note') for g in ghost_rows]))
         t('the chat request got the next free slot before the batch request that came first', tags.index('chat') < tags.index('batch'), tags)
-        plan('slow'); Fake.slow = 5.0
+        plan('slow'); Fake.slow = 8.0; t_leave = time.time()
         s = raw(F, 'leaver', kind='test')
-        time.sleep(1.2); s.close()                                   # gives up during the answer
-        time.sleep(2.5)
-        freed = llmshare.busy_slots()
-        row_ = rows_logged()[0]
+        time.sleep(1.2); s.close()                                   # gives up during the answer, 6.8 s before LM Studio would finish it
+
+        def let_go():
+            f_, r_ = llmshare.busy_slots(), rows_logged()[0]
+            return (not f_.get(llmshare._safe(F)) and r_.get('status') == 499 and 'during the response' in (r_.get('note') or '')) and (f_, r_)
+        got_ = until(let_go, 5)
+        freed, row_ = got_ or (llmshare.busy_slots(), rows_logged()[0])
         t('a program that hangs up during a long answer: the door hangs up on LM Studio, the slot is free within seconds',
-          not freed.get(llmshare._safe(F)) and row_.get('status') == 499 and 'during the response' in (row_.get('note') or ''), (freed, row_.get('status'), row_.get('note')))
-        time.sleep(2.5); Fake.slow = 3.0
+          bool(got_), (freed, row_.get('status'), row_.get('note')))
+        time.sleep(max(0, t_leave + Fake.slow + 0.5 - time.time())); Fake.slow = 3.0
         plan('slow', 'slow'); Fake.slow = 6.0
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'busy{i}', kind='batch')) for i in range(2)]
         for x in ths: x.start()
@@ -319,12 +348,65 @@ def run(box):
         try: urllib.request.urlopen(req, timeout=5); code = 200
         except urllib.error.HTTPError as e: code = e.code
         t("a web page from another local port is refused", code == 403, code)
+
+        def get(path, site=None, mode=None, dest=None):
+            h = {k: v for k, v in (('Sec-Fetch-Site', site), ('Sec-Fetch-Mode', mode), ('Sec-Fetch-Dest', dest)) if v}
+            try: return urllib.request.urlopen(urllib.request.Request(url + path, headers=h), timeout=10).status
+            except urllib.error.HTTPError as e: return e.code
+        codes = [get(p, 'cross-site', 'no-cors', d) for p, d in (('/hub/errors?minutes=x', 'image'), ('/v1/models', 'script'), ('/favicon.png', 'image'))]
+        t("a browser's cross-site GET, which carries no Origin (an <img>, a <script>), is refused", codes == [403, 403, 403], codes)
+        t('so is a page on another local port (same-site), and the dashboard framed by another site',
+          (get('/hub/health', 'same-site', 'no-cors', 'script'), get('/', 'cross-site', 'navigate', 'iframe')) == (403, 403))
+        t('a link from another site opens the dashboard; a navigation from another site to any other route is refused',
+          (get('/', 'cross-site', 'navigate', 'document'), get('/hub/errors?minutes=x', 'cross-site', 'navigate', 'document')) == (200, 403))
+        codes = (get('/hub/health', 'same-origin', 'cors', 'empty'), get('/', 'none', 'navigate', 'document'), get('/hub/health'))
+        t("the dashboard's own requests (same-origin), an address typed in (none) and a program (no such header) are served", codes == (200, 200, 200), codes)
+        from localmodels import web
+        real_run = web.subprocess.run
+        try:
+            seen = []
+            for out, code in (('5\n', 0), ('', 1), ('x\n', 0)):    # Purple; no key (Multicolor: blue); unreadable
+                web.subprocess.run = lambda *a, **k: web.subprocess.CompletedProcess(a, code, out, '')
+                seen.append(web.accent())
+        finally: web.subprocess.run = real_run
+        t("/hub/accent: the Mac's accent as System Settings stores it; no key or an unreadable one is Multicolor's blue",
+          seen == [dict(name='Purple', color='#953d96'), dict(name='Multicolor', color='#007aff'), dict(name='Multicolor', color='#007aff')]
+          and get('/hub/accent') == 200, seen)
+        from localmodels import errors
+        codes = [get(p) for p in ('/hub/errors?minutes=x', '/hub/history?minutes=x', '/hub/recent?n=x')]
+        t('a window or a count that is not a number falls back to the default: answered, and nothing recorded as an error',
+          codes == [200, 200, 200] and not [r for r in errors.recent(5) if r['where'].startswith('GET /hub/')], (codes, errors.recent(5)[:1]))
+        held = lambda: (len(os.listdir(llmshare.INFLIGHT)) if os.path.isdir(llmshare.INFLIGHT) else 0, sum(e['n'] for e in gateway._live.values()))
+        plan(); time.sleep(0.3)
+        code, r, h = ask(tag='inf', max_tokens=1e999)
+        t('a request whose max_tokens is not finite (1e999) is answered, and leaves no marker or lease count behind', code == 200 and until(lambda: held() == (0, 0), 5), (code, held()))
+        real_est, admission.estimate = admission.estimate, lambda *a, **k: 1 / 0
+        try: code, r, h = ask(tag='broken')
+        finally: admission.estimate = real_est
+        time.sleep(0.3)
+        t('a request that fails before it is sent (its estimate raises) answers 500 and leaves no marker or lease count', code == 500 and held() == (0, 0), (code, held()))
         req = urllib.request.Request(url + '/api/v1/models/Unload', data=json.dumps(dict(instance_id=F2, model='other/x')).encode(), headers={'Content-Type': 'application/json'})
         with llmshare.lease('someone', [F2], 'batch'):
             llmshare._write(os.path.join(llmshare.LEASES, 'someone-1-1.json'), dict(v=2, project='someone', pid=1, models=[F2], kind='batch', since=time.time(), beat=time.time()))
             try: urllib.request.urlopen(req, timeout=5); code = 200
             except urllib.error.HTTPError as e: code = e.code
         t('an unload sent through the door, in any case, naming the copy another run uses: refused (409)', code == 409, code)
+        for f in os.listdir(llmshare.LEASES): os.remove(os.path.join(llmshare.LEASES, f))   # no run uses the models now (this suite's own leases too)
+        plan(); saved_rows = list(rows); rows[:] = [row(F), row(F2)]
+        with crashes._state() as st: st.setdefault('seen', {})[F2] = dict(loaded=True, since=time.time() - 60, at=time.time())
+        Fake.on_unload = lambda b: [rows.remove(r) for r in list(rows) if r['id'] == b.get('instance_id')]
+        ps_ok, llmshare._ps['ok'] = llmshare._ps['ok'], True       # the listing in `rows` stands for a good `lms ps`
+        req = urllib.request.Request(url + '/api/v1/models/unload', data=json.dumps(dict(instance_id=F2)).encode(), headers={'Content-Type': 'application/json'})
+        try: code = urllib.request.urlopen(req, timeout=5).status
+        except urllib.error.HTTPError as e: code = e.code
+        finally: llmshare._ps['ok'] = ps_ok
+        for _ in range(20):                                  # the door marks it after it has answered the program
+            st = crashes._read(fresh=True)
+            if not (st.get('seen') or {}).get(F2, {}).get('loaded'): break
+            time.sleep(0.1)
+        t('an unload sent through the door: the instance it took is marked unloaded on purpose (LM Studio logs no unload line for it), never read as a crash',
+          code == 200 and not (st.get('seen') or {}).get(F2, {}).get('loaded') and F2 not in (st.get('missing') or {}), (code, (st.get('seen') or {}).get(F2)))
+        Fake.on_unload = None; rows[:] = saved_rows
 
         plan()
         code, r, h = ask(tag='run', headers={'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '17', 'X-Step': 'extract 18 of 420'})
@@ -337,6 +419,27 @@ def run(box):
         live = [f for f in llmshare.inflight() if f.get('run') == 'report']
         th.join(30); Fake.slow = 3.0
         t('a request in flight carries its run too, so the dash moves on at once', live and live[0].get('run_done') == 18, live)
+
+        print('the door: a run in phases, its plan declared (POST /hub/runs) and each request counted in its phase')
+        from localmodels import runs
+        runs.PLANS = os.path.join(box, 'runs')
+        def runs_post(body, headers=None):
+            req = urllib.request.Request(url + '/hub/runs', data=json.dumps(body).encode(), headers={'Content-Type': 'application/json', **(headers or {})})
+            try: r = urllib.request.urlopen(req, timeout=10); return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
+        code, body = runs_post({'run': 'survey', 'phases': [{'name': 'B', 'items': 3}, {'name': 'C', 'items': 2}]}, {'X-Project': 'local-models'})
+        t('a plan declared: 200, and the plan as stored, its phases in order', code == 200 and [p['name'] for p in body['plan']['phases']] == ['B', 'C']
+          and body['plan']['project'] == 'local-models', (code, body))
+        code, body = runs_post({'run': 'survey', 'phases': [{'name': 'B', 'items': 'three'}]}, {'X-Project': 'local-models'})
+        t('a plan the hub cannot take: 400 with the reason', code == 400 and 'whole number' in body.get('error', ''), (code, body))
+        plan()
+        code, r, h = ask(tag='phase', headers={'X-Run': 'survey', 'X-Phase': 'B', 'X-Phase-Total': '3', 'X-Phase-Done': '1'})
+        row_ = rows_logged()[0]
+        t('the phase headers are logged with the request', (row_.get('run'), row_.get('phase'), row_.get('phase_total'), row_.get('phase_done')) == ('survey', 'B', 3, 1), row_)
+        got = json.loads(urllib.request.urlopen(url + '/hub/runs', timeout=10).read())
+        mine = [g for g in got.get('runs', []) if g.get('name') == 'survey']
+        t('GET /hub/runs: the run with its phases, B at work and C waiting', mine and [(p['name'], p['state']) for p in mine[0]['phases']] == [('B', 'running'), ('C', 'waiting')]
+          and mine[0]['total'] == 5, mine)
 
         print('the door: maintenance, announced and on')
         from localmodels import maint
@@ -381,6 +484,104 @@ def run(box):
         maint.end(); Fake.slow = 3.0
         t('a request still waiting for its turn when maintenance starts is refused at its turn, never sent',
           got.get('code') == 503 and 'queued' not in [s_[1] for s_ in Fake.seen], (got.get('code'), Fake.seen))
+
+        print('the door: switched off (POST /hub/off) and on again (POST /hub/on)')
+        maint.OFF = os.path.join(box, 'off.json')
+        def hub_post(route, body):
+            try: r = urllib.request.urlopen(urllib.request.Request(url + route, data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}), timeout=10); return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
+        code, body = hub_post('/hub/off', {})
+        if code == 409: code, body = hub_post('/hub/off', {'force': True})        # the sandbox's lms cannot list: a blocker until forced
+        t('switched off: 200, and the record says so', code == 200 and maint.switched_off(), (code, body))
+        plan()
+        code, r, h = ask(tag='switched-off')
+        t('switched off: a request gets 503 with the header naming it, Retry-After 300 s, nothing forwarded',
+          code == 503 and int(h.get('Retry-After') or 0) == maint.OFF_RETRY and 'switched-off' in (h.get('X-Hub-Maintenance') or '') and 'switched-off' not in [s_[1] for s_ in Fake.seen], (code, h.get('X-Hub-Maintenance'), h.get('Retry-After')))
+        health = json.loads(urllib.request.urlopen(url + '/hub/health', timeout=5).read())
+        t('the health page says it', 'switched off' in ((health.get('maintenance') or {}).get('words') or ''), health.get('maintenance'))
+        t("switched off: the door never starts LM Studio's server", gateway.start_lmstudio('test') is False)
+        code, body = hub_post('/hub/on', {})
+        end = time.time() + 20
+        while maint.switched_off() and time.time() < end: time.sleep(0.2)
+        t('on: 202, and the record goes', code == 202 and maint.switched_off() is None, (code, body))
+        snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=10).read())
+        t("on: the dashboard's snapshot carries the switch-on (loading, then its outcome)", (snap.get('switching') or {}).get('phase') in ('loading', 'done'), snap.get('switching'))
+        plan()
+        code, r, h = ask(tag='switched-on')
+        t('on: answered again', code == 200, (code, r))
+
+        print('the door: switched off to peers only (POST /hub/off {"peers": true}), with no peer to take anything')
+        code, body = hub_post('/hub/off', {'peers': True})
+        t('peers only: 200 at once, no lease refuses it', code == 200 and maint.peers_only(), (code, body))
+        plan()
+        code, r, h = ask(tag='peers-only')
+        err = (r or {}).get('error') if isinstance(r, dict) else None
+        t('a request no peer can take: 503 with Retry-After 30 s, the header says peers-only, nothing sent to this Mac\'s LM Studio',
+          code == 503 and h.get('Retry-After') == str(gateway.RETRY_AFTER) and (h.get('X-Hub-Maintenance') or '').startswith('peers-only') and not Fake.seen,
+          (code, h.get('Retry-After'), h.get('X-Hub-Maintenance'), Fake.seen))
+        row_ = rows_logged()[0]
+        t('...and the row says why, in words', 'peers only' in (row_.get('note') or '') and 'no peer can take' in (row_.get('note') or ''), row_.get('note'))
+        t("peers only: the door never starts LM Studio's server either", gateway.start_lmstudio('test') is False)
+        code, body = hub_post('/hub/on', {})
+        end = time.time() + 20
+        while maint.switched_off() and time.time() < end: time.sleep(0.2)
+        plan()
+        code, r, h = ask(tag='peers-only-on')
+        t('on: answered here again', code == 200 and Fake.seen and Fake.seen[0][1] == 'peers-only-on', (code, Fake.seen))
+
+        print('the door: an instance that stalls (watchdog.py): its request cut and sent again, nothing new routed to it')
+        plan('hang', 'ok'); Fake.hang = 10.0
+        got = {}
+        th = threading.Thread(target=lambda: got.update(zip(('code', 'r', 'h'), ask(tag='stuck')))); th.start()
+        time.sleep(1.2)
+        on = [m_.get('copy') for m_ in llmshare.inflight() if m_.get('state') == 'answering']
+        crashes.stall(on[0] if on else F, 'stalled: test')
+        th.join(30)
+        row_ = rows_logged()[0]
+        t('a request on an instance marked stalled is cut within a second or two and answered by its sibling',
+          got.get('code') == 200 and [s_[0] for s_ in Fake.seen] == [F, F2] and (got.get('r') or {}).get('choices', [{}])[0].get('message', {}).get('content') == 'OK stuck'
+          and row_.get('seconds', 99) < 6, (got.get('code'), Fake.seen, row_.get('seconds')))
+        t('the row: answered by the sibling, two tries, resent because the instance stalled', row_.get('copy') == F2 and row_.get('tries') == 2
+          and 'resent' in (row_.get('note') or '') and 'stalled' in row_['note'], {k: row_.get(k) for k in ('copy', 'tries', 'note')})
+        plan()
+        code, r, h = ask(tag='after-stall')
+        t('while it is stalled, new requests go to its sibling', code == 200 and Fake.seen and Fake.seen[0][0] == F2, (code, Fake.seen))
+        plan('sse-hang'); Fake.hang = 10.0
+        crashes.loaded_now([F]); crashes.stall(F2, 'stalled: test'); time.sleep(1.1)
+        got = {}
+        def stream():
+            s_ = raw(F, 'stuck-stream', kind='test', stream=True); s_.settimeout(30); data = b''
+            while True:
+                part = s_.recv(65536)
+                if not part: break
+                data += part
+            s_.close(); got['data'] = data
+        th = threading.Thread(target=stream); th.start()
+        time.sleep(1.2)
+        crashes.stall(F, 'stalled: test')
+        th.join(30)
+        row_ = rows_logged()[0]
+        t('a stream under way on an instance that stalls: cut at once, ending with an error event, the row says stalled',
+          b'"content":"One"' in got.get('data', b'') and b'stream truncated' in got.get('data', b'') and 'stalled: stream cut' in (row_.get('note') or ''), (got.get('data', b'')[-100:], row_.get('note')))
+        old_hold, crashes.HOLD = crashes.HOLD, 2
+        plan(); t0 = time.time()
+        code, r, h = ask(tag='both-stalled')
+        t('every instance stalled: held while they are reloaded, then 503 with Retry-After, nothing forwarded',
+          code == 503 and h.get('Retry-After') and 2 <= time.time() - t0 < 6 and not Fake.seen, (code, round(time.time() - t0, 1), Fake.seen))
+        crashes.HOLD = old_hold
+        crashes.loaded_now([F, F2])
+        plan()
+        code, r, h = ask(tag='reloaded')
+        t('reloaded: the stall is over, served again', code == 200 and not crashes.stalled_copies(), (code, crashes.stalled_copies()))
+        old_wait, old_resend = gateway.UPSTREAM_WAIT, gateway.RESEND_WAIT
+        gateway.UPSTREAM_WAIT, gateway.RESEND_WAIT = 1, 1
+        plan('slow', 'ok'); Fake.slow = 2.5
+        code, r, h = ask(tag='timeout')
+        row_ = rows_logged()[0]
+        gateway.UPSTREAM_WAIT, gateway.RESEND_WAIT = old_wait, old_resend; Fake.slow = 3.0
+        t("no answer from LM Studio within the gateway's wait: said as that, never as a closed connection, and sent again",
+          code == 200 and row_.get('tries') == 2 and 'no response from LM Studio within 1 s' in (row_.get('note') or ''), (code, row_.get('note')))
+        time.sleep(2)
 
         print("the door: every API LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, LM Studio's own)")
         def streamed(what, path):
@@ -523,6 +724,66 @@ def run(box):
         rows[:] = saved
         admission._ratio.update(at=0.0, v=admission.RATIO)
 
+        print('which code the gateway runs: its digest in /hub/health, compared by every caller')
+        from localmodels import dash
+        health = json.load(urllib.request.urlopen(url + '/hub/health', timeout=5))
+        t('/hub/health carries the digest of the code the gateway loaded (its release digest)', health.get('code') == dash.deploy_digest(gateway.HOME), health.get('code'))
+        real_h, real_up = dash.health, llmshare.hub_up
+        llmshare.hub_up = lambda fresh=False: True
+        try:
+            got = {}
+            for c in ('0' * 16, '0' * 12):                     # a release's digest, and a gateway from before releases
+                dash.health = lambda fresh=False: dict(health, code=c); dash._cache.pop('stale', None); got[len(c)] = dash.door()['stale']
+            dash.health = lambda fresh=False: health; dash._cache.pop('stale', None); got['same'] = dash.door()['stale']
+        finally: llmshare.hub_up, dash.health = real_up, real_h; dash._cache.pop('stale', None)
+        t('a gateway that runs other code than the caller reads as stale, by its own digest (either form); the same code does not',
+          got == {16: True, 12: True, 'same': False}, got)
+        print('a second gateway on the same port: it leaves the running one alone')
+        os.makedirs(llmshare.INFLIGHT, exist_ok=True)
+        mine = os.path.join(llmshare.INFLIGHT, 'running-gateway-1.json'); llmshare._write(mine, dict(hub_pid=os.getpid(), since=time.time(), state='answering'))
+        port_was = gateway.PORT
+        try: code2 = gateway.main()
+        finally: gateway.PORT = port_was
+        t("a start that finds the port taken returns 1 and leaves the running gateway's in-flight markers", code2 == 1 and os.path.exists(mine), (code2, os.path.exists(mine)))
+        os.remove(mine)
+        print("prefix affinity (affinity.py): a conversation's follow-ups go back to the copy that served it, while it has a free slot")
+        from localmodels import affinity
+        affinity._seen.clear(); plan()
+        conv = lambda claim, *more: [{'role': 'system', 'content': 'You check claims.'}, {'role': 'user', 'content': claim}] + list(more)
+        turn = ({'role': 'assistant', 'content': 'reading'}, {'role': 'user', 'content': 'tool result'})
+        on = lambda tag: next((s[0] for s in Fake.seen if s[1] == tag), None)
+
+        def busy(tag, messages):                           # one slow request holds a copy's only slot
+            th = threading.Thread(target=ask, kwargs=dict(tag=tag, messages=messages)); th.start()
+            until(lambda: any(s[1] == tag for s in Fake.seen), 10)
+            return th
+        plan('slow')
+        th = busy('hold-1', conv('another conversation'))
+        code1, _, _ = ask(tag='a1', messages=conv('claim 1')); th.join()
+        code2, _, _ = ask(tag='a2', messages=conv('claim 1', *turn))
+        row2 = rows_logged()[0]
+        code3, _, _ = ask(tag='b1', messages=conv('claim 2'))
+        row3 = rows_logged()[0]
+        t('copy 1 busy: the first turn goes to copy 2', code1 == 200 and on('hold-1') == F and on('a1') == F2, Fake.seen)
+        t('its follow-up goes back to copy 2 with both copies free (without the rule, copy 1)', code2 == 200 and on('a2') == F2
+          and row2.get('affinity') == 'same', (on('a2'), row2.get('affinity')))
+        t('a new conversation with the same system prompt is not tied to it: copy 1, nothing preferred', code3 == 200 and on('b1') == F
+          and 'affinity' not in row3, (on('b1'), row3.get('affinity')))
+        plan('slow')
+        th = busy('hold-2', conv('claim 1', *turn, *turn))
+        t0_ = time.time(); code4, _, _ = ask(tag='a3', messages=conv('claim 1', *turn, *turn, *turn)); took = time.time() - t0_; th.join()
+        row4 = rows_logged(2)
+        row4 = next((r_ for r_ in row4 if r_.get('seconds', 9) < 2), row4[-1])
+        t('its copy busy: the follow-up takes the other copy at once and never waits for it', code4 == 200 and on('hold-2') == F2 and on('a3') == F
+          and took < 2 and row4.get('affinity') == 'moved', (on('hold-2'), on('a3'), round(took, 2), row4.get('affinity')))
+        plan()
+        n_ = len(affinity._seen)
+        ask(tag='e1', path='/v1/embeddings', messages=conv('claim 3'))
+        t('embeddings are never keyed', 'affinity' not in rows_logged()[0] and len(affinity._seen) == n_ == 3, (rows_logged()[0].get('affinity'), n_, len(affinity._seen)))
+        t('only digests and copy names are kept: no prompt text in memory or in the row', all(len(k) == 24 and isinstance(v[0], str) for k, v in affinity._seen.items())
+          and 'claim' not in json.dumps(rows_logged(6)) and 'claim' not in repr(affinity._seen), list(affinity._seen.items())[:1])
+        affinity._seen.clear()
+
         print('the icon: a PNG at the standard paths, drawn from the theme tokens')
         import struct, zlib
         from localmodels import icon
@@ -536,15 +797,21 @@ def run(box):
                 at += 12 + n
             rows = zlib.decompress(raw); o = y * (1 + 4 * w) + 1 + 4 * x
             return tuple(rows[o:o + 4])
-        gold = icon.tokens()['--gold']
+        die = icon.DIE
         got = {path: fetch(path) for path in ('/favicon.ico', '/favicon.png', '/apple-touch-icon.png')}
         t('/favicon.ico, /favicon.png and /apple-touch-icon.png answer PNG images, 64 and 180 pixels square',
           all(c == 200 and ct == 'image/png' and d[:8] == b'\x89PNG\r\n\x1a\n' for c, ct, d in got.values())
           and [struct.unpack('>II', got[p][2][16:24]) for p in ('/favicon.ico', '/apple-touch-icon.png')] == [(64, 64), (180, 180)], {p: v[:2] for p, v in got.items()})
         d = got['/favicon.png'][2]
-        t('its die is the gold token, its corner is transparent', pixel(d, 32, 32) == gold + (255,) and pixel(d, 0, 0)[3] == 0, (pixel(d, 32, 32), pixel(d, 0, 0)))
+        t('its die is sapphire, its corner is transparent', pixel(d, 32, 32) == die + (255,) and pixel(d, 0, 0)[3] == 0, (pixel(d, 32, 32), pixel(d, 0, 0)))
+        fonts = {f: fetch(f) for f in ('/libre-franklin-400.woff2', '/libre-franklin-500.woff2')}
+        t('the typeface of the page answers as WOFF2 from the gateway itself, both weights',
+          all(c == 200 and ct == 'font/woff2' and d[:4] == b'wOF2' for c, ct, d in fonts.values()), {f: v[:2] for f, v in fonts.items()})
+        board = fetch('/pcb.svg')
+        t('so does the circuit board behind it, as SVG', board[0] == 200 and board[1] == 'image/svg+xml' and board[2].lstrip().startswith(b'<svg'), board[:2])
         page = urllib.request.urlopen(url + '/', timeout=10).read()
         t('the page links it (tab, bookmarks, favorites)', b'rel="icon" type="image/png" sizes="64x64" href="/favicon.png"' in page and b'rel="apple-touch-icon"' in page)
+        t('the page asks for nothing from another site', not re.search(rb'(?:src|href)="https?://(?!localhost)|url\("?https?://', page.replace(b'https://haedolabs.com', b'')), re.findall(rb'https?://[^"\' )]+', page)[:5])
 
         print('the demo: generic batches through the gateway, made-up records, every request named')
         from localmodels import demo

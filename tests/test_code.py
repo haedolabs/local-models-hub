@@ -7,6 +7,7 @@ behaves (one record a minute per repeated error, newest first, old and new lines
 import json, os, re, shutil, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import errors, llmshare  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -77,7 +78,7 @@ def unimported_siblings():
 KEYWORDS = {'if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'new', 'await', 'async', 'do', 'else', 'in',
             'of', 'instanceof', 'void', 'delete', 'throw', 'yield', 'super', 'import', 'case'}
 GLOBALS = {'Math', 'JSON', 'Date', 'Number', 'String', 'Array', 'Object', 'Promise', 'Set', 'Map', 'WeakMap', 'Error', 'TypeError',
-           'RangeError', 'Boolean', 'Symbol', 'Intl', 'URL', 'URLSearchParams', 'AbortController', 'fetch', 'setTimeout', 'setInterval',
+           'RangeError', 'Boolean', 'Symbol', 'Intl', 'URL', 'URLSearchParams', 'AbortController', 'AbortSignal', 'ResizeObserver', 'fetch', 'confirm', 'alert', 'setTimeout', 'setInterval',
            'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'matchMedia',
            'encodeURIComponent', 'decodeURIComponent', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'console', 'window', 'document',
            'localStorage', 'navigator', 'location', 'performance', 'structuredClone', 'queueMicrotask'}
@@ -176,6 +177,95 @@ def test_record(box):
     open(errors.FILE, 'a').write('not json\n' + json.dumps(dict(at=time.time() - 7200, source='gateway', where='old', error='E')) + '\n')
     t('a broken line is skipped; an old one falls outside the window', len(errors.recent(5)) == 3 and len(errors.recent(180)) == 4)
 
+    class Full:                                              # a stderr on a full disk
+        def write(self, *a): raise OSError(28, 'No space left on device')
+        def flush(self): raise OSError(28, 'No space left on device')
+    was, sys.stderr = sys.stderr, Full()
+    try:
+        try: raise KeyError('y')
+        except KeyError as e: rec, err = errors.record('loop with a full disk', e), None
+    except Exception as e: rec, err = None, e
+    finally: sys.stderr = was
+    t('the recorder never raises, even when its own output fails (a background loop would end in its error handler)', err is None and rec, repr(err) if err else rec)
+
+
+def test_mcp_stdout(box):
+    import subprocess
+    env = dict(os.environ, LOCALMODELS_STATE=os.path.join(box, 'mcp-state'), PYTHONDONTWRITEBYTECODE='1')
+    msgs = [dict(jsonrpc='2.0', id=1, method='initialize', params={}),
+            dict(jsonrpc='2.0', id=2, method='tools/call', params=dict(name='no-such-tool', arguments={}))]
+    r = subprocess.run([sys.executable, os.path.join(ROOT, 'bin', 'localmodels'), 'mcp'], input=''.join(json.dumps(m) + '\n' for m in msgs),
+                       capture_output=True, text=True, env=env, timeout=60)
+    lines = [x for x in r.stdout.split('\n') if x.strip()]
+
+    def parses(x):
+        try: return isinstance(json.loads(x), dict)
+        except ValueError: return False
+    t("after a tool call that raises, every line the MCP server wrote to stdout is a JSON-RPC message (the error line goes to stderr)",
+      len(lines) == 2 and all(parses(x) for x in lines) and 'no-such-tool' in r.stderr, lines)
+    t('the error is still recorded, in the state folder the server was given', os.path.exists(os.path.join(box, 'mcp-state', 'errors.jsonl')))
+
+
+def test_no_proxy(box):
+    import http.server, threading, urllib.request
+    got = []
+
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self): got.append(self.path); self.send_response(502); self.end_headers()
+        do_POST = do_GET
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Proxy); threading.Thread(target=srv.serve_forever, daemon=True).start()
+    was = {k: os.environ.get(k) for k in ('http_proxy', 'HTTP_PROXY', 'no_proxy', 'NO_PROXY')}
+    os.environ.update(http_proxy=f'http://127.0.0.1:{srv.server_address[1]}', HTTP_PROXY=f'http://127.0.0.1:{srv.server_address[1]}')
+    for k in ('no_proxy', 'NO_PROXY'): os.environ.pop(k, None)
+    try:
+        try: urllib.request.build_opener().open(llmshare.HUB + '/hub/health', timeout=5)
+        except OSError: pass
+        t("(the test's proxy is in use: a default urllib opener sends this Mac's own requests to it)", got, got)
+        got.clear()
+        up = llmshare.hub_up(fresh=True)
+        try: llmshare.post('/v1/chat/completions', dict(model='m', messages=[dict(role='user', content='a prompt')]), 'proj', timeout=5)
+        except OSError: pass
+        t('with http_proxy set, the hub, LM Studio and the gateway are reached directly: the proxy receives nothing', not got and up is False, (got, up))
+    finally:
+        for k, v in was.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+        srv.shutdown()
+
+
+def test_agent_roots(box):
+    from localmodels import mcp_server, whois
+    home = os.path.realpath(os.path.join(box, 'home'))
+    proj, other, ssh, lib = (os.path.join(home, *p) for p in (('Documents', 'proj', 'src'), ('Documents', 'other'), ('.ssh',), ('Library', 'x')))
+    tree = os.path.join(home, 'Documents', 'proj', '.claude', 'worktrees', 'w')
+    for d in (proj, other, ssh, lib, tree): os.makedirs(d)
+    saved = os.environ.get('HOME'), os.environ.get('PWD'), whois.ROOTS, mcp_server.AGENTS
+    os.environ['HOME'], os.environ['PWD'], whois.ROOTS = home, tree, [os.path.join(home, 'Documents')]
+    mcp_server.AGENTS = os.path.join(box, 'agents')
+    for p in ('proj', 'other'):
+        os.makedirs(os.path.join(mcp_server.AGENTS, p, 'ask-1'))
+        open(os.path.join(mcp_server.AGENTS, p, 'ask-1', 'jobs.json'), 'w').write(json.dumps(dict(jobs=[])))
+    try:
+        R = mcp_server._root
+        t('the home folder named with other capitals is refused (it would put ~/Library inside the root)',
+          R(os.path.join(os.path.dirname(home), 'HOME'))[0] is None and R(home)[0] is None, R(os.path.join(os.path.dirname(home), 'HOME')))
+        t('a dot-folder of the home folder (~/.ssh) is refused, from a terminal too', R(ssh)[0] is None and '.ssh' in R(ssh)[1], R(ssh))
+        t('a folder in ~/Library is refused', R(lib)[0] is None)
+        t("from a worktree session, its project's folder is accepted", R(proj, within=mcp_server._session_folder()) == (proj, None), R(proj, within=mcp_server._session_folder()))
+        r = mcp_server.call('ask', dict(prompt='x', folder=other))
+        t("through the MCP tools a folder outside the session's project is refused", r.get('ok') is False and 'outside' in (r.get('error') or ''), r)
+        r = mcp_server.call('batch', dict(jobs=[dict(prompt='x')], folder=ssh))
+        t('and so is a dot-folder', r.get('ok') is False and '.ssh' in (r.get('error') or ''), r)
+        t("job_status serves this project's jobs, not another project's",
+          mcp_server.call('job_status', dict(job='proj/ask-1')).get('ok') is True and mcp_server.call('job_status', dict(job='other/ask-1')).get('ok') is False,
+          (mcp_server.call('job_status', dict(job='proj/ask-1')), mcp_server.call('job_status', dict(job='other/ask-1'))))
+    finally:
+        for k, v in (('HOME', saved[0]), ('PWD', saved[1])):
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+        whois.ROOTS, mcp_server.AGENTS = saved[2], saved[3]
+
 
 def test_name_tool(box):
     from localmodels import mcp_server, names
@@ -212,13 +302,41 @@ def main():
         page = open(os.path.join(ROOT, 'localmodels', 'dash.html')).read()
         missing = js_undefined(page)
         t('every name it calls or passes as a callback is defined in the page or by the browser', not missing, ', '.join(missing))
+        t("a peer that is not up: the peers chip says why, since when and when the next poll comes, and a poll-now button posts /hub/link",
+          'id="poll-now"' in page and "fetch('/hub/link', {method: 'POST'})" in page and 'next poll in' in page and 'p.since' in page and 'p.why' in page)
+        t("the color setting: Haedo Labs Sapphire is the default, with the system accent (/hub/accent) and one's own color, kept per browser",
+          '<option value="sapphire">color: Haedo Labs Sapphire</option>' in page and "fetch('/hub/accent')" in page and 'type="color" id="accent-own"' in page
+          and "localStorage.setItem('lm-accent'" in page and 'style="fill: var(--brand)"' in page)
         t('the check catches the kind of slip it is for (a helper removed while still passed as a callback)',
           js_undefined('<script>function a(xs) { return xs.map(short).join(", "); }</script>') == ['short'])
+        print('the inventories kept by hand')
+        import glob
+        from localmodels import cli, mcp_server
+        suites = sorted(os.path.basename(f) for f in glob.glob(os.path.join(ROOT, 'tests', 'test_*.py')))
+        t('every suite in tests/ is one that check and publish run (cli.TESTS)', suites == sorted(cli.TESTS), (suites, cli.TESTS))
+        tools = [x['name'] for x in mcp_server.TOOLS]
+        lists = {f: open(os.path.join(ROOT, f)).read() for f in ('localmodels/mcp_server.py', 'README.md', '.claude-plugin/plugin.json', 'commands/setup.md')}
+        rows = {f: [l for l in text.split('\n') if 'job_status' in l and 'swap_check' in l and 'tools' in l.lower()] for f, text in lists.items()}
+        missing = {f: [n for n in tools if not ls or not all(re.search(rf'\b{n}\b', l) for l in ls)] for f, ls in rows.items()}
+        t('every MCP tool is named where the tools are listed (module docstring, README, plugin manifest, setup command)', not any(missing.values()), missing)
+        print("what a client sent stays out of the hub's records")
+        from localmodels import gateway, whois
+        apps = [whois._app(a) for a in (['node', '-e', 'fetch("a secret prompt")'], ['python3', '-X', 'dev', '-c', 'print("secret")'],
+                                         ['/usr/bin/perl', '-p', '-e', 's/x/secret/'], ['python3', 'tools/run.py', '--x'], ['python3', '-m', 'pkg.mod'])]
+        t("inline code (-c, -e, -p, --eval) is never a client's name, only its interpreter's", apps == ['node', 'python', 'perl', 'run.py', 'pkg.mod'], apps)
+        w = [gateway.peer_words(x) for x in ('Error rendering prompt: "the text of a prompt"', 'RuntimeError: [METAL] Command buffer execution failed: Insufficient Memory', None)]
+        t("a peer's error text is recorded only as the engine's failure words, never as it came (it can quote a prompt)", w == ['', 'Insufficient Memory', ''], w)
         print('the error record')
         test_record(box)
+        test_mcp_stdout(box)
         print("a project names itself (the name tool)")
         test_name_tool(box)
+        print("the local agents read only the session's own project")
+        test_agent_roots(box)
+        print('requests to this Mac never go through a proxy')
+        test_no_proxy(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 

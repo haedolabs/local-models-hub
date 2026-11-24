@@ -19,7 +19,18 @@ import glob, hashlib, json, os, re, shutil, subprocess, sys, time, urllib.reques
 from . import HOME, llmshare, maint, names, runs, sessions, whois
 
 COLOR = sys.stdout.isatty() and '--no-color' not in sys.argv
-C = dict(r='31', g='32', y='33', b='34', m='35', c='36', w='37', B='1', d='2', R='7')
+TRUE = os.environ.get('COLORTERM', '').lower() in ('truecolor', '24bit')
+
+
+def _fg(rgb, n):
+    """A foreground color: exact where the terminal takes 24-bit color, else the nearest of the 256."""
+    return '38;2;%d;%d;%d' % rgb if TRUE else f'38;5;{n}'
+
+
+# Haedo Labs' palette, as on the dashboard: sapphire and its steps, the shared beige-grey, off-white, the hairline grey.
+# The letters keep their old roles: g good, y warning, r critical (off-white: no red), c the accent, m Claude, b rules.
+C = dict(g=_fg((135, 172, 232), 110), y=_fg((188, 164, 150), 181), r=_fg((236, 231, 223), 255), c=_fg((69, 120, 206), 68),
+         m=_fg((169, 198, 244), 153), b=_fg((94, 90, 84), 240), w=_fg((236, 231, 223), 255), B='1', d='2', R='7')
 INSTALLED = None                                         # SHARED/hub: the copy launchd runs the gateway from (_state_paths)
 
 
@@ -82,9 +93,10 @@ def add_provider(title, fn):
 
 
 # ---------------------------------------------------------------- gather
-def digest(folder):
+def digest(folder, pages=True):
+    """The hub's code in a folder, as 12 hex digits; pages=False leaves out the dashboard page (read per request)."""
     h = hashlib.sha1()
-    for f in sorted(glob.glob(os.path.join(folder, 'localmodels', '*.py')) + glob.glob(os.path.join(folder, 'localmodels', '*.html'))):
+    for f in sorted(glob.glob(os.path.join(folder, 'localmodels', '*.py')) + (glob.glob(os.path.join(folder, 'localmodels', '*.html')) if pages else [])):
         try: h.update(os.path.basename(f).encode()); h.update(open(f, 'rb').read())
         except OSError: pass
     return h.hexdigest()[:12]
@@ -121,7 +133,7 @@ def deploy_digest(root):
 def health(fresh=False):
     """The serving gateway's /hub/health, or None when none answers (cached 2 s)."""
     def get():
-        try: return json.load(urllib.request.urlopen(llmshare.HUB + '/hub/health', timeout=1))
+        try: return json.load(llmshare.urlopen(llmshare.HUB + '/hub/health', timeout=1))
         except (OSError, ValueError): return None
     if fresh: _cache.pop('health', None)
     return every('health', 2, get)
@@ -134,15 +146,17 @@ def door():
 
     def stale():
         h = health()
-        if h and h.get('code'): return h['code'] != deploy_digest(HOME)
+        code = (h or {}).get('code')
+        if code: return code != (deploy_digest(HOME) if len(code) == 16 else digest(HOME, pages=False))   # 12 hex: a gateway from before releases
         return os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME)
     draining = [dict(gen=r.get('gen'), pid=r['pid'], open=r.get('open')) for r in llmshare.live_gateways() if r.get('role') == 'draining']
-    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(every('stale', 10, stale)), draining=draining)
+    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(every('stale', 10, stale)), draining=draining,
+                write_problem=(health() or {}).get('write_problem') if up else None)
 
 
 def lmstudio():
     def server():
-        try: urllib.request.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=3); return 'on'
+        try: llmshare.urlopen(llmshare.LMSTUDIO + '/v1/models', timeout=3); return 'on'
         except (TimeoutError, urllib.error.URLError) as e:
             if isinstance(getattr(e, 'reason', e), (TimeoutError, OSError)) and not isinstance(getattr(e, 'reason', None), ConnectionRefusedError):
                 return (_cache.get('server') or (0, 'on'))[1]       # slow under load: as it was
@@ -175,17 +189,22 @@ def families(models):
 def batch(log_dir):
     """A batch folder's progress (plan.json, one .running file per job at work, one .json per job done)."""
     if not log_dir or not os.path.isdir(log_dir): return None
-    plan = _file(os.path.join(log_dir, 'plan.json'), lambda p: json.load(open(p))) or {}
+    plan = _file(os.path.join(log_dir, 'plan.json'), lambda p: json.load(open(p)))
+    plan = plan if isinstance(plan, dict) else {}         # a client's file: a shape it did not mean is no plan, never an exception
     done = [f for f in glob.glob(os.path.join(log_dir, '*.json')) if os.path.basename(f) not in ('summary.json', 'plan.json', 'jobs.json', 'runner.json')]
     times = []
     for f in done:
         r = _file(f, lambda p: json.load(open(p)))
         if isinstance(r, dict): times.append(r.get('seconds') or 0)
-    total = len(plan.get('jobs', [])) or None
+    jobs = plan.get('jobs')
+    total = len(jobs) if isinstance(jobs, list) and jobs else None
     typical = sorted(times)[len(times) // 2] if times else None
-    left = (total - len(done)) * (sum(times) / len(times)) / max(1, plan.get('parallel', 1)) if total and times else None
+    running = glob.glob(os.path.join(log_dir, '*.running'))
+    parallel = plan.get('parallel')                        # a number, or a word ("hub slots"): then the jobs running now stand for it
+    parallel = parallel if isinstance(parallel, int) and not isinstance(parallel, bool) and parallel > 0 else max(1, len(running))
+    left = (total - len(done)) * (sum(times) / len(times)) / parallel if total and times and total > len(done) else None
     now = []
-    for r in glob.glob(os.path.join(log_dir, '*.running')):
+    for r in running:
         try:
             raw = open(r).read(); info = json.loads(raw) if raw.startswith('{') else dict(since=float(raw or time.time()))
         except (OSError, ValueError): info = {}
@@ -201,17 +220,22 @@ def batch(log_dir):
 
 def live_runs():
     """The runs going on now (runs.py): from the last 3 hours of requests and those in flight, with each run name's last
-    pace on this Mac (the last 7 days, reread every 10 minutes) for an estimate before the first unit is done."""
+    pace and each phase's tokens per item on this Mac (the last 7 days, reread every 10 minutes) for an estimate before
+    the first unit is done, and the runs' declared plans (POST /hub/runs)."""
     rows = every('runrows', 5, lambda: llmshare.requests_log(3))
-    hist = every('runhist', 600, lambda: runs.history(llmshare.requests_log(24 * 7)))
-    return runs.progress(rows, llmshare.inflight(), history=hist)
+    week = lambda: llmshare.requests_log(24 * 7)
+    hist = every('runhist', 600, lambda: (lambda w: (runs.history(w), runs.costs(w)))(week()))
+    return runs.progress(rows, llmshare.inflight(), history=hist[0], plans=every('runplans', 5, runs.plans), costs=hist[1])
 
 
 def attach_runs(out):
     """Give each program its batch and its job: a run it named (X-Run) is the batch, and the phase it is on now (its step
     words, "check 10 of 50") the job; a phase read from step words alone is a job with no batch size known. The row's
-    'since' becomes when the batch (or the job) began, not when the program first used a model."""
-    live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
+    'since' becomes when the batch (or the job) began, not when the program first used a model. Progress that cannot be
+    read is recorded and leaves the rows as they are: it never takes the client list with it."""
+    try: live = sorted(live_runs().values(), key=lambda g: (g['kind'] != 'run', -g['started']))
+    except Exception as e:
+        from . import errors; errors.record('dash: run progress', e); return
     for r in out:
         r.setdefault('job', None)
         mine = [g for g in live if g['project'] == r['project']]
@@ -246,7 +270,10 @@ def users(shown=True):
         r['models'] += [m for m in d.get('models') or [] if m not in r['models']]
         r['since'] = min(r['since'], d.get('since') or time.time())
         for f in ('session', 'host_session', 'app', 'step'): r[f] = r[f] or d.get(f)
-        if d.get('log_dir'): r['batch'] = batch(d['log_dir'])
+        if d.get('log_dir'):
+            try: r['batch'] = batch(d['log_dir'])          # a client's folder: progress that cannot be read is recorded, the row stays
+            except Exception as e:
+                from . import errors; errors.record('dash: batch progress', e)
         elif d.get('total'): r['batch'] = dict(name='', done=d.get('done', 0), total=d['total'], pct=int(100 * d.get('done', 0) / max(1, d['total'])), left=None, now=[])
     for f in llmshare.inflight():
         r = row(('link', f['from'], f.get('project')) if f.get('from') else f.get('pid') or ('hub', f.get('project')), f.get('project'))
@@ -427,7 +454,7 @@ def snapshot():
     from . import peers
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
                 last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
-                maintenance=maint.view(), peers=peers.view(), pool=pool())
+                maintenance=maint.view(), switching=maint.switching(), peers=peers.view(), pool=pool())
 
 
 def crash_view():
@@ -449,7 +476,7 @@ def running(s=None):
     s = s or snapshot()
     rows, work = [], [c for c in s['claude'] if c['working']]
     for c in work:
-        extra = (f" · {len(c['subagents'])} subagent{'s' if len(c['subagents']) != 1 else ''}" if c['subagents'] else '') + \
+        extra = (f" · {c['subagents']} subagent{'s' if c['subagents'] != 1 else ''}" if c['subagents'] else '') + \
                 ''.join(f" · workflow {w['finished']} of {w['agents']} done" for w in c['workflows'] if w['live'] and w['running'])
         rows.append(dict(kind='claude', what=f"{c['project']} · {c['title'][:40]}{extra}", since=c['last'], pct=None, left=None))
     if not work:
@@ -559,7 +586,7 @@ def show(s, w=80, h=24):
          f" · {len(cs) - len(work)} idle · last 3 hours"]
     for c in cs[:8]:
         st = k('working'.ljust(9), 'm', 'B') if c['working'] else k(f"idle {ago(c['last'])}".ljust(9), 'd')
-        bits = (f" · {len(c['subagents'])} subagent{'s' if len(c['subagents']) != 1 else ''}" if c['subagents'] else '') + \
+        bits = (f" · {c['subagents']} subagent{'s' if c['subagents'] != 1 else ''}" if c['subagents'] else '') + \
                ''.join(f" · workflow {x['finished']}/{x['agents']}" for x in c['workflows'] if x['live'] and x['running']) + \
                (k(' · uses a local model', 'y') if c['id'] in uses else '')
         L.append(f"  {k(c['project'][:14].ljust(14), 'B')} {st} {c['title'][:36]}{bits}")
@@ -588,7 +615,7 @@ def show(s, w=80, h=24):
         big = max(sections, key=lambda x: len(x[1]) - x[2])
         if len(big[1]) <= big[2]: break
         big[1] = big[1][:-1]
-    body = [k(' local models ', 'R', 'B', 'm') + k(f"  what's running · {s['time']}", 'B')]
+    body = [k(' local models ', 'R', 'B', 'c') + k(f"  what's running · {s['time']}", 'B')]
     for title, lines, _ in sections: body += [rule(title)] + lines
     body = [fit(l, w) for l in body][:h - 1]
     body += [''] * (h - 1 - len(body))

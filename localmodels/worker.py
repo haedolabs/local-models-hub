@@ -127,7 +127,7 @@ class Worker:
             resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 8192), hard), hard))
         except (ValueError, OSError) as e: errors.record('worker: file limit', e)
         peers.LINK.leader = False                                        # a follower until it holds the peer-poller role
-        self.reg = llmshare.register(dict(gen=self.gen, run=self.run_id, release=self.release, code=gateway.code(), version=VERSION,
+        self.reg = llmshare.register(dict(gen=self.gen, run=self.run_id, release=self.release, code=gateway.code_digest(), version=VERSION,
                                           channel=CHANNEL, role='warming', accepting=False, supervisor=self.sup_pid), fill=self.counts)   # (c)
         gateway.SELF.update(role='warming', release=self.release, listeners=self.keys_view())
         if not self.line.connect(10):                                    # (d)
@@ -137,7 +137,7 @@ class Worker:
         return self.loop()
 
     def hello(self):
-        return dict(pid=os.getpid(), gen=self.gen, run=self.run_id, release=self.release, code=gateway.code(), version=VERSION, channel=CHANNEL,
+        return dict(pid=os.getpid(), gen=self.gen, run=self.run_id, release=self.release, code=gateway.code_digest(), version=VERSION, channel=CHANNEL,
                     state_protocol=llmshare.STATE_PROTOCOL, role=self.role, keys=sorted(self.servers or self.listen), accepting=self.role == 'serving')
 
     def warm(self):

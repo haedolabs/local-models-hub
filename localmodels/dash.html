@@ -7,51 +7,96 @@
 <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 :root {
+  /* Haedo Labs' design language: near-black, off-white, the shared grey and
+     hairline, and sapphire, the one color. Every series is a step of sapphire (OKLab, its own hue, lighter or darker), ordered
+     so neighbours differ most; "other" is a neutral. No red: states are told apart by words and position first; color only
+     adds weight (warning in the shared beige-grey, critical in the strongest ink). The light theme is the same on paper.
+     Haedo Labs Sapphire is the default color; the footer's color setting can take the Mac's system accent or any color
+     instead, and then every step below is drawn again from it (applyAccent): same lightness, its hue and chroma. */
   color-scheme: light;
-  --plane: #e7eae6; --surface: #f4f6f3; --ink: #1e2823; --ink-2: #4a5a51; --muted: #76847b;
-  --grid: rgba(120,98,52,0.12); --axis: rgba(120,98,52,0.38); --ring: rgba(120,98,52,0.20); --hover: rgba(120,98,52,0.06); --track: #dde3dd;
-  --s1: #a5832e; --s2: #a86c42; --s3: #2f8a7c; --s4: #7c8a83; --s5: #9c8a52; --s6: #4b955a; --s7: #57809f; --s8: #7e7399;
-  --p1: #2e7d4f; --p2: #1a9e6e; --p3: #6a8f2a; --p4: #0f6e5c; --p5: #4c9f3c; --p6: #3c5a2e; --p7: #8aa83a;   /* projects: board greens */
-  --other: #9aa89f; --good: #3f9a62; --warning: #c09a3a; --serious: #c48a5e; --critical: #bf8059; --good-text: #2f7a4c;   /* no red: soft amber and apricot */
-  --gold: #a8863a; --silicon: #2b312e; --silk: rgba(30,40,35,0.38); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%237a6634' stroke-opacity='0.08' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%237a6634' fill-opacity='0.08'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
+  --plane: #ece7df; --surface: rgba(244,241,236,0.82); --ink: #111110; --ink-2: #4a4641; --muted: #6b665f;
+  --grid: rgba(17,17,16,0.08); --axis: rgba(17,17,16,0.30); --ring: rgba(17,17,16,0.14); --hover: rgba(17,17,16,0.05); --track: #dcd6cc;
+  --s1: #0d4eb1; --s2: #85a6db; --s3: #053784; --s4: #5e89d0; --s5: #366bc5; --s6: #a6bfe4; --s7: #0f52ba; --s8: #a39d93;
+  --p1: #0d4eb1; --p2: #85a6db; --p3: #053784; --p4: #5e89d0; --p5: #366bc5; --p6: #a6bfe4; --p7: #0f52ba;
+  --other: #b5afa5; --good: #0f52ba; --warning: #8a7466; --serious: #7a6a5f; --critical: #111110; --good-text: #0d4eb1;
+  --pin: #0f52ba; --die: #161615; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.35); --pcb: .2;
+  --brand: #0f52ba; --brand-edge: rgba(15,82,186,0.55);   /* the color itself: the name's HUB, the board, a die's edge */
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --plane: #0d1311; --surface: #131b17; --ink: #e2e6dc; --ink-2: #b3bdb2; --muted: #82908a;
-    --grid: rgba(214,180,96,0.09); --axis: rgba(214,180,96,0.30); --ring: rgba(214,180,96,0.17); --hover: rgba(214,180,96,0.06); --track: #1d2924;
-    --s1: #d6b460; --s2: #c88f62; --s3: #66b8a8; --s4: #aab4ae; --s5: #d8c48e; --s6: #7fc58c; --s7: #93b4cf; --s8: #b4a8c8;
-    --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
-    --other: #5f7468; --good: #86d39c; --warning: #e6c06c; --serious: #e2ad80; --critical: #e0a07a; --good-text: #93dcab;
-    --gold: #d6b460; --silicon: #1a201d; --silk: rgba(226,230,220,0.45); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%23d6b460' stroke-opacity='0.055' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%23d6b460' fill-opacity='0.055'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
+    --plane: #111110; --surface: rgba(22,22,21,0.8); --ink: #ece7df; --ink-2: #b5afa5; --muted: #8d867c;
+    --grid: rgba(236,231,223,0.07); --axis: rgba(236,231,223,0.26); --ring: #262522; --hover: rgba(236,231,223,0.05); --track: #242320;
+    --s1: #4578ce; --s2: #bad3f9; --s3: #0f52ba; --s4: #87ace8; --s5: #6692db; --s6: #ccdffe; --s7: #225ec0; --s8: #5e5a54;
+    --p1: #4578ce; --p2: #bad3f9; --p3: #0f52ba; --p4: #87ace8; --p5: #6692db; --p6: #ccdffe; --p7: #225ec0;
+    --other: #4a4743; --good: #87ace8; --warning: #bca496; --serious: #d4c3b6; --critical: #ece7df; --good-text: #a9c6f4;
+    --pin: #4578ce; --die: #0d0d0c; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.55); --pcb: .26;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --plane: #0d1311; --surface: #131b17; --ink: #e2e6dc; --ink-2: #b3bdb2; --muted: #82908a;
-  --grid: rgba(214,180,96,0.09); --axis: rgba(214,180,96,0.30); --ring: rgba(214,180,96,0.17); --hover: rgba(214,180,96,0.06); --track: #1d2924;
-  --s1: #d6b460; --s2: #c88f62; --s3: #66b8a8; --s4: #aab4ae; --s5: #d8c48e; --s6: #7fc58c; --s7: #93b4cf; --s8: #b4a8c8;
-  --p1: #3a9a62; --p2: #22b580; --p3: #84a83a; --p4: #18907a; --p5: #5cb94a; --p6: #5b7f45; --p7: #a3c552;
-  --other: #5f7468; --good: #86d39c; --warning: #e6c06c; --serious: #e2ad80; --critical: #e0a07a; --good-text: #93dcab;
-  --gold: #d6b460; --silicon: #1a201d; --silk: rgba(226,230,220,0.45); --traces: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300' viewBox='0 0 300 300' fill='none' stroke='%23d6b460' stroke-opacity='0.055' stroke-width='1.2'%3E%3Cpath d='M0 40h80l20 20h90l15-15h95M0 150h40l25 25v60l20 20h70M120 0v30l20 20v70l-15 15v60M300 210h-60l-20-20h-70M210 300v-40l15-15h75'/%3E%3Cg fill='%23d6b460' fill-opacity='0.055'%3E%3Ccircle cx='80' cy='40' r='2.6'/%3E%3Ccircle cx='190' cy='60' r='2.6'/%3E%3Ccircle cx='65' cy='175' r='2.6'/%3E%3Ccircle cx='125' cy='195' r='2.6'/%3E%3Ccircle cx='220' cy='190' r='2.6'/%3E%3Ccircle cx='225' cy='245' r='2.6'/%3E%3C/g%3E%3C/svg%3E");
+  --plane: #111110; --surface: rgba(22,22,21,0.8); --ink: #ece7df; --ink-2: #b5afa5; --muted: #8d867c;
+  --grid: rgba(236,231,223,0.07); --axis: rgba(236,231,223,0.26); --ring: #262522; --hover: rgba(236,231,223,0.05); --track: #242320;
+  --s1: #4578ce; --s2: #bad3f9; --s3: #0f52ba; --s4: #87ace8; --s5: #6692db; --s6: #ccdffe; --s7: #225ec0; --s8: #5e5a54;
+  --p1: #4578ce; --p2: #bad3f9; --p3: #0f52ba; --p4: #87ace8; --p5: #6692db; --p6: #ccdffe; --p7: #225ec0;
+  --other: #4a4743; --good: #87ace8; --warning: #bca496; --serious: #d4c3b6; --critical: #ece7df; --good-text: #a9c6f4;
+  --pin: #4578ce; --die: #0d0d0c; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.55); --pcb: .26;
 }
+@font-face { font-family: "Libre Franklin"; font-weight: 400; font-display: swap; src: url("/libre-franklin-400.woff2") format("woff2"); }
+@font-face { font-family: "Libre Franklin"; font-weight: 500; font-display: swap; src: url("/libre-franklin-500.woff2") format("woff2"); }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--plane); color: var(--ink); height: 100%; }
-body { background-image: var(--traces); }   /* copper traces and vias, faint: the page is the board */
-body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+b, strong, th { font-weight: 500; }   /* the face has two weights, 400 and 500: nothing is drawn heavier */
+html, body { margin: 0; color: var(--ink); height: 100%; }
+html { background: var(--plane); } body { background: transparent; }   /* the ground on the page itself, so the board sits on it */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: var(--pcb);   /* a circuit board in the color (pcb.svg, */
+  background: var(--brand); -webkit-mask: url("/pcb.svg") 0 0 / 640px repeat; mask: url("/pcb.svg") 0 0 / 640px repeat; }   /* tools/pcb.py, as a mask: one tile, no seam), faint */
+body { font: 13px/1.4 "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; overflow: hidden; }
 .wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
 @media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 20px; }
-h1 { font-size: 18px; font-weight: 600; margin: 0; }
-.sub { color: var(--ink-2); margin-left: 10px; }
+header { display: grid; grid-template-columns: minmax(0, auto) minmax(50%, 1fr); align-items: center; gap: 6px 20px; }   /* name | status, then view | actions: the status keeps half the row, the subtitle gives way first */
+.h-status, .h-actions, .h-view { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
+.h-status, .h-actions { justify-content: flex-end; }
+.h-status { min-width: 0; } .h-status .chip { max-width: 100%; min-width: 0; }   /* a long status ends in an ellipsis, its whole text the tooltip */
+.h-status .chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.act { color: var(--ink); box-shadow: 0 0 0 1px var(--pin); }   /* an action that changes the hub, never mistaken for a view setting */
+#foot-left { display: inline-flex; gap: 12px; align-items: baseline; }
+h1 { margin: 0; line-height: 0; }
+h1 svg { display: block; height: 13px; width: auto; color: var(--ink); }   /* the name drawn as outlines (HWT Unit Gothic), HUB in the color */
+#accent { font: inherit; font-size: 12px; color: var(--ink-2); background: transparent; border: 0; border-radius: 6px; padding: 1px 4px; box-shadow: 0 0 0 1px var(--ring); cursor: pointer; }
+#accent-own { width: 22px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: none; cursor: pointer; vertical-align: middle; }
+#accent-own::-webkit-color-swatch-wrapper { padding: 0; } #accent-own::-webkit-color-swatch { border: 0; border-radius: 4px; }
+.title { display: flex; align-items: center; gap: 14px; min-width: 0; white-space: nowrap; } .title h1 { flex: none; }   /* the name never shrinks */
+.sub { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
-.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px rgba(134,211,156,0.35); }   /* status LEDs */
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; box-shadow: 0 0 6px var(--glow); }   /* status lights */
+.chip.ext { font: inherit; color: inherit; text-decoration: none; border: 0; }   /* an extension: a link to its page, or Start */
+a.chip.ext, button.chip.ext { cursor: pointer; } a.chip.ext:hover, button.chip.ext:hover { background: var(--hover); color: var(--ink); }
+button.chip.ext:disabled { cursor: default; } .chip.ext .go { color: var(--muted); }
+.chip.ext.busy i { animation: breathe 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .chip.ext.busy i { animation: none; } }
 .seg { display: inline-flex; background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 2px; }
 .seg button, .btn { font: inherit; border: 0; background: transparent; color: var(--ink-2); padding: 3px 10px; border-radius: 6px; cursor: pointer; }
 .seg button:hover, .btn:hover { background: var(--hover); }
-.seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 600; box-shadow: 0 0 0 1px var(--ring); }
+.seg button[aria-pressed="true"] { background: var(--plane); color: var(--ink); font-weight: 500; box-shadow: 0 0 0 1px var(--ring); }
 .btn { padding: 1px 8px; font-size: 12px; box-shadow: 0 0 0 1px var(--ring); }
+.seg button:active, .btn:active { background: var(--ring); }                       /* a press shows at once, before any answer */
+.seg button:focus-visible, .btn:focus-visible, #accent:focus-visible { outline: 2px solid var(--pin); outline-offset: 1px; }
+.btn:disabled { cursor: default; }
+.btn.busy { cursor: progress; color: var(--ink); position: relative; overflow: hidden; }   /* an action under way: a slow light along it */
+.btn.busy::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--glow), transparent);
+  transform: translateX(-100%); animation: sweep 2.4s ease-in-out infinite; pointer-events: none; }
+@keyframes sweep { to { transform: translateX(100%); } }
+.act-say { font-size: 12px; color: var(--ink-2); max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity .6s; }
+.act-say:empty { display: none; }
+.act-say .said { display: inline-flex; align-items: center; gap: 6px; }
+.act-say .said + .said::before { content: "·"; margin-right: 6px; color: var(--muted); }
+.act-say i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+.act-say .busy i { background: var(--pin); animation: breathe 1.6s ease-in-out infinite; box-shadow: 0 0 6px var(--glow); }
+.act-say .done i { background: var(--good); box-shadow: 0 0 6px var(--glow); }
+.act-say .fail { color: var(--ink); } .act-say .fail i { background: var(--warning); }
+.act-say .fading { opacity: 0; transition: opacity .8s; }
+@media (prefers-reduced-motion: reduce) { .btn.busy::after, .act-say .busy i { animation: none; } .act-say .fading { transition: none; } }
 #alerts:empty { display: none; }
 .kpis { display: flex; gap: 10px; }
 .kpis > .card { flex: 1 1 0; min-width: 0; }
@@ -61,19 +106,19 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .soc .socnums { min-width: 0; flex: 1; }
 @container soc (max-width: 175px) { .soc .pkg { width: 40px; height: 40px; padding: 4px; } .soc .die { padding: 2px; gap: 2px; } }
 @container soc (max-width: 157px) { .soc .pkg { display: none; } }
-.pkg { flex: none; width: 56px; height: 56px; padding: 5px; border-radius: 3px;   /* the chip: gold pins on four sides, the die inside */
+.pkg { flex: none; width: 56px; height: 56px; padding: 5px; border-radius: 3px;   /* the chip: fine pins on four sides, the die inside, in sapphire */
   background:
-    repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) top / 100% 3px no-repeat,
-    repeating-linear-gradient(90deg, var(--gold) 0 2px, transparent 2px 5px) bottom / 100% 3px no-repeat,
-    repeating-linear-gradient(0deg, var(--gold) 0 2px, transparent 2px 5px) left / 3px 100% no-repeat,
-    repeating-linear-gradient(0deg, var(--gold) 0 2px, transparent 2px 5px) right / 3px 100% no-repeat; }
-.die { width: 100%; height: 100%; border-radius: 3px; background: var(--silicon); padding: 3px; display: flex; flex-direction: column; gap: 3px;
-  box-shadow: inset 0 0 0 1px rgba(214,180,96,0.28); }
+    repeating-linear-gradient(90deg, var(--pin) 0 2px, transparent 2px 5px) top / 100% 3px no-repeat,
+    repeating-linear-gradient(90deg, var(--pin) 0 2px, transparent 2px 5px) bottom / 100% 3px no-repeat,
+    repeating-linear-gradient(0deg, var(--pin) 0 2px, transparent 2px 5px) left / 3px 100% no-repeat,
+    repeating-linear-gradient(0deg, var(--pin) 0 2px, transparent 2px 5px) right / 3px 100% no-repeat; }
+.die { width: 100%; height: 100%; border-radius: 3px; background: var(--die); padding: 3px; display: flex; flex-direction: column; gap: 3px;
+  box-shadow: inset 0 0 0 1px var(--brand-edge); }
 .cores { display: grid; gap: 1.5px; }
 .cores.cpu { grid-template-columns: repeat(6, 1fr); }                 /* each CPU core lit by its own load */
 .cores.gpu { grid-template-columns: repeat(8, 1fr); flex: 1; }        /* the GPU's cores, lit by its utilization */
-.cores i { display: block; aspect-ratio: 1; border-radius: 1px; background: rgba(214,180,96, var(--u, .12)); transition: background-color 1.2s ease; }
-.cores.gpu i { aspect-ratio: auto; background: rgba(102,184,168, var(--u, .12)); }
+.cores i { display: block; aspect-ratio: 1; border-radius: 1px; background: rgba(var(--core), var(--u, .12)); transition: background-color 1.2s ease; }
+.cores.gpu i { aspect-ratio: auto; background: rgba(var(--gpu), var(--u, .12)); }
 .cores.gpu.busy i { animation: breathe 3.6s ease-in-out infinite; }   /* hard at work: a slow, soft glow */
 @keyframes breathe { 50% { filter: brightness(1.16); } }
 @media (prefers-reduced-motion: reduce) { .cores.gpu.busy i { animation: none; } }
@@ -81,36 +126,38 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .row.a { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
 .row.b { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .row.c { grid-template-columns: minmax(0, 5fr) minmax(0, 3fr) minmax(0, 4fr); }
-.card { background: var(--surface); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
-.card::before { content: ''; position: absolute; inset: 5px; pointer-events: none; opacity: .55;   /* silkscreen corner marks */
-  background:
-    linear-gradient(var(--silk), var(--silk)) left top / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) left top / 1px 9px no-repeat,
-    linear-gradient(var(--silk), var(--silk)) right top / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) right top / 1px 9px no-repeat,
-    linear-gradient(var(--silk), var(--silk)) left bottom / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) left bottom / 1px 9px no-repeat,
-    linear-gradient(var(--silk), var(--silk)) right bottom / 9px 1px no-repeat, linear-gradient(var(--silk), var(--silk)) right bottom / 1px 9px no-repeat; }
-.card h2 { font: 600 13px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; margin: 0; flex: none; }   /* silkscreen */
-.card .hint { color: var(--muted); font-size: 11.5px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }   /* only the body gives way */
+.card { background: var(--surface); border-radius: 4px; box-shadow: 0 0 0 1px var(--ring); padding: 10px 14px 10px; min-width: 0; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
+.card h2 { font: 500 11px/1.5 "Libre Franklin", system-ui, sans-serif; text-transform: uppercase; letter-spacing: .2em; margin: 0; flex: none; }   /* small tracked capitals */
+.card .hint { color: var(--muted); font-size: 11px; margin: 1px 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }   /* only the body gives way */
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex: none; }
 .card .body { flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .tile { padding: 8px 12px; }
-.tile .label { color: var(--ink-2); font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .02em; white-space: nowrap; }
-.tile .value { font-size: 22px; font-weight: 600; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, always */
+.tile .label { color: var(--muted); font: 500 11px/1.5 "Libre Franklin", system-ui, sans-serif; text-transform: uppercase; letter-spacing: .2em; white-space: nowrap; }
+.tile .value { font-size: 22px; font-weight: 400; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, always */
 .tile .minor { color: var(--ink-2); font-size: 12px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile .value small { font-size: 12px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
-.tile .foot { color: var(--muted); font-size: 11.5px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .foot { color: var(--muted); font-size: 11px; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meter { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 6px; }
 .meter > div { height: 100%; border-radius: 3px; background: var(--s1); }
-.legend { display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--ink-2); font-size: 11.5px; margin: 0 0 4px; flex: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--ink-2); font-size: 11px; margin: 0 0 4px; flex: none; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .key-rect { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 .key-line { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
+.key-line.dash { width: 15px; }                                  /* a marker drawn dashed on the chart: its key is dashed too */
+#clock.stale { color: var(--warning); }                          /* no fresh snapshot: the age says how old the page is */
+#recent table { table-layout: fixed; }                          /* every column visible in the card: the step gives way, its text is the tooltip */
+#recent th, #recent td { padding-left: 5px; padding-right: 5px; max-width: none; }
+#recent th:nth-child(1) { width: 90px; } #recent th:nth-child(2) { width: 80px; } #recent th:nth-child(4) { width: 56px; }
+#recent th:nth-child(5) { width: 44px; } #recent th:nth-child(6) { width: 52px; } #recent th:nth-child(7) { width: 52px; }
+#recent td > div { overflow: hidden; text-overflow: ellipsis; }
+.fam-note { color: var(--ink-2); font-size: 11px; margin-bottom: calc(6px * var(--mk, 1)); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
-svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
+svg text { font: 11px "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--muted); font-variant-numeric: tabular-nums; }
 #models-body { --mk: 1; padding-top: var(--lead, 0px); }   /* fitModels(): --mk scales the boxes, spacing and bars; text keeps its size */
 .fam { margin-bottom: calc(8px * var(--mk, 1) + var(--gap, 0px)); }
 .fam:last-child { margin-bottom: 0; }
-.fam-name { font-weight: 600; }
-.fam-meta { color: var(--ink-2); font-size: 11.5px; }
+.fam-name { font-weight: 500; }
+.fam-meta { color: var(--ink-2); font-size: 11px; }
 .copy { display: grid; grid-template-columns: 62px minmax(0, 1fr) var(--right, auto); align-items: center; gap: calc(4px * var(--mk, 1)) calc(10px * var(--mk, 1)); margin-top: calc(6px * var(--mk, 1)); }
 .copy + .copy { margin-top: calc(6px * var(--mk, 1) + var(--gap, 0px)); }        /* room left over goes between rows, not under the name */
 #models-body.compact .copy { display: inline-flex; align-items: center; gap: calc(6px * var(--mk, 1)); margin: calc(5px * var(--mk, 1)) calc(14px * var(--mk, 1)) 0 0; }
@@ -119,87 +166,101 @@ svg text { font: 10.5px system-ui, -apple-system, "Segoe UI", sans-serif; fill: 
 #models-body.dense .fam-head { display: inline; margin-right: calc(14px * var(--mk, 1)); }
 #models-body.cols { column-count: 2; column-gap: 24px; }        /* more models still: one-line models in two columns */
 #models-body.cols .fam { break-inside: avoid; }
-.copy .nm { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copy .nm { color: var(--ink-2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (min-height: 701px) and (min-width: 1101px) { .wrap.peers { grid-template-rows: auto auto auto minmax(0, 1.45fr) minmax(0, 1fr) minmax(0, 1fr) auto; } }
 .slots { display: flex; align-items: flex-end; gap: calc(3px * var(--mk, 1)); min-width: 0; }   /* the modules share the row's free width */
 #models-body.compact .slots { display: inline-flex; }
 #models-body.compact .slot { flex: none; width: calc(30px * var(--mk, 1)); }
-.slot {                    /* a slot as a memory module: the board (gray when free, the project's color when active), its chips, */
-  position: relative; overflow: hidden;      /* and gold contacts along the bottom edge, broken by the key notch */
+.slot {                    /* a slot as a memory module: the board (the track when free, the project's sapphire when in use), */
+  position: relative; overflow: hidden;      /* eight chips, and contacts along the bottom edge broken by the key notch */
   flex: 1 1 0; min-width: calc(16px * var(--mk, 1)); max-width: calc(104px * var(--mk, 1)); height: calc(13px * var(--mk, 1));
   border-radius: calc(2px * var(--mk, 1)) calc(2px * var(--mk, 1)) 1px 1px;
   background-color: var(--track);
-  background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .16) 0 9%, transparent 9% 12.5%);    /* eight chips */
+  background-image: repeating-linear-gradient(90deg, color-mix(in srgb, var(--die) 22%, transparent) 0 9%, transparent 9% 12.5%);   /* eight chips */
   background-size: 86% 40%; background-position: 50% 48%; background-repeat: no-repeat;
   -webkit-mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
           mask: linear-gradient(#000, #000) top / 100% 80% no-repeat, linear-gradient(90deg, #000 57%, transparent 57% 65%, #000 65%) bottom / 100% 21% no-repeat;
 }
-.slot.on {                 /* in use: the board in the project's color (a shade of green; the legend names it) */
+.slot.on {                 /* in use: the board in the project's sapphire (the legend names it), its chips darker */
   background-color: var(--board);
-  background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, .34) 0 9%, transparent 9% 12.5%);
+  background-image: repeating-linear-gradient(90deg, color-mix(in srgb, var(--die) 55%, transparent) 0 9%, transparent 9% 12.5%);
 }
-.slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;
-  background: repeating-linear-gradient(90deg, var(--gold) 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
-.slot:not(.on)::after { opacity: .45; }
+.slot::after { content: ''; position: absolute; left: 4%; right: 4%; bottom: 0; height: 21%;   /* the contacts: the mark's off-white pins */
+  background: repeating-linear-gradient(90deg, rgb(var(--core)) 0 calc(1px * var(--mk, 1)), transparent calc(1px * var(--mk, 1)) calc(2.2px * var(--mk, 1))); }
+.slot:not(.on)::after { opacity: .35; }
 .slot.on::before {         /* in use: a soft light runs along the module and its contacts brighten; the phase follows the clock */
   content: ''; position: absolute; top: 0; bottom: 0; left: -45%; width: 45%;      /* (slotEl), so a refresh never restarts it */
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .17), transparent);
+  background: linear-gradient(90deg, transparent, rgb(var(--core) / .17), transparent);
   animation: current 4s ease-in-out var(--d, 0s) infinite;
 }
 .slot.on::after { animation: contacts 4s ease-in-out var(--d, 0s) infinite; }
 @keyframes current { 0% { transform: translateX(0); opacity: 0; } 12% { opacity: 1; } 60% { transform: translateX(322%); opacity: 1; } 70%, 100% { transform: translateX(322%); opacity: 0; } }
 @keyframes contacts { 0%, 100% { filter: brightness(1); } 35% { filter: brightness(1.22); } }
 @media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
-.copy .st { color: var(--ink-2); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.copy .st { color: var(--ink-2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .bandpct { display: none; }
 #models-body.tight .band, #models-body.tight .band-end { display: none; }
 #models-body.tight .bandpct { display: inline; }
 .band { grid-column: 2; display: flex; align-items: center; gap: calc(8px * var(--mk, 1)); color: var(--muted); font-size: 11px; white-space: nowrap; }
 .band.wide { grid-column: 2 / -1; }
 .band-end { grid-column: 3; color: var(--muted); font-size: 11px; white-space: nowrap; text-align: right; }   /* the right column: one width for the card */
-.band .bar { flex: 1 1 auto; height: calc(4px * var(--mk, 1)); border-radius: calc(2px * var(--mk, 1)); background: var(--track); position: relative; overflow: hidden; }
+.band .bt { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }   /* its words give way, the row never overflows */
+.band .bar { min-width: 40px; flex: 1 1 auto; height: calc(4px * var(--mk, 1)); border-radius: calc(2px * var(--mk, 1)); background: var(--track); position: relative; overflow: hidden; }
 .band .bar > div { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; background: var(--s1); }
 .band .bar > i { position: absolute; top: calc(-2px * var(--mk, 1)); width: 1px; height: calc(8px * var(--mk, 1)); background: var(--axis); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 11.5px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { text-align: left; font-weight: 500; color: var(--ink-2); font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 td { padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.sub { padding-left: 28px; color: var(--ink-2); }
-.badge { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; font-size: 11.5px; box-shadow: 0 0 0 1px var(--ring); color: var(--ink-2); white-space: nowrap; }
-.badge.warn::before { content: "!"; font-weight: 700; color: var(--critical); }
+td.sub.prog { padding-top: 0; padding-bottom: 3px; }
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; font-size: 11px; box-shadow: 0 0 0 1px var(--ring); color: var(--ink-2); white-space: nowrap; }
+.badge.warn::before { content: "!"; font-weight: 500; color: var(--critical); }
 .badge.live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
-.badge.down::before { content: "!"; font-weight: 700; color: var(--critical); }
-.badge.cycle::before { content: "↻"; font-weight: 700; color: var(--warning); }
+.badge.down::before { content: "!"; font-weight: 500; color: var(--critical); }
+.badge.cycle::before { content: "↻"; font-weight: 500; color: var(--warning); }
 .muted { color: var(--muted); }
 .ink2 { color: var(--ink-2); }
 .empty { color: var(--muted); padding: 6px 0; }
-.more { color: var(--muted); font-size: 11.5px; padding: 4px 8px; }
+.more { color: var(--muted); font-size: 11px; padding: 4px 8px; }
 .bar-thin { height: 4px; border-radius: 2px; background: var(--track); margin-top: 4px; width: 120px; }
 .bar-thin > div { height: 100%; border-radius: 2px; background: var(--s1); }
-.tracks { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 2px 0 4px; }
+.tracks { display: block; padding: 1px 0 3px; }
+.track { display: flex; align-items: center; gap: 8px; white-space: nowrap; min-width: 0; line-height: 1.5; }   /* one line: word, name, bar, numbers */
+.track .bar-thin { flex: 0 0 90px; margin: 0; }
+.track .tw { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .bar-thin.wide { width: 100%; height: 6px; border-radius: 3px; margin: 3px 0 2px; }
 .bar-thin.wide > div { border-radius: 3px; }
+.runblock { padding: 1px 0 3px; }
+.segbar { display: flex; gap: 3px; height: 6px; margin: 2px 0 3px; }
+.segbar > div { position: relative; min-width: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.segbar > div > div { height: 100%; background: var(--s1); }
+.segbar > div.running { box-shadow: 0 0 0 1px var(--s1); }
+.segbar > div.waiting > div { opacity: 0.55; }
+.segbar.inl { flex: 0 0 120px; margin: 0; }                     /* beside the run's words, on its one line */
+.phwords { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.phwords .done { color: var(--muted); }
 .chart { position: relative; flex: 1 1 auto; min-height: 60px; }
 .chart > svg { display: block; }                                    /* no inline baseline gap under the chart */
 .tablebox { max-height: 100%; overflow: hidden; }
-#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--ink); border-radius: 8px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
+#tip { position: fixed; pointer-events: none; z-index: 10; background: var(--plane); color: var(--ink); border-radius: 4px; box-shadow: 0 0 0 1px var(--ring), 0 6px 20px rgba(0,0,0,0.12); padding: 8px 10px; font-size: 12px; display: none; min-width: 140px; }
 #tip .t { color: var(--muted); margin-bottom: 4px; }
 #tip .r { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
-#tip .r b { font-weight: 600; font-variant-numeric: tabular-nums; }
+#tip .r b { font-weight: 500; font-variant-numeric: tabular-nums; }
 #tip .r span { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
 .offline { opacity: 0.45; transition: opacity .2s; }
-#banner { display: none; padding: 8px 14px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
+#banner { display: none; padding: 8px 14px; border-radius: 4px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); }
 #banner b { color: var(--critical); }
-.alert { display: flex; gap: 10px; align-items: flex-start; padding: 7px 14px; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); margin-bottom: 6px; }
+.alert { display: flex; gap: 10px; align-items: flex-start; padding: 7px 14px; border-radius: 4px; background: var(--surface); box-shadow: 0 0 0 1px var(--ring); margin-bottom: 6px; }
 .alert:last-child { margin-bottom: 0; }
-.alert .ico { flex: none; width: 18px; height: 18px; border-radius: 50%; font-weight: 700; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; color: #fff; }
+.alert .ico { flex: none; width: 18px; height: 18px; border-radius: 50%; font-weight: 500; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; color: var(--plane); }
 .alert.critical .ico { background: var(--critical); }
-.alert.warning .ico { background: var(--warning); color: #0b0b0b; }
-.alert.info .ico { background: var(--s1); }
+.alert.warning .ico { background: var(--warning); }
+.alert.info .ico { background: var(--s1); color: #ece7df; }
 .alert code, .crash-then code { font-size: 12px; }
-footer { color: var(--muted); font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; justify-content: space-between; }
-footer b { color: var(--ink-2); font-weight: 600; }
+footer { color: var(--muted); font-size: 11px; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; justify-content: space-between; }
+footer b { color: var(--ink-2); font-weight: 500; }
 #about { margin-left: auto; text-align: right; white-space: nowrap; }
 #about a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
 #about a:hover { color: var(--ink-2); }
@@ -208,11 +269,11 @@ footer b { color: var(--ink-2); font-weight: 600; }
 <body>
 <div class="wrap">
   <header>
-    <div><h1 style="display:inline">__HUB_NAME__</h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
-    <div class="chips"><span>Window:</span>
-      <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div>
-      <span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="clock" class="muted"></span>
-      <button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button></div>
+    <div class="title"><h1><svg xmlns="http://www.w3.org/2000/svg" viewBox="7 -69 1491 72" role="img" aria-label="__HUB_NAME__"><title>__HUB_NAME__</title><path class="a" fill="currentColor" d="M90.5 -15.2L35.4 -15.2L35.4 -66.8L8.4 -66.8L8.4 0L90.5 0ZM146.9 -67.9C123.6 -67.9 102.9 -58.5 102.9 -33.4C102.9 -8.3 123.6 1.1 146.9 1.1C170.2 1.1 189.8 -8.3 189.8 -33.4C189.8 -58.5 170.2 -67.9 146.9 -67.9ZM146.9 -14.3C136.9 -14.3 131.7 -19.7 131.7 -30.4L131.7 -36.4C131.7 -47.1 136.9 -52.5 146.9 -52.5C157 -52.5 162.2 -47 162.2 -36.4L162.2 -30.4C162.2 -19.8 157 -14.3 146.9 -14.3ZM234.7 -33.4C234.7 -46.4 241.3 -52.7 253.3 -52.7C263.5 -52.7 271.6 -49.3 277.1 -45L289 -61.2C280.8 -65.7 266.8 -67.9 251 -67.9C224.7 -67.9 206 -55.3 206 -33.4C206 -11.8 224.3 1.1 250 1.1C265.8 1.1 281.9 -1.1 290.1 -5.6L278.2 -21.8C272.7 -17.5 263.2 -14.1 253 -14.1C241.3 -14.1 234.7 -20.1 234.7 -33.4ZM325.3 0L328.6 -7.6L356 -7.6L359.2 0L386 0L357.6 -66.8L330.6 -66.8L300.9 0ZM342.4 -39.4L342.8 -39.4L349.9 -22.4L335 -22.4ZM482.5 -15.2L427.4 -15.2L427.4 -66.8L400.4 -66.8L400.4 0L482.5 0ZM609.7 -66.8L594.4 -36.2L579.3 -66.8L536.5 -66.8L536.5 0L559 0L559 -47.4L583.5 0L600.5 0L623.7 -46.7L623.7 0L650.7 0L650.7 -66.8ZM713.1 -67.9C689.8 -67.9 669.1 -58.5 669.1 -33.4C669.1 -8.3 689.8 1.1 713.1 1.1C736.4 1.1 756 -8.3 756 -33.4C756 -58.5 736.4 -67.9 713.1 -67.9ZM713.1 -14.3C703.1 -14.3 697.9 -19.7 697.9 -30.4L697.9 -36.4C697.9 -47.1 703.1 -52.5 713.1 -52.5C723.2 -52.5 728.4 -47 728.4 -36.4L728.4 -30.4C728.4 -19.8 723.2 -14.3 713.1 -14.3ZM821.3 0C841.6 0 858.6 -13.6 858.6 -33.4C858.6 -53.2 841.9 -66.8 821.6 -66.8L774.5 -66.8L774.5 0ZM815.2 -51.6C823.8 -51.6 829.9 -44 829.9 -33.4C829.9 -22.8 823.8 -15.2 815.6 -15.2L801.5 -15.2L801.5 -51.6ZM959.1 -15.2L904 -15.2L904 -26.3L943.5 -26.3L943.5 -41.3L904 -41.3L904 -51.6L958.4 -51.6L958.4 -66.8L877 -66.8L877 0L959.1 0ZM1058.6 -15.2L1003.5 -15.2L1003.5 -66.8L976.5 -66.8L976.5 0L1058.6 0ZM1075.6 -45.4C1075.6 -31.3 1087.1 -24 1109.5 -24L1120.7 -24C1125.6 -24 1127.7 -21.9 1127.7 -19.4C1127.7 -16.3 1125.5 -14.6 1119.2 -14.6L1109.6 -14.6C1097.5 -14.6 1089.1 -17 1082.2 -21.4L1072.7 -5.3C1083.9 -1.1 1095.8 1 1107.2 1L1122.8 1C1143.6 1 1153.4 -9.4 1153.4 -22.1C1153.4 -34.8 1144.7 -44 1127.6 -44L1107 -44C1102.8 -44 1100.5 -45.3 1100.5 -48.1C1100.5 -51 1102.8 -52.3 1107.6 -52.3L1116.7 -52.3C1126 -52.3 1134.4 -50.8 1141.4 -47.8L1148.9 -62.3C1142.9 -65.5 1130.9 -67.8 1119.4 -67.8L1104.7 -67.8C1086.8 -67.8 1075.6 -58.5 1075.6 -45.4Z"/><path class="h" fill="#0f52ba" style="fill: var(--brand)" d="M1208.5 -66.8L1208.5 0L1235.5 0L1235.5 -26.3L1265.1 -26.3L1265.1 0L1292.1 0L1292.1 -66.8L1265.1 -66.8L1265.1 -41.3L1235.5 -41.3L1235.5 -66.8ZM1310.6 -33.4C1310.6 -7.2 1330.6 1.1 1352.7 1.1C1374.8 1.1 1393.7 -7.2 1393.7 -33.4L1393.7 -66.8L1367.9 -66.8L1367.9 -30.4C1367.9 -19.8 1362.8 -14.3 1352.7 -14.3C1342.7 -14.3 1337.6 -19.7 1337.6 -30.4L1337.6 -66.8L1310.6 -66.8ZM1496.3 -16.9C1496.3 -24.8 1490.2 -31.2 1478.7 -33.4L1478.7 -33.8C1489 -36 1493.8 -42.8 1493.8 -49.9C1493.8 -61.8 1482.5 -66.8 1464.5 -66.8L1412.2 -66.8L1412.2 0L1467 0C1485.5 0 1496.3 -5.2 1496.3 -16.9ZM1465.1 -46.5C1465.1 -43.6 1462.9 -41.3 1458.2 -41.3L1439.2 -41.3L1439.2 -51.6L1457.8 -51.6C1463 -51.6 1465.1 -49.4 1465.1 -46.5ZM1467.6 -20.8C1467.6 -17.9 1465.5 -15.2 1460.3 -15.2L1439.2 -15.2L1439.2 -26.3L1460.4 -26.3C1465.5 -26.3 1467.6 -23.5 1467.6 -20.8Z"/></svg></h1><span class="sub">LM Studio gateway: clients, instances, slots and peers on this Mac</span></div>
+    <div class="h-status"><span class="chip" id="chip-door"><i></i><span>gateway</span></span><span class="chip" id="chip-lm"><i></i><span>LM Studio</span></span><span class="chip" id="chip-peers" style="display:none"><i></i><span></span></span><span class="chip" id="chip-maint" style="display:none"><i></i><span></span></span><span id="ext-chips" style="display:contents"></span></div>
+    <div class="h-view"><span>Window:</span>
+      <div class="seg" id="range"><button data-m="15">15 min</button><button data-m="60" aria-pressed="true">hour</button><button data-m="360">6 h</button><button data-m="1440">24 h</button></div></div>
+    <div class="h-actions"><span class="act-say" id="act-say" role="status" aria-live="polite"></span><button class="btn" id="poll-now" style="display:none" title="Poll every peer now (POST /hub/link): a peer back on its link shows at once">poll now</button><button class="btn act" id="power" style="display:none"></button><button class="btn act" id="peers-only" style="display:none" title="Switch this Mac's local models off and send every request to the peers (POST /hub/off {&quot;peers&quot;: true}): its instances are unloaded once the requests on them finish, nothing is cut, and a request no peer can take gets 503 until turned on">peers only</button><span id="peer-power" style="display:contents"></span></div>
   </header>
   <div>
     <div id="banner"><b>Gateway unreachable.</b> <span class="ink2">Start it with <code>localmodels start</code>; this page reconnects automatically.</span></div>
@@ -230,14 +291,14 @@ footer b { color: var(--ink-2); font-weight: 600; }
   </section>
 
   <section class="row a">
-    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one module per slot (in use: the project's green); bar: tokens processed since load against the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
-    <article class="card"><div class="card-head"><div><h2>Concurrent requests, by project</h2><div class="hint" id="ans-hint">top line: total slots across loaded instances; right edge: now</div></div><button class="btn" data-table="ans">table</button></div>
+    <article class="card" id="models"><h2>Loaded models</h2><div class="hint">one module per slot, in its project's color when in use; bar: tokens since load vs. the recycle threshold</div><div class="body" id="models-body"></div><div class="legend" id="models-legend" style="margin-top:6px"></div></article>
+    <article class="card"><div class="card-head"><div><h2>Concurrent requests, by project</h2><div class="hint" id="ans-hint">dashed line: slots across loaded instances; right edge: now</div></div><button class="btn" data-table="ans">table</button></div>
       <div class="legend" id="ans-legend"></div><div class="chart" id="ans"></div></article>
   </section>
 
   <section class="row b">
     <article class="card"><div class="card-head"><div><h2>Throughput</h2><div class="hint">completion tokens/s, all projects (completed requests)</div></div><button class="btn" data-table="tok">table</button></div>
-      <div class="chart" id="tok"></div></article>
+      <div class="legend" id="tok-legend"></div><div class="chart" id="tok"></div></article>
     <article class="card"><div class="card-head"><div><h2>Requests by project</h2><div class="hint" id="req-hint"></div></div><button class="btn" data-table="req">table</button></div>
       <div class="legend" id="req-legend"></div><div class="chart" id="req"></div></article>
     <article class="card"><div class="card-head"><div><h2>Memory used</h2><div class="hint" id="mem-hint">sampled every 15 s</div></div><button class="btn" data-table="mem">table</button></div>
@@ -245,12 +306,12 @@ footer b { color: var(--ink-2); font-weight: 600; }
   </section>
 
   <section class="row c">
-    <article class="card"><h2>Clients</h2><div class="hint">processes with a request in flight or a lease held (2 min idle); batch and job progress per run</div><div class="body" id="users"></div></article>
+    <article class="card"><h2>Clients</h2><div class="hint">requests in flight or a lease held (2 min idle); run progress and finish estimates</div><div class="body" id="users"></div></article>
     <article class="card"><h2>Claude Code sessions</h2><div class="hint">sessions active in the last 3 h, newest first</div><div class="body" id="claude"></div></article>
     <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
 
-  <footer><span id="about"></span></footer>
+  <footer><span id="foot-left"><span id="clock" class="muted"></span><button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button><select id="accent" title="The dashboard's color: Haedo Labs Sapphire, the Mac's system accent (System Settings > Appearance), or a color of your own" aria-label="Color"><option value="sapphire">color: Haedo Labs Sapphire</option><option value="system">color: system accent</option><option value="own">color: your own</option></select><input type="color" id="accent-own" value="#0f52ba" title="Your own color" aria-label="Your own color" hidden></span><span id="about"></span></footer>
 </div>
 <div id="tip"></div>
 <script>
@@ -286,12 +347,12 @@ function sv(tag, attrs) { const e = document.createElementNS(NS, tag); for (cons
 function color(project) {
   if (project === 'direct to LM Studio') return 'var(--other)';
   const slot = COLORS[project];
-  return slot ? `var(--p${slot})` : 'var(--other)';         // projects: a palette of greens, each a plausible module board (blue is "all projects")
+  return slot ? `var(--p${slot})` : 'var(--other)';         // projects: steps of sapphire, neighbours apart ("other" is a neutral)
 }
 function compact(n) { n = +n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'K' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n)); }
 function full(n) { return Math.round(+n || 0).toLocaleString(); }
-function clock(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}); }
-function clockS(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'}); }
+function clock(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}); }        // 24-hour, as the
+function clockS(t) { return new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'}); }   // server's words
 function ago(t) { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? s + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h'; }
 function finishAt(t) {          // a time ahead in local time, with the day when it is not today
   const d = new Date(t * 1000), now = new Date(), tm = new Date(now); tm.setDate(now.getDate() + 1);
@@ -303,10 +364,11 @@ function span(s) {               // a stretch of time in the unit that reads bes
   s = Math.max(0, Math.round(s));
   if (s < 90) return s + ' s';
   if (s < 5400) return Math.round(s / 60) + ' min';
-  if (s < 172800) { const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60); return h + ' h' + (m ? ` ${m} min` : ''); }
-  const d = Math.floor(s / 86400), h = Math.round((s % 86400) / 3600); return d + ' d' + (h ? ` ${h} h` : '');
+  if (s < 172800) { s = Math.round(s / 60) * 60; const h = Math.floor(s / 3600), m = (s % 3600) / 60; return h + ' h' + (m ? ` ${m} min` : ''); }   // rounded first: never "1 h 60 min"
+  s = Math.round(s / 3600) * 3600; const d = Math.floor(s / 86400), h = (s % 86400) / 3600; return d + ' d' + (h ? ` ${h} h` : '');
 }
 function left(s) { return span(s) + ' left'; }
+function axisMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * p >= v) return m * p; return 10 * p; }   // a chart's top: little room wasted
 function niceMax(v) { if (!(v > 0)) return 1; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return 10 * p; }
 function ticks(max, n = 4) { const s = niceMax(max / n); const out = []; for (let v = 0; v <= max + 1e-9; v += s) out.push(+v.toFixed(6)); return out; }
 function kindWords(k) { return k || 'other'; }
@@ -369,7 +431,8 @@ function crosshair(f, xs, onAt) {
   f.svg.append(line, hit);
 }
 function legend(box, items) {                              // an empty legend takes no space
-  box.replaceChildren(...items.map(it => el('span', {}, el('i', {class: it.line ? 'key-line' : 'key-rect', style: `background:${it.color}`}), it.name)));
+  box.replaceChildren(...items.map(it => el('span', {}, el('i', {class: it.dash ? 'key-line dash' : it.line ? 'key-line' : 'key-rect',
+    style: it.dash ? `background:repeating-linear-gradient(90deg, ${it.color} 0 3px, transparent 3px 6px)` : `background:${it.color}`}), it.name)));
   box.style.display = items.length ? '' : 'none';
 }
 function tableView(box, head, rows) {
@@ -395,14 +458,32 @@ function markEvents(f, t0, t1) {
   }
 }
 function crashIn(a, b) { return crashList().find(c => c.at >= a && c.at < b); }
+function recycleIn(a, b) { return recycleList().find(r => r.event === 'recycled' && r.at >= a && r.at < b); }
+function eventKeys(t0, t1) {       // the dashed rules a chart draws, named in its legend (only those in the window)
+  const out = [];
+  if (crashList().some(c => c.at >= t0 && c.at <= t1)) out.push({name: 'crash', color: 'var(--critical)', dash: true});
+  if (recycleList().some(r => r.event === 'recycled' && r.at >= t0 && r.at <= t1)) out.push({name: 'recycle', color: 'var(--warning)', dash: true});
+  return out;
+}
+function eventRows(a, b) {         // the same markers in the crosshair's tooltip, at the minute hovered
+  const c = crashIn(a, b), r = recycleIn(a, b);
+  return [].concat(c ? [{name: `crash, ${c.which}`, color: 'var(--critical)', line: true, value: clockS(c.at)}] : [],
+                   r ? [{name: `recycle${r.model ? ', ' + short(r.model) : ''}`, color: 'var(--warning)', line: true, value: clockS(r.at)}] : []);
+}
+function emptyNote(f, words) {     // a chart with nothing in its window says so in its plot area (the axes and reference lines stay)
+  const tx = sv('text', {x: (f.P.l + f.W - f.P.r) / 2, y: f.P.t + f.height / 2, 'text-anchor': 'middle'}); tx.textContent = words; f.svg.append(tx);
+}
+function capLine(f, yy, label) {   // a reference line (capacity): dashed and muted, never mistaken for a series; labeled at its right end
+  f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '4 3'}));
+  const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = label; f.svg.append(tx);
+}
 
 // ---------------------------------------------------------------- charts
 function renderAnswering() {
   const box = $('ans'); if (!H) return;
   const names = projectsIn(H.answering).filter(p => H.answering[p].some(v => v > 0.001));
-  const items = names.map(p => ({name: p, color: color(p)})).concat([{name: 'queued', color: 'var(--ink-2)', line: true}]);
-  legend($('ans-legend'), items);
   const t = i => H.start + (i + 0.5) * H.step, n = H.n;
+  legend($('ans-legend'), names.slice().reverse().map(p => ({name: p, color: color(p)})).concat([{name: 'queued', color: 'var(--ink-2)', line: true}], eventKeys(H.start, H.start + n * H.step)));
   if (tables.ans) {
     const rows = [], per = Math.max(1, Math.round(60 / H.step));
     for (let i = 0; i < n; i += per) {
@@ -412,7 +493,7 @@ function renderAnswering() {
     return tableView(box, ['minute', ...names, 'queued'], rows.reverse());
   }
   const tot = Array.from({length: n}, (_, i) => names.reduce((s, p) => s + H.answering[p][i], 0));
-  const ymax = niceMax(Math.max(H.at_once || 0, ...tot, ...H.waiting, 1));
+  const ymax = axisMax(Math.max((H.at_once || 0) * 1.1, ...tot, ...H.waiting, 1));
   const f = frame(box, H.start, H.start + n * H.step, ymax);
   const xs = Array.from({length: n}, (_, i) => f.x(t(i)));
   const base = new Array(n).fill(0);
@@ -428,18 +509,15 @@ function renderAnswering() {
   });
   let w = ''; xs.forEach((x, i) => w += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(H.waiting[i]).toFixed(1));
   f.svg.append(sv('path', {d: w, fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 2, 'stroke-linejoin': 'round'}));
-  if (H.at_once) {
-    const yy = f.y(H.at_once);
-    f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
-    const tx = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); tx.textContent = `${H.at_once} slots`; f.svg.append(tx);
-  }
+  if (H.at_once) capLine(f, f.y(H.at_once), `${H.at_once} slots`);
+  if (!tot.some(v => v > 0.001) && !H.waiting.some(v => v > 0.001)) emptyNote(f, `No requests in the ${rangeWords()}`);
   markEvents(f, H.start, H.start + n * H.step);
   crosshair(f, xs, (i, cx, cy) => {
-    const c = crashIn(H.start + i * H.step - H.step, H.start + (i + 1) * H.step);
     showTip(cx, cy, clockS(H.start + i * H.step) + ' – ' + clockS(H.start + (i + 1) * H.step),
-      names.map(p => ({name: p, color: color(p), value: H.answering[p][i].toFixed(1)})).concat(
-        [{name: 'all active', color: 'var(--s1)', value: tot[i].toFixed(1)}, {name: 'queued', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)}],
-        c ? [{name: `crash, ${c.which}`, color: 'var(--critical)', line: true, value: clockS(c.at)}] : []));
+      names.slice().reverse().map(p => ({name: p, color: color(p), value: H.answering[p][i].toFixed(1)})).concat(
+        [{name: 'all projects', color: 'var(--ink-2)', value: tot[i].toFixed(1)}, {name: 'queued', color: 'var(--ink-2)', line: true, value: H.waiting[i].toFixed(1)},
+         {name: 'slots', color: 'var(--muted)', line: true, value: String(H.at_once || 0)}],
+        eventRows(H.start + i * H.step - H.step, H.start + (i + 1) * H.step)));
   });
   box.replaceChildren(f.svg);
 }
@@ -452,8 +530,10 @@ function renderTokens() {
     for (let i = 0; i < n; i += per) rows.push([clock(H.start + i * H.step), full(H.tokens.slice(i, i + per).reduce((s, v) => s + v, 0) / Math.min(per, n - i))]);
     return tableView(box, ['minute', 'tokens/s'], rows.reverse());
   }
+  legend($('tok-legend'), eventKeys(H.start, H.start + n * H.step));
   const ymax = niceMax(Math.max(...H.tokens, 10));
   const f = frame(box, H.start, H.start + n * H.step, ymax);
+  if (!H.tokens.some(v => v > 0)) emptyNote(f, `No completed requests in the ${rangeWords()}`);
   const xs = Array.from({length: n}, (_, i) => f.x(t(i)));
   let d = '', a = '';
   xs.forEach((x, i) => { d += (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(H.tokens[i]).toFixed(1); });
@@ -464,7 +544,8 @@ function renderTokens() {
   f.svg.append(sv('circle', {cx: xs[n - 1], cy: f.y(last), r: 4, fill: 'var(--s1)', stroke: 'var(--surface)', 'stroke-width': 2}));
   const tx = sv('text', {x: xs[n - 1] + 8, y: f.y(last) + 4}); tx.textContent = full(last) + '/s'; tx.style.fill = 'var(--ink-2)'; f.svg.append(tx);
   markEvents(f, H.start, H.start + n * H.step);
-  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(H.start + i * H.step), [{name: 'tokens a second', color: 'var(--s1)', line: true, value: full(H.tokens[i])}]));
+  crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(H.start + i * H.step), [{name: 'tokens/s', color: 'var(--s1)', line: true, value: full(H.tokens[i])}]
+    .concat(eventRows(H.start + i * H.step - H.step, H.start + (i + 1) * H.step))));
   box.replaceChildren(f.svg);
 }
 
@@ -472,15 +553,16 @@ function renderRequests() {
   const box = $('req'); if (!H) return;
   const Q = H.requests, names = projectsIn(Q.by);
   $('req-hint').textContent = `each column is ${Q.step >= 3600 ? Q.step / 3600 + ' hours' : Q.step >= 60 ? Q.step / 60 + ' minute' + (Q.step > 60 ? 's' : '') : Q.step + ' seconds'}`;
-  legend($('req-legend'), names.map(p => ({name: p, color: color(p)})));
+  legend($('req-legend'), names.slice().reverse().map(p => ({name: p, color: color(p)})));   // top of each column first
   if (tables.req) {
     const rows = [];
     for (let i = Q.n - 1; i >= 0; i--) { const vals = names.map(p => Q.by[p][i]); if (vals.some(v => v)) rows.push([clock(Q.start + i * Q.step), ...vals.map(full)]); }
     return tableView(box, ['from', ...names], rows);
   }
   const tot = Array.from({length: Q.n}, (_, i) => names.reduce((s, p) => s + Q.by[p][i], 0));
-  const ymax = niceMax(Math.max(...tot, 4));
+  const ymax = axisMax(Math.max(...tot, 4) * 1.05);
   const f = frame(box, Q.start, Q.start + Q.n * Q.step, ymax, v => full(v));
+  if (!tot.some(v => v > 0)) emptyNote(f, `No requests in the ${rangeWords()}`);
   const band = (f.W - f.P.l - f.P.r) / Q.n, bw = Math.max(2, Math.min(24, band - 2));
   for (let i = 0; i < Q.n; i++) {
     let acc = 0;
@@ -517,7 +599,7 @@ function renderMemory() {                    // this Mac, and each peer stacked 
     const rows = []; for (let i = M.t.length - 1; i >= 0; i -= 4) rows.push([clockS(M.t[i]), ...series.map(s => gb(s.v[i])), ...(stacked ? [gb(sum[i])] : [])]);
     return tableView(box, ['time', ...(stacked ? series.map(s => s.name).concat(['total']) : ['memory used'])], rows);
   }
-  const f = frame(box, H.start, H.now, Math.max(...cap), v => v + ' GB');
+  const f = frame(box, H.start, H.now, Math.max(...cap), v => String(v));      // the unit is in the description
   const xs = M.t.map(f.x), line = ys => xs.map((x, i) => (i ? 'L' : 'M') + x.toFixed(1) + ',' + f.y(ys[i]).toFixed(1)).join('');
   let base = M.t.map(() => 0);
   for (const s of series) {
@@ -528,14 +610,15 @@ function renderMemory() {                    // this Mac, and each peer stacked 
     base = hi;
   }
   const li = M.t.length - 1, flat = cap.every(c => c === cap[li]), yy = f.y(cap[li]);
-  if (flat) f.svg.append(sv('line', {x1: f.P.l, x2: f.W - f.P.r, y1: yy, y2: yy, stroke: 'var(--ink-2)', 'stroke-width': 1}));
-  else f.svg.append(sv('path', {d: line(cap), fill: 'none', stroke: 'var(--ink-2)', 'stroke-width': 1}));
-  const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${cap[li]} GB`; f.svg.append(lt);
+  if (flat) capLine(f, yy, `${cap[li]} GB`);
+  else { f.svg.append(sv('path', {d: line(cap), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1, 'stroke-dasharray': '4 3'}));
+         const lt = sv('text', {x: f.W - f.P.r + 6, y: yy + 4}); lt.textContent = `${cap[li]} GB`; f.svg.append(lt); }
   f.svg.append(sv('circle', {cx: xs[li], cy: f.y(sum[li]), r: 4, fill: series[series.length - 1].color, stroke: 'var(--surface)', 'stroke-width': 2}));
-  const vt = sv('text', {x: xs[li] + 8, y: f.y(sum[li]) + 4}); vt.textContent = sum[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
+  const vy = Math.abs(f.y(sum[li]) - yy) < 13 ? yy + 15 : f.y(sum[li]) + 4;            // clear of the capacity label at the same edge
+  const vt = sv('text', {x: xs[li] + 8, y: vy}); vt.textContent = sum[li].toFixed(0) + ' GB'; vt.style.fill = 'var(--ink-2)'; f.svg.append(vt);
   crosshair(f, xs, (i, cx, cy) => showTip(cx, cy, clockS(M.t[i]), stacked
-    ? series.map(s => ({name: s.name, color: s.color, value: gb(s.v[i])})).concat([{name: 'total', color: 'var(--ink-2)', line: true, value: `${gb(sum[i])} of ${cap[i]} GB`}])
-    : [{name: 'memory used', color: 'var(--s1)', line: true, value: gb(M.used[i])}]));
+    ? series.map(s => ({name: s.name, color: s.color, value: gb(s.v[i])})).concat([{name: 'total', color: 'var(--muted)', line: true, value: `${gb(sum[i])} of ${cap[i]} GB`}])
+    : [{name: 'memory used', color: 'var(--s1)', line: true, value: `${gb(M.used[i])} of ${cap[i]} GB`}]));
   box.replaceChildren(f.svg);
 }
 
@@ -550,8 +633,8 @@ function renderCharts() {
   const np = Object.keys(Q.by).length;
   $('k-req-f').textContent = `${rangeWords()} · ${np} project${np === 1 ? '' : 's'}`;
   const MM = H.memory, capNow = MM.cap && MM.cap.length ? MM.cap[MM.cap.length - 1] : MM.total;
-  $('mem-hint').textContent = Object.keys(MM.hosts || {}).length ? `every 15 seconds, stacked by host; top line: total memory, ${capNow} GB`
-    : `every 15 seconds; the line across the top is the Mac's ${MM.total} GB`;
+  $('mem-hint').textContent = Object.keys(MM.hosts || {}).length ? `GB, every 15 s, stacked by host; dashed line: total memory, ${capNow} GB`
+    : `GB, every 15 s; dashed line: this Mac's ${MM.total} GB`;
 }
 function rangeWords() { return {15: 'last 15 minutes', 60: 'last hour', 360: 'last 6 hours', 1440: 'last 24 hours'}[RANGE]; }
 
@@ -567,35 +650,57 @@ function renderNow() {
   const ps = S.peers || [], up = ps.filter(p => p.state === 'up'), serve = S.link && S.link.serving ? (S.link.listening || 'serving as a peer') : '';
   $('chip-peers').style.display = ps.length || serve ? '' : 'none';
   document.querySelector('.wrap').classList.toggle('peers', ps.length > 0);
+  $('poll-now').style.display = up.length < ps.length ? '' : 'none';
   if (ps.length || serve) {
+    const why = p => { const w = String(p.why || '').split(/[:(]/)[0].trim(); return w.length > 48 ? w.slice(0, 47) + '…' : w; };   // the whole reason is the tooltip
+    const away = p => p.state === 'down' ? `peer ${p.name}: unreachable${p.since ? ' since ' + clock(p.since) : ''}${why(p) ? ` (${why(p)})` : ''} · next poll in ${Math.max(0, Math.round((p.next_at || 0) - S.time))} s`
+      : p.state === 'refused' ? `peer ${p.name}: auth failed` : p.off ? `peer ${p.name}: switched off` : `peer ${p.name}: ${p.state}`;
     const said = [ps.length ? (up.length === ps.length ? `peers ${up.length}/${ps.length} reachable: ${up.map(p => p.name).join(', ')}`
-      : ps.filter(p => p.state !== 'up').map(p => `peer ${p.name}: ${p.state === 'down' ? 'unreachable' : p.state === 'refused' ? 'auth failed' : p.state}`).join(' · ')) : '', serve].filter(Boolean).join(' · ');
+      : ps.filter(p => p.state !== 'up').map(away).join(' · ')) : '', serve].filter(Boolean).join(' · ');
     chip('chip-peers', up.length === ps.length && (!serve || /^listening/.test(serve)), said, said);
+    $('chip-peers').title = ps.map(p => p.words).filter(Boolean).join('\n');
     if (up.length < ps.length && ps.every(p => p.state === 'up' || p.state === 'maintenance')) $('chip-peers').querySelector('i').style.background = 'var(--warning)';
-    $('ans-hint').textContent = 'top line: total slots (local instances + peer replicas available to this gateway); right edge: now';
+    $('ans-hint').textContent = 'dashed line: slots on this Mac and its peers; right edge: now';
   }
   const mt = S.maintenance, mc = $('chip-maint');
   mc.style.display = mt ? '' : 'none';
-  if (mt) { mc.querySelector('span').textContent = mt.words; mc.querySelector('i').style.background = mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
+  mc.title = mt ? mt.words : '';
+  if (mt) { mc.querySelector('span').textContent = mt.off ? mt.words.replace(/; turn on: localmodels on$/, '') : mt.words; mc.querySelector('i').style.background = mt.off ? 'var(--other)' : mt.phase === 'on' ? 'var(--critical)' : 'var(--warning)'; }
+  const pw = $('power');                                 // this Mac's local models off or on (POST /hub/off, /hub/on)
+  pw.style.display = '';
+  powerButton(pw, 'here', mt, S.switching, '', 'turn models');
+  $('peers-only').style.display = ps.length && !(mt && mt.off && mt.peers) && !pend.here && !pw.disabled ? '' : 'none';   // local off, work on the peers (from on, or from off)
+  const pp = $('peer-power');                           // each peer's local models off or on from here (POST /hub/link/off, /hub/link/on)
+  for (const p of ps) {
+    let b = pp.querySelector(`[data-peer="${CSS.escape(p.name)}"]`);
+    const show = p.state === 'up' || !!p.off || !!pend['peer:' + p.name] || !!(b && b.classList.contains('busy'));
+    if (!show) { if (b) b.remove(); continue; }
+    if (!b) { b = el('button', {class: 'btn act'}); b.dataset.peer = p.name; pp.appendChild(b); }
+    powerButton(b, 'peer:' + p.name, p.maintenance, p.switching, p.name, `turn ${p.name}`);
+  }
+  for (const b of [...pp.children]) if (!ps.some(p => p.name === b.dataset.peer)) b.remove();
+  renderSaid();
   // stat tiles
   const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
-  let busy = fams.reduce((s, f) => s + f.busy, 0), cap = fams.reduce((s, f) => s + f.at_once, 0);
-  const hosts = [`this Mac ${busy}/${cap}`];
+  const offHere = !!(mt && mt.off), refused = !!(mt && mt.phase === 'on' && !mt.peers);   // switched off: this Mac's slots take nothing; refusing: nothing does
+  let busy = offHere ? 0 : fams.reduce((s, f) => s + f.busy, 0), cap = offHere ? 0 : fams.reduce((s, f) => s + f.at_once, 0);
+  const hosts = [offHere ? 'this Mac off' : `this Mac ${busy}/${cap}`];
   for (const p of (S.peers || []).filter(p => p.state === 'up')) {
     let b = 0, c = 0;
     for (const f of Object.values(p.families || {})) if (f.match) { b += f.busy || 0; c += f.slots || 0; }
-    if (c) { busy += b; cap += c; hosts.push(`${p.name} ${b}/${c}`); }
+    if (c && !refused) { busy += b; cap += c; hosts.push(`${p.name} ${b}/${c}`); }
   }
   $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} slots`));
   $('k-ans').title = hosts.join(' · ');
   const answering = S.users.filter(u => u.answering).map(u => u.project);
   const fin = u => (u.batch && u.batch.finish) || (u.job && u.job.finish);
   const ends = S.users.filter(fin);
-  $('k-ans-f').textContent = ends.length ? `${ends[0].project}: ${ends[0].batch && ends[0].batch.finish ? 'batch' : 'job'} done about ${finishAt(fin(ends[0]))}`
+  $('k-ans-f').textContent = ends.length ? `${ends[0].project} done ~${finishAt(fin(ends[0]))}`
     : answering.length ? [...new Set(answering)].join(', ') : 'idle';
   const waiting = S.users.reduce((s, u) => s + (u.waiting || 0), 0), q = S.door.queue || {};
   $('k-wait').textContent = String(waiting);
-  $('k-wait-f').textContent = waiting ? `${q.people || 0} interactive, ${q.others || 0} batch/other · interactive first` : `7 d: ${S.waits7.waits} waits > 2 s · ${Math.round(S.waits7.minutes)} min`;
+  $('k-wait-f').title = waiting ? 'interactive requests (chat, ask) are admitted before batch and other requests' : '';
+  $('k-wait-f').textContent = waiting ? `${q.others || 0} batch · ${q.people || 0} interactive` : `7 d: ${full(S.waits7.waits)} waits > 2 s · ${S.waits7.minutes >= 120 ? Math.round(S.waits7.minutes / 60) + ' h' : span(S.waits7.minutes * 60)}`;
   const m = S.mac, P = S.pool || {used: m.used, total: m.total, hosts: [{name: 'this Mac', used: m.used, total: m.total}]};
   const fill = h => h.used / Math.max(1, h.total), share = fill(P), worst = Math.max(...P.hosts.map(fill));   // color: the fullest host
   const hue = v => v > 0.92 ? 'var(--critical)' : v > 0.85 ? 'var(--warning)' : '';
@@ -609,9 +714,32 @@ function renderNow() {
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
   $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
   guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
-  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('tiles (cut lines)', tipCut);
+  guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); guard('tiles (cut lines)', tipCut);
+  guard('title', () => renderTitle(busy, cap, waiting)); guard('rects', writeRects);
 }
 
+const TITLE = document.title;
+function renderTitle(busy, cap, waiting) {    // a background tab still tells the state: active of slots, queued, switched off, alerts
+  const n = $('alerts').children.length, off = S.maintenance && S.maintenance.off && !S.maintenance.peers;
+  document.title = [off ? 'off' : `${busy}/${cap} active` + (S.maintenance && S.maintenance.peers ? ' on peers' : ''), waiting ? `${waiting} queued` : '', n ? `${n} alert${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ') + ' – ' + TITLE;
+}
+let fresh = 0;                                // when the last snapshot arrived (this browser's clock)
+function staleness() {
+  const c = $('clock'); if (!S || !fresh) return;
+  const age = (Date.now() - fresh) / 1000, old = age > 10;
+  c.classList.toggle('stale', old);
+  c.textContent = 'updated ' + S.clock + (old ? ` · ${span(age)} ago, not current` : '');
+  if (old) document.title = 'not current – ' + TITLE;
+}
+const RECTS = new URLSearchParams(location.search).has('rects');
+function writeRects() {          // ?rects (localmodels pictures): each card's box in CSS pixels, written into the page for a headless --dump-dom
+  if (!RECTS) return;
+  const box = e => { const r = e.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; };
+  const out = {vw: innerWidth, vh: innerHeight, models: box($('models-body').closest('.card')), ans: box($('ans').closest('.card')), users: box($('users').closest('.card'))};
+  document.querySelectorAll('.kpis > .card').forEach((e, i) => out['tile' + i] = box(e));
+  let pre = $('lm-rects'); if (!pre) { pre = el('pre', {id: 'lm-rects', hidden: ''}); document.body.append(pre); }
+  pre.textContent = JSON.stringify(out);
+}
 function tipCut() {      // a tile line too long for its column ends in an ellipsis (never a second line): its whole text is its tooltip
   for (const e of document.querySelectorAll('.kpis .value, .kpis .minor, .kpis .foot')) {
     const cut = e.scrollWidth > e.clientWidth + 1;
@@ -633,9 +761,9 @@ function fitModels() {   // any number of models: rows grow to fill the card (ne
   const search = (lo, hi, ok) => { for (let i = 0; i < 7; i++) { const k = (lo + hi) / 2; set(k); if (ok()) lo = k; else hi = k; } set(lo); return lo; };
   const right = () => {     // one right column for every row (state, recycle %), as wide as its widest label: modules and bars end together
     box.style.setProperty('--right', 'auto');
-    const w = Math.max(0, ...[...box.querySelectorAll('.st, .band-end')].filter(e => e.offsetParent).map(e => e.scrollWidth));
-    box.style.setProperty('--right', w ? Math.ceil(w) + 2 + 'px' : 'auto');        // + 2: scrollWidth rounds a fractional text width down
-  };
+    const w = Math.min(box.clientWidth * 0.42, Math.max(0, ...[...box.querySelectorAll('.st, .band-end')].filter(e => e.offsetParent).map(e => e.scrollWidth)));
+    box.style.setProperty('--right', w ? Math.ceil(w) + 2 + 'px' : 'auto');        // + 2: scrollWidth rounds a fractional text width down;
+  };                                                                                // at most 42% of the card: a long state ends in an ellipsis
   box.classList.remove('tight', 'compact', 'dense', 'cols'); box.style.setProperty('--gap', '0px'); box.style.setProperty('--lead', '0px'); set(1); right();
   for (const fold of ['tight', 'compact', 'dense', 'cols']) { if (!over()) break; box.classList.add(fold); right(); }   // bands, rows, meta, then two columns
   if (over()) { search(0.8, 1, () => !over()); return; }
@@ -649,6 +777,9 @@ function fitModels() {   // any number of models: rows grow to fill the card (ne
   else box.style.setProperty('--lead', (rest / 2).toFixed(1) + 'px');                  // one row: centered
 }
 
+function stateTips() {   // a state cut to fit the right column: its whole text is its tooltip
+  for (const e of $('models-body').querySelectorAll('.st')) e.title = e.scrollWidth > e.clientWidth + 1 ? e.textContent : '';
+}
 // a model down after a crash, a copy being recycled, an unsure listing: said at the top, in words
 function renderAlerts() {
   const out = [];
@@ -660,6 +791,9 @@ function renderAlerts() {
              : el('span', {}, d.state === 'waiting for room' ? `Reload pending: insufficient memory${d.why ? ' (' + d.why + ')' : ''}; requests for it are held.`
                                                               : 'Reloading; remaining replicas keep serving, requests for it are held.'))));
   }
+  for (const x of (S.crashes && S.crashes.stalled) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
+    el('span', {}, el('b', {}, `${x.copy} stalled at ${clock(x.at)}`), ' ', el('span', {class: 'ink2'}, `(${x.why}). `), 'Out of routing, its requests resent; the instance manager reloads it.')));
+  for (const w of Object.values((S.recycle && S.recycle.held) || {})) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, w)));
   if (S.recycle && S.recycle.words) out.push(el('div', {class: 'alert info', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '↻'), el('span', {}, S.recycle.words)));
   for (const p of S.peers || []) {
     const said = [];
@@ -670,7 +804,8 @@ function renderAlerts() {
     for (const w of said) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, w)));
   }
   for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peer settings: '), w)));
-  if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file unreadable: '), S.settings_error, ' Last valid settings in effect.')));
+  if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file not taken: '), S.settings_error)));
+  if (S.write_problem) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Records not written: '), S.write_problem)));
   if (S.errors) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
     el('span', {}, el('b', {}, `${S.errors.count} error${S.errors.count === 1 ? '' : 's'} recorded in the last ${S.errors.minutes} min. `),
       S.errors.last ? `Last: ${S.errors.last.where}: ${S.errors.last.error} ` : '', el('span', {class: 'ink2'}, '(details: '), el('code', {}, 'localmodels errors --trace'), el('span', {class: 'ink2'}, ')'))));
@@ -688,8 +823,12 @@ function renderModels() {
   const box = $('models-body'), fams = S.lmstudio.families;
   const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
     el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.label || d.state}`))));
-  const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id)));
-  if (!fams.length) { box.replaceChildren(...down, down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
+  const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id))), mt = S.maintenance;
+  const why = mt && mt.off ? `This Mac: local models switched off since ${clock(mt.start)}` + (mt.unloaded ? ', no instance loaded' : mt.peers ? ', unloading once the requests in flight here finish' : ', unloading once the requests in flight finish')
+      + (mt.peers ? '; requests go to peers only' : '; requests get 503')
+    : mt && mt.phase === 'on' ? `This Mac: in maintenance; the instance manager loads nothing until it ends` : '';
+  if (why) down.unshift(el('div', {class: 'fam-note'}, why + (there.length || fams.length ? '' : '.')));
+  if (!fams.length) { box.replaceChildren(...down, why || down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
     legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)}))); return; }
   box.replaceChildren(...down, ...fams.map(f => {
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
@@ -709,7 +848,9 @@ function renderModels() {
         b.addEventListener('pointerleave', hideTip); b.addEventListener('blur', hideTip);
         return b;
       }));
-      const state = c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
+      const stallJob = S.recycle && S.recycle.job && S.recycle.job.copy === c.id && S.recycle.job.stall;
+      const state = c.stalled || stallJob ? el('span', {class: 'badge down', title: ((S.crashes && S.crashes.stalled) || []).filter(x => x.copy === c.id).map(x => x.words).join('\n') || (stallJob ? S.recycle.words : '')}, c.recycling === 'reloading' ? 'stalled: reloading' : 'stalled: out of routing')
+        : c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
         : el('span', {title: c.ctx && c.ctx.budget ? `context in flight ${full(c.ctx.load)} of a budget of ${full(c.ctx.budget)} tokens (admission by context size)` : ''},
             (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`
             + (c.ctx && c.ctx.budget && c.busy ? ` · ${compact(c.ctx.load)}/${compact(c.ctx.budget)} context` : ''),
@@ -719,7 +860,7 @@ function renderModels() {
         const sh = sv_.share == null ? null : Math.min(1, sv_.share);
         const bar = el('div', {class: 'bar'}, el('div', {style: `width:${Math.round((sh || 0) * 100)}%;background:${sh > 0.95 ? 'var(--critical)' : sh > 0.7 ? 'var(--warning)' : 'var(--s1)'}`}));
         if (sv_.band && sv_.band.soft) bar.append(el('i', {style: `left:${Math.round(100 * sv_.band.soft / sv_.band.tokens)}%`, title: 'soft threshold: recycled when idle'}));
-        parts.push(el('div', {class: 'band'}, `loaded ${clock(sv_.since)} · ${compact(sv_.tokens)} tokens since`, sv_.band ? bar : el('span', {class: 'muted'}, '· recycling off'),
+        parts.push(el('div', {class: 'band'}, el('span', {class: 'bt', title: `loaded ${clock(sv_.since)} · ${full(sv_.tokens)} tokens processed since`}, `loaded ${clock(sv_.since)} · ${compact(sv_.tokens)} tokens since`), sv_.band ? bar : el('span', {class: 'muted'}, '· recycling off'),
           sv_.drift ? el('span', {class: 'badge warn'}, sv_.drift) : ''),
           el('span', {class: 'band-end', title: sv_.band ? `recycled at ${compact(sv_.band.tokens)} tokens processed` + (sv_.band.written ? ` or ${compact(sv_.band.written)} written` : '') + ` (now ${compact(sv_.tokens)} processed, ${compact(sv_.written || 0)} written)` : ''},
             sv_.band ? `${Math.round((sv_.share || 0) * 100)}% of ` + (sv_.by === 'written' ? `${compact(sv_.band.written)} written` : sv_.by === 'requests' ? `${sv_.band.requests} requests` : compact(sv_.band.tokens)) : ''));
@@ -751,7 +892,7 @@ function peerRow(p, id, f, seen) {      // one peer's copy of a family: one more
   }));
   return el('div', {class: 'copy', title: p.words || ''}, el('span', {class: 'nm'}, p.name), slots,
     el('span', {class: 'st'}, `${f.busy ? 'generating' : 'idle'} · ${f.busy}/${f.slots} active`),
-    el('div', {class: 'band wide'}, `peer replica · ${f.free_here} free for this gateway` + (f.here ? ` · ${f.here} in flight from it` : '') + linkWords(p)));
+    el('div', {class: 'band wide'}, el('span', {class: 'bt'}, `peer replica · ${f.free_here} free for this gateway` + (f.here ? ` · ${f.here} in flight from it` : '') + linkWords(p))));
 }
 function peersOf(id) { return ((S && S.peers) || []).filter(p => p.state === 'up' && p.families && p.families[id] && p.families[id].match); }
 function peerBlocks(seen, local) {      // a family only a peer has (the others' peer copies sit under this Mac's families)
@@ -766,25 +907,68 @@ function peerBlocks(seen, local) {      // a family only a peer has (the others'
   return out;
 }
 
-function track(word, name, p, why) {  // one labelled bar: Batch or Job, done of total, time left, finish in local time
+function whenWords(p) {            // time left and finish in local time, or why there is none yet
   const fin = p.finish || (p.left != null ? Date.now() / 1000 + p.left : null);
-  const when = p.left != null ? (p.left > 0 ? `${left(p.left)} · done about ${finishAt(fin)}` : 'finishing')
-    : p.done < p.total ? 'estimating after the first one' : 'done';
-  const mt = S.maintenance, clash = mt && mt.phase === 'announced' && fin && fin > mt.start;
-  return el('div', {class: 'track', title: [name, why, p.started ? 'started ' + clock(p.started) : ''].filter(Boolean).join(' · ')},
-    el('div', {}, el('b', {}, word), name ? el('span', {class: 'muted'}, ' ' + name) : '',
-      clash ? el('span', {class: 'badge warn', style: 'margin-left:6px'}, `ends after maintenance starts (${clock(mt.start)})`) : ''),
-    el('div', {class: 'bar-thin wide'}, el('div', {style: `width:${p.pct || 0}%`})),
-    el('div', {class: 'ink2'}, `${p.done} of ${p.total} · ${when}`));
+  return [fin, p.left != null ? (p.left > 0 ? `${left(p.left)} · done ~${finishAt(fin)}` : 'finishing')
+    : p.at_least ? `at least ${left(p.at_least)} · estimating the rest`
+    : p.done < p.total ? 'estimating after the first one' : 'done'];
 }
 
-function progress(u) {             // the batch (the whole run) and the job (the phase it is on now), each with its own bar
-  const b = u.batch && u.batch.total ? u.batch : null, j = u.job && u.job.total ? u.job : null;
+function clashBadge(fin) {         // a run that would still be going when an announced maintenance window starts
+  const mt = S.maintenance;
+  return mt && mt.phase === 'announced' && fin && fin > mt.start ? el('span', {class: 'badge warn', style: 'margin-left:6px'}, `ends after maintenance starts (${clock(mt.start)})`) : '';
+}
+
+function track(word, name, p, why) {  // one line: Run or Phase, its name, a bar, done of total, time left, finish in local time
+  const [fin, when] = whenWords(p);
+  return el('div', {class: 'track', title: [name, why, p.started ? 'started ' + clock(p.started) : ''].filter(Boolean).join(' · ')},
+    el('b', {}, word), name ? el('span', {class: 'muted'}, name) : '',
+    el('div', {class: 'bar-thin'}, el('div', {style: `width:${p.pct || 0}%`})),
+    el('span', {class: 'ink2 tw'}, `${p.done} of ${p.total} · ${when}`), clashBadge(fin));
+}
+
+const BASIS = {measured: "measured in this phase", 'this run earlier': 'measured earlier in this run', 'an earlier run': 'from the same phase in an earlier run',
+  "this run's other phases": "from this run's other phases"};
+
+function phaseText(p) {            // a phase in a few words: done, 75 of 247 · 1 h 20 min, 482 · ~2 h 40 min
+  if (p.state === 'done') return 'done';
+  const size = p.state === 'running' && p.total != null ? `${p.done} of ${p.total}` : p.total != null ? `${p.approx ? '~' : ''}${p.total}` : 'size not said';
+  return size + ' · ' + (p.left == null ? 'not estimated yet' : (p.basis === 'measured' ? '' : '~') + span(p.left));
+}
+
+function phaseTitle(p) {
+  return [`phase ${p.name}: ${p.state}`, p.total != null ? `${p.done} of ${p.total} items${p.approx ? ' (approximate size)' : ''}` : 'size not said',
+    p.tokens_per_item ? `${p.tokens_per_item.toLocaleString()} tokens an item, ${BASIS[p.basis] || 'estimated'}` : '',
+    p.left ? `${left(p.left)}` + (p.finish ? ` · done about ${finishAt(p.finish)}` : '') : '',
+    p.started ? 'started ' + clock(p.started) : '', p.ended ? 'ended ' + clock(p.ended) : ''].filter(Boolean).join(' · ');
+}
+
+function phaseParts(b) {           // a run in phases: a segment per phase, as wide as its items, filled as it is done; and each phase in words
+  const ps = (b.phases || []).map((p, i) => Object.assign({}, p, {name: p.name || `#${i + 1}`})), size = p => Math.max(p.total || 0, 1), all = ps.reduce((a, p) => a + size(p), 0) || 1;
+  return [el('div', {class: 'segbar inl'}, ...ps.map(p => el('div', {class: p.state, style: `flex:${size(p) / all} 1 0`, title: phaseTitle(p)},
+      el('div', {style: `width:${p.state === 'done' ? 100 : p.pct || 0}%`})))),
+    ps.length > 1 ? el('div', {class: 'phwords ink2'}, ...ps.map(p => el('span', {class: p.state, title: phaseTitle(p)}, el('b', {}, p.name), ' ' + phaseText(p)))) : ''];
+}
+
+function progress(u) {             // the run (all its phases) and the phase it is on now, each with its own bar; a run in phases adds a strip of them
+  const b = u.batch && u.batch.total ? u.batch : null;
+  let j = u.job && u.job.total ? u.job : null;
+  const whole = b && j && Math.abs(j.total - b.total) <= 0.05 * b.total;   // a phase about as large as the whole run: one line, not two the same
+  if (whole) j = null;
   if (!b && !j) return u.step ? el('div', {class: 'muted'}, el('b', {}, 'Step'), ' ' + u.step) : null;
+  if (b && b.phases && b.phases.length) {   // a run in phases: one line for the run, its phases as the bar, a line of phase estimates
+    const why = b.basis ? `estimate in tokens per item at the throughput this run gets; least certain part: ${BASIS[b.basis] || b.basis}` : '';
+    const [fin, when] = whenWords(b);
+    const [bar, words] = phaseParts(b);
+    return el('div', {class: 'runblock', title: [b.name, why, b.started ? 'started ' + clock(b.started) : ''].filter(Boolean).join(' · ')},
+      el('div', {class: 'track'}, el('b', {}, 'Run'), b.name ? el('span', {class: 'muted'}, b.name) : '', bar,
+        el('span', {class: 'ink2 tw'}, `${b.done.toLocaleString()} of ${b.total.toLocaleString()} · ${when}`), clashBadge(fin)),
+      words);
+  }
   const why = b && (b.basis === 'the last run' ? 'estimate from the last run of this name' : b.basis ? "estimate from this run's pace" : '');
   return el('div', {class: 'tracks'},
-    b ? track('Batch', b.name, b, why) : el('div', {class: 'muted track', title: 'the script can say its whole size with X-Run, X-Run-Total and X-Run-Done (GUIDE.md)'}, el('b', {}, 'Batch'), ' size not said'),
-    j ? track('Job', j.name, j) : u.step ? el('div', {class: 'muted track'}, el('b', {}, 'Job'), ' ' + u.step) : '');
+    b ? track('Run', b.name, b, why) : el('div', {class: 'muted track', title: 'the script can say its whole size with X-Run and its phases with X-Phase and POST /hub/runs (GUIDE.md)'}, el('b', {}, 'Run'), ' size not said'),
+    j ? track('Phase', j.name, j) : u.step && !whole ? el('div', {class: 'muted track'}, el('b', {}, 'Phase'), ' ' + u.step) : '');
 }
 
 function renderUsers() {
@@ -802,13 +986,13 @@ function renderUsers() {
     const prog = progress(u);
     rows.push(el('tr', {},
       el('td', {}, el('span', {class: 'dot', style: `background:${color(u.project)}`}), u.project),
-      el('td', {}, kindWords(u.kind), u.app ? el('div', {class: 'muted'}, u.app) : ''),
+      el('td', {}, kindWords(u.kind), u.app ? (prog ? el('span', {class: 'muted'}, ' · ' + u.app) : el('div', {class: 'muted'}, u.app)) : ''),   // one line when a progress row follows
       el('td', {}, now, flag),
       el('td', {}, (u.models || []).map(short).join(', ') || '–'),
       el('td', {class: 'num', title: ((u.batch || u.job || {}).started ? 'this run started ' : 'using a model since ') + clock(u.since)}, ago(u.since)),
       el('td', {title: u.title || ''}, u.title || (u.session ? 'a Claude session' : el('span', {class: 'muted'}, '–'))),
     ));
-    if (prog) rows.push(el('tr', {}, el('td', {class: 'sub', colspan: head.length}, prog)));
+    if (prog) rows.push(el('tr', {}, el('td', {class: 'sub prog', colspan: head.length}, prog)));
     for (const j of (b.now || []).slice(0, 8)) {
       rows.push(el('tr', {}, el('td', {class: 'sub', colspan: 4}, `agent ${j.job}` + (j.step ? ` · ${j.step}` : '')), el('td', {class: 'num ink2'}, ago(j.since)),
         el('td', {}, j.pct != null ? el('div', {class: 'ink2'}, `${j.pct}%` + (j.left ? ` · ~${left(j.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${j.pct}%`}))) : el('span', {class: 'muted'}, 'starting'))));
@@ -823,8 +1007,8 @@ function renderClaude() {
   const head = ['project', 'now', 'session', ''].map(h => el('th', {}, h));
   const rows = cs.map(c => {
     const bits = [];
-    if (c.subagents && c.subagents.length) bits.push(`${c.subagents.length} subagent${c.subagents.length === 1 ? '' : 's'}`);
-    for (const w of c.workflows || []) if (w.live && w.running.length) bits.push(`workflow ${w.finished} of ${w.agents}`);
+    if (c.subagents) bits.push(`${c.subagents} subagent${c.subagents === 1 ? '' : 's'}`);
+    for (const w of c.workflows || []) if (w.live && w.running) bits.push(`workflow ${w.finished} of ${w.agents}`);
     return el('tr', {},
       el('td', {}, c.project),
       el('td', {}, c.working ? el('span', {class: 'badge live'}, 'working') : el('span', {class: 'muted'}, `idle ${ago(c.last)}`)),
@@ -837,17 +1021,20 @@ function renderClaude() {
 function renderRecent() {
   const box = $('recent');
   if (!R.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No requests through the gateway yet.')); return; }
-  const head = ['time', 'project', 'kind/step', 'instance', 's', 'queued s', 'out', ''].map((h, i) => el('th', {class: i >= 4 && i <= 6 ? 'num' : ''}, h));
-  const rows = R.map(r => el('tr', {},
+  const tips = {secs: 'seconds from the request to its last token', queued: 'seconds held in the admission queue before a slot', tokens: 'completion tokens',
+    instance: 'the instance that answered: #N on this Mac, or the peer'};
+  const head = ['time', 'project', 'kind / step', 'instance', 'secs', 'queued', 'tokens'].map((h, i) => el('th', {class: i >= 4 ? 'num' : '', title: tips[h] || ''}, h));
+  const status = r => r.status === 499 ? el('span', {class: 'badge', title: '499: the client closed the connection' + (r.note ? ' · ' + r.note : '')}, '499 closed') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
+    : r.tries > 1 ? el('span', {class: 'badge cycle', title: r.note || ''}, 'resent') : '';
+  const rows = R.map(r => { const peer = / on /.test(r.copy || '') ? String(r.copy).split(' on ')[1] : null, st = status(r);
+    return el('tr', {},
     el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
-    el('td', {}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
-    el('td', {title: r.step || ''}, kindWords(r.kind), r.step ? el('div', {class: 'muted'}, r.step) : ''),
-    el('td', {class: 'ink2'}, / on /.test(r.copy || '') ? 'peer ' + String(r.copy).split(' on ')[1] : r.copy && r.copy !== r.model ? '#' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : '#1'),
+    el('td', {title: r.project || ''}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
+    el('td', {title: [r.kind, r.step, r.note].filter(Boolean).join(' · ')}, el('div', {}, kindWords(r.kind), st ? ' ' : '', st, r.step ? el('span', {class: 'muted'}, ' · ' + r.step) : '')),   // one line a request: more of them fit
+    el('td', {class: 'ink2', title: peer ? `peer ${peer}` : r.copy || ''}, peer || (r.copy && r.copy !== r.model ? '#' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : '#1')),
     el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
     el('td', {class: 'num'}, (+r.waited || 0) >= 0.1 ? (+r.waited).toFixed(1) : '–'),
-    el('td', {class: 'num'}, full(r.out_tokens)),
-    el('td', {}, r.status === 499 ? el('span', {class: 'badge', title: r.note || ''}, '499 client closed') : (r.status || 0) >= 400 ? el('span', {class: 'badge warn', title: r.note || ''}, `error ${r.status}`)
-      : r.tries > 1 ? el('span', {class: 'badge cycle', title: r.note || ''}, 'resent, answered') : '')));
+    el('td', {class: 'num'}, full(r.out_tokens))); });
   tableIn(box, head, rows, 'localmodels log for the day');
 }
 
@@ -883,7 +1070,7 @@ function renderAbout() {                // the one footer line: version, license
 
 // ---------------------------------------------------------------- fetching, and holding the last picture while it reloads
 async function get(path) {      // throws with .status when the gateway answered with an error, without it when it could not be reached
-  const r = await fetch(path, {cache: 'no-store'});
+  const r = await fetch(path, {cache: 'no-store', signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined});   // a hung request never stalls the updates
   if (!r.ok) { let said = ''; try { said = (await r.json()).error || ''; } catch (_) {} throw Object.assign(new Error(`${path.split('?')[0]}: HTTP ${r.status}${said ? ' ' + said : ''}`), {status: r.status}); }
   return r.json();
 }
@@ -901,7 +1088,7 @@ async function tick(name, fn) {                              // one fetch of eac
   inflight[name] = true;
   try { await fn(); } finally { inflight[name] = false; }
 }
-const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); } catch (e) { online(false, e); return; } online(true); guard('page', renderNow); });
+const tickNow = () => tick('now', async () => { try { S = await get('/hub/snapshot'); } catch (e) { online(false, e); return; } fresh = Date.now(); online(true); guard('page', renderNow); });
 const tickHistory = () => tick('history', async () => { try { H = await get('/hub/history?minutes=' + RANGE); } catch (e) { if (e.status) report('history', e); return; } guard('charts', renderCharts); });
 const tickRecent = () => tick('recent', async () => { try { R = await get('/hub/recent?n=40'); } catch (e) { if (e.status) report('recent', e); return; } guard('Recent requests', renderRecent); });
 
@@ -919,17 +1106,283 @@ document.addEventListener('click', ev => {
 });
 const THEMES = ['auto', 'light', 'dark'];
 function applyTheme(t) { if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); $('theme').textContent = 'theme: ' + t; }
+// ---- actions that change the hub: a press shows at once; the button then follows the gateway's own state (the snapshot,
+// every 2 s) until the change is done, so it is never offered again mid-way; the words beside the buttons say what is
+// happening, then what came of it, and any refusal or failure, in place (no alert boxes).
+const pend = {};                 // key ('here', 'peer:<name>') -> {want: 'on'|'off', at}: sent, not yet seen in the snapshot
+const was = {};                  // key -> the last render's {busy, off}, to see a change finish
+const said = new Map();          // key -> {text, tone ('busy'|'done'|'fail'), until}
+const SEEN_WITHIN = 15000;       // a switch the gateway accepted shows in its snapshot within this; past it, the page says so
+function say(key, text, tone, ms) {
+  if (!text) said.delete(key); else said.set(key, {text, tone, until: ms ? Date.now() + ms : 0});
+  renderSaid();
+}
+function renderSaid() {
+  const now = Date.now(), box = $('act-say'), kids = [];
+  for (const [k, m] of said) {
+    if (m.until && now > m.until + 900) { said.delete(k); continue; }
+    kids.push(el('span', {class: 'said ' + m.tone + (m.until && now > m.until ? ' fading' : ''), title: m.text}, el('i'), m.text));
+  }
+  const key = kids.map(k => k.className + k.textContent).join('|');
+  if (box.dataset.key !== key) { box.replaceChildren(...kids); box.dataset.key = key; }
+}
+setInterval(renderSaid, 400);
+function powerState(key, mt, sw) {     // -> {busy, off, words}: off is the state the button switches away from
+  const off = !!(mt && mt.off), p = pend[key], name = key.startsWith('peer:') ? key.slice(5) + ': ' : '';
+  if (p && p.sending) return {busy: true, off: p.want === 'on', want: p.want, words: name + `switching ${p.want}: sending`};
+  if (off && !mt.unloaded) return {busy: true, off: true, want: 'off', words: name + (mt.inflight ? `switching off: waiting for ${mt.inflight} request${mt.inflight === 1 ? '' : 's'} in flight to finish, then unloading` : 'switching off: unloading every instance')};
+  if (sw && sw.phase === 'loading') return {busy: true, off: false, want: 'on', words: name + `switching on: loading ${(sw.families || []).join(', ') || 'the instances'} · ${Math.max(0, Math.round(Date.now() / 1000 - sw.at))} s`};
+  if (p && (p.want === 'off') !== off) {
+    if (Date.now() - p.at < SEEN_WITHIN) return {busy: true, off: p.want === 'on', want: p.want, words: name + `switching ${p.want}: request accepted, waiting for the gateway`};
+    delete pend[key];
+    say(key, name + `switching ${p.want}: no change seen in ${SEEN_WITHIN / 1000} s; check localmodels status`, 'fail', 20000);
+  }
+  if (p && p.want === 'on' && !sw && Date.now() - p.at < 3000) return {busy: true, off: false, want: 'on', words: name + 'switching on: starting the load'};
+  return {busy: false, off};
+}
+function powerButton(b, key, mt, sw, peer, verb) {
+  const st = powerState(key, mt, sw), before = was[key], name = peer ? peer + ': ' : '';
+  was[key] = st;
+  b.classList.toggle('busy', st.busy); b.disabled = st.busy; b.setAttribute('aria-busy', st.busy ? 'true' : 'false');
+  if (st.busy) {
+    b.textContent = (peer ? `${peer} ` : '') + `switching ${st.want}…`;
+    say(key, st.words, 'busy');
+    return;
+  }
+  const finished = before && before.busy;
+  if (finished || pend[key]) {
+    delete pend[key];
+    if (st.off) say(key, name + `switched off at ${clock(mt.unloaded || mt.start)}: every instance unloaded; ` + (mt.peers ? 'requests go to peers only' : 'requests get 503'), 'done', 10000);
+    else if (sw && sw.phase === 'done' && !sw.ok) say(key, name + `switched on, but not every load succeeded: ${sw.words}`, 'fail', 30000);
+    else say(key, name + `switched on${sw && sw.words ? ': ' + sw.words : ''}; requests are admitted`, 'done', 10000);
+  }
+  b.textContent = `${verb} ${st.off ? 'on' : 'off'}`;
+  b.dataset.off = st.off ? '1' : '';
+  b.title = peer
+    ? (st.off ? `Switch on peer ${peer}'s local models: it loads the families loaded when switched off, and this gateway routes to it again (POST /hub/link/on)`
+              : `Switch off peer ${peer}'s local models: it unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there (POST /hub/link/off)`)
+    : (st.off ? 'Load the families that were loaded when switched off (POST /hub/on); the instance manager adds the other replicas'
+              : 'Unload every instance once the requests in flight finish; until turned on, requests get 503 and nothing is loaded, reloaded or started (POST /hub/off)');
+}
+async function powerSwitch(b, key, peer, post) {     // the click: confirm a switch-off, send it, then let the snapshot carry it
+  if (b.disabled) return;
+  const on = b.dataset.off === '1', name = peer ? peer + ': ' : '', who = peer ? `peer ${peer}'s` : "this Mac's";
+  if (!on && !confirm(`Switch ${who} local models off?\n` + (peer ? 'It unloads every instance once its requests in flight finish; until turned on, this gateway routes nothing there.'
+    : 'Every instance is unloaded once the requests in flight finish; until turned on, requests here get 503 and nothing is loaded.'))) return;
+  const want = on ? 'on' : 'off';
+  pend[key] = {want, at: Date.now(), sending: true};           // the button stays busy while the request is out, whatever renders meanwhile
+  b.disabled = true; b.classList.add('busy'); b.textContent = (peer ? `${peer} ` : '') + `switching ${want}…`;
+  say(key, name + `switching ${want}: sending`, 'busy');
+  let ok = false;
+  try {
+    let r = await post({});
+    if (r.status === 409) {
+      const j = await r.json().catch(() => ({})), by = j.blockers || [];
+      if (by.length && confirm(`${peer ? 'Peer ' + peer : 'The local models are'} in use: ${by.join('; ')}.\nSwitch ${peer ? 'its' : 'them'} off anyway?`)) r = await post({force: true});
+      else { say(key, by.length ? name + 'left on: in use, not forced' : name + `nothing switched: ${j.error || 'HTTP 409'}`, by.length ? 'done' : 'fail', by.length ? 6000 : 20000); }
+    }
+    if (r.ok) ok = true;
+    else if (r.status !== 409) { const j = await r.json().catch(() => ({})); say(key, name + `nothing switched ${want}: ${j.error || 'HTTP ' + r.status}`, 'fail', 20000); }
+  } catch (e) { say(key, name + `nothing switched ${want}: the gateway did not answer`, 'fail', 20000); }
+  if (ok) { pend[key] = {want, at: Date.now()}; say(key, name + `switching ${want}: request accepted`, 'busy'); }
+  else { delete pend[key]; was[key] = null; b.disabled = false; b.classList.remove('busy'); b.textContent = (peer ? `turn ${peer}` : 'turn models') + (on ? ' on' : ' off'); if (said.get(key) && said.get(key).tone === 'busy') say(key, ''); }
+  tickNow();
+}
+// ---- the extensions (GET /hub/extensions): programs on this Mac with a section in the menu-bar app (GUIDE.md
+// "Extensions"), each a chip after the status lights: its page, opened in a new tab; not answering, Start, which runs the
+// start verb its manifest lists (POST /hub/extensions/run) and opens its page in a tab the click opened, once it answers
+let EXT = [];
+const starting = {};             // id -> {at, tab}: a Start sent, its page not answering yet
+const START_WITHIN = 30000;      // a started extension answers within this, or the page says it did not
+const tickExt = () => tick('ext', async () => {
+  try { EXT = (await get('/hub/extensions')).extensions || []; } catch (e) { if (e.status) report('extensions', e); return; }
+  guard('extensions', renderExt);
+});
+function renderExt() {
+  const box = $('ext-chips'), named = {};
+  for (const x of EXT) named[x.name] = (named[x.name] || 0) + 1;
+  for (const x of EXT) {
+    const s = starting[x.id], key = 'ext:' + x.id, name = named[x.name] > 1 ? x.label : x.name;
+    if (s && x.answering) {                                // started: its page in the tab the click opened
+      delete starting[x.id];
+      if (s.tab && !s.tab.closed && x.open) { s.tab.location.href = x.open; say(key, `${name}: started, page opened`, 'done', 8000); }
+      else say(key, `${name}: started`, 'done', 8000);
+    } else if (s && Date.now() - s.at > START_WITHIN) {
+      delete starting[x.id];
+      if (s.tab && !s.tab.closed) s.tab.close();
+      say(key, `${name}: not answering ${START_WITHIN / 1000} s after its start; localmodels ext says why`, 'fail', 20000);
+    }
+    const busy = !!starting[x.id], canStart = !x.answering && x.verbs.includes('start');
+    const tag = busy || canStart ? 'button' : x.answering && x.open ? 'a' : 'span';
+    let c = box.querySelector(`[data-ext="${CSS.escape(x.id)}"]`);
+    if (!c || c.tagName.toLowerCase() !== tag) {
+      const n = el(tag, {class: 'chip ext'}, el('i'), el('span'), el('span', {class: 'go'}));
+      n.dataset.ext = x.id;
+      if (c) c.replaceWith(n); else box.appendChild(n);
+      c = n;
+    }
+    if (tag === 'a') { c.href = x.open; c.target = '_blank'; c.rel = 'noopener'; }
+    if (tag === 'button') c.disabled = busy;
+    c.classList.toggle('busy', busy);
+    c.querySelector('i').style.background = busy ? 'var(--pin)' : !x.answering || x.alerts.length ? 'var(--warning)' : 'var(--good)';
+    c.querySelector('span').textContent = busy ? `${name}: starting…` : x.answering ? name : canStart ? `start ${name}` : `${name}: not answering`;
+    c.querySelector('.go').textContent = tag === 'a' ? '↗' : '';
+    c.title = [x.label + (x.summary ? ': ' + x.summary : ''), ...x.alerts,
+      x.answering ? (x.open ? `Opens ${x.open} in a new tab` : 'Its menu answers; its manifest names no page')
+        : `Not answering: ${x.why || 'no answer'}` + (canStart ? `\nStart runs its start verb (POST /hub/extensions/run), then opens its page` : '')].join('\n');
+  }
+  for (const c of [...box.children]) if (!EXT.some(x => x.id === c.dataset.ext)) c.remove();
+}
+$('ext-chips').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-ext]'); if (!b || b.disabled) return;
+  const x = EXT.find(e => e.id === b.dataset.ext); if (!x) return;
+  const tab = x.open ? window.open('', '_blank') : null;   // opened now, while the click counts, so no blocker stops it
+  if (tab) try {                                           // in the page's own colors until the extension's page replaces it
+    const css = getComputedStyle(document.documentElement), tok = n => css.getPropertyValue(n).trim(), words = `Starting ${x.name.replace(/[<&]/g, '')}…`;
+    tab.document.write(`<!doctype html><meta charset="utf-8"><title>${words}</title><body style="margin:0;padding:24px;background:${tok('--plane')};`
+      + `color:${tok('--muted')};font:13px system-ui,sans-serif">${words}</body>`);
+    tab.document.close();
+  } catch (_) {}
+  starting[x.id] = {at: Date.now(), tab};
+  say('ext:' + x.id, `${x.name}: starting`, 'busy');
+  guard('extensions', renderExt);
+  (async () => {
+    let why = '';
+    try {
+      const r = await fetch('/hub/extensions/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id: x.id, verb: 'start'})});
+      if (!r.ok) why = (await r.json().catch(() => ({}))).error || 'HTTP ' + r.status;
+    } catch (e) { why = 'the gateway did not answer'; }
+    if (why) {
+      const s = starting[x.id]; delete starting[x.id];
+      if (s && s.tab && !s.tab.closed) s.tab.close();
+      say('ext:' + x.id, `${x.name}: not started: ${why}`, 'fail', 20000);
+      guard('extensions', renderExt); return;
+    }
+    for (let i = 0; i < START_WITHIN / 1500 && starting[x.id]; i++) { await new Promise(ok => setTimeout(ok, 1500)); await tickExt(); }
+    guard('extensions', renderExt);
+  })();
+});
+$('poll-now').addEventListener('click', async () => {          // the gateway looks at every peer at once, then the page reads it
+  const b = $('poll-now'); if (b.disabled) return;
+  b.disabled = true; b.classList.add('busy'); b.textContent = 'polling…';
+  let ok = true;
+  try { ok = (await fetch('/hub/link', {method: 'POST'})).ok; } catch (e) { ok = false; }
+  try { S = await get('/hub/snapshot'); fresh = Date.now(); online(true); guard('page', renderNow); } catch (e) { ok = false; }
+  b.disabled = false; b.classList.remove('busy'); b.textContent = 'poll now';
+  const ps = (S && S.peers) || [];
+  say('poll', ok ? 'polled: ' + (ps.map(p => `${p.name} ${p.state === 'up' ? 'reachable' : p.off ? 'switched off' : p.state}`).join(', ') || 'no peers')
+    : 'poll failed: the gateway did not answer', ok ? 'done' : 'fail', ok ? 6000 : 15000);
+});
+$('power').addEventListener('click', () => powerSwitch($('power'), 'here', '',
+  body => fetch($('power').dataset.off === '1' ? '/hub/on' : '/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})));
+$('peers-only').addEventListener('click', async () => {    // this Mac's local models off, every request to the peers
+  const b = $('peers-only'); if (b.disabled) return;
+  const mt = S && S.maintenance, already = !!(mt && mt.off);
+  if (!confirm(already ? "Send every request to the peers while this Mac's local models stay off?\nA request no peer can take gets 503 until turned on."
+    : "Switch this Mac's local models off and send every request to the peers?\nIts instances are unloaded once the requests on them finish; a request no peer can take gets 503 until turned on.")) return;
+  b.disabled = true; say('here', 'peers only: sending', 'busy');
+  let r = null;
+  try { r = await fetch('/hub/off', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({peers: true})}); } catch (e) { r = null; }
+  const j = r ? await r.json().catch(() => ({})) : {};
+  b.disabled = false;
+  if (r && r.ok) { pend.here = {want: 'off', at: Date.now()}; say('here', 'peers only: ' + (j.note || 'request accepted'), 'busy'); }
+  else say('here', 'nothing switched: ' + (j.error || (r ? 'HTTP ' + r.status : 'the gateway did not answer')), 'fail', 20000);
+  tickNow();
+});
+$('peer-power').addEventListener('click', ev => {          // a peer's local models off or on
+  const b = ev.target.closest('button[data-peer]'); if (!b) return;
+  const name = b.dataset.peer, on = b.dataset.off === '1';
+  powerSwitch(b, 'peer:' + name, name, body => fetch(on ? '/hub/link/on' : '/hub/link/off',
+    {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(Object.assign({peer: name}, body))}));
+});
 $('theme').addEventListener('click', () => {
   const cur = document.documentElement.getAttribute('data-theme') || 'auto', next = THEMES[(THEMES.indexOf(cur) + 1) % 3];
   applyTheme(next); try { localStorage.setItem('lm-theme', next); } catch (e) {}
   guard('charts', renderCharts);
 });
 try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
+// ---- the color: Haedo Labs Sapphire by default, or the Mac's system accent (/hub/accent), or one's own. Any other color
+// redraws every sapphire step: each keeps its OKLab lightness (the contrast the palette was measured for) and takes the new
+// color's hue, its chroma scaled by the new color's against sapphire's, pulled in until it is a real sRGB color.
+const SAPPHIRE = '#0f52ba';
+const STEPS = ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'good', 'good-text', 'pin'];
+const BASE = {      // sapphire's steps, as the token blocks above set them, light then dark
+  light: {s1: '#0d4eb1', s2: '#85a6db', s3: '#053784', s4: '#5e89d0', s5: '#366bc5', s6: '#a6bfe4', s7: '#0f52ba', p1: '#0d4eb1', p2: '#85a6db', p3: '#053784',
+          p4: '#5e89d0', p5: '#366bc5', p6: '#a6bfe4', p7: '#0f52ba', good: '#0f52ba', 'good-text': '#0d4eb1', pin: '#0f52ba', gpu: '#87ace8'},
+  dark: {s1: '#4578ce', s2: '#bad3f9', s3: '#0f52ba', s4: '#87ace8', s5: '#6692db', s6: '#ccdffe', s7: '#225ec0', p1: '#4578ce', p2: '#bad3f9', p3: '#0f52ba',
+         p4: '#87ace8', p5: '#6692db', p6: '#ccdffe', p7: '#225ec0', good: '#87ace8', 'good-text': '#a9c6f4', pin: '#4578ce', gpu: '#87ace8'}};
+const lin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4), gam = c => c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+function toLch(hex) {
+  const [r, g, b] = [1, 3, 5].map(i => lin(parseInt(hex.slice(i, i + 2), 16) / 255));
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b),
+    s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+  return [L, Math.hypot(A, B), Math.atan2(B, A)];
+}
+function fromLch(L, C, h) {
+  const A = C * Math.cos(h), B = C * Math.sin(h);
+  const l = Math.pow(L + 0.3963377774 * A + 0.2158037573 * B, 3), m = Math.pow(L - 0.1055613458 * A - 0.0638541728 * B, 3),
+    s = Math.pow(L - 0.0894841775 * A - 1.2914855480 * B, 3);
+  return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+          -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+}
+function inGamut(L, C, h) {                            // the strongest chroma up to C that is still an sRGB color
+  let lo = 0, hi = C;
+  const ok = c => fromLch(L, c, h).every(v => v >= -1e-4 && v <= 1 + 1e-4);
+  if (ok(C)) return fromLch(L, C, h);
+  for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (ok(mid)) lo = mid; else hi = mid; }
+  return fromLch(L, lo, h);
+}
+const hexOf = rgb => '#' + rgb.map(v => Math.round(Math.min(1, Math.max(0, gam(Math.min(1, Math.max(0, v))))) * 255).toString(16).padStart(2, '0')).join('');
+const rgbOf = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(',');
+function stepsFor(color, scheme) {                     // -> the token lines for one scheme, drawn from color
+  const [, cs, hs] = toLch(SAPPHIRE), [, ca, ha] = toLch(color), k = cs ? ca / cs : 0, out = {};
+  for (const [name, hex] of Object.entries(BASE[scheme])) { const [L, C, h] = toLch(hex); out[name] = hexOf(inGamut(L, C * k, h + (ha - hs))); }
+  const lines = STEPS.map(n => `--${n}: ${out[n]};`);
+  lines.push(`--gpu: ${rgbOf(out.gpu)};`, `--glow: rgba(${rgbOf(color)},${scheme === 'dark' ? 0.55 : 0.35});`, `--brand: ${color};`, `--brand-edge: rgba(${rgbOf(color)},0.55);`);
+  return lines.join(' ');
+}
+let ACCENT = {mode: 'sapphire', own: SAPPHIRE}, SYSTEM = null;
+function applyAccent() {
+  const color = ACCENT.mode === 'own' ? ACCENT.own : ACCENT.mode === 'system' && SYSTEM ? SYSTEM.color : null;
+  let tag = $('accent-steps');
+  if (!color || color.toLowerCase() === SAPPHIRE) { if (tag) tag.remove(); }
+  else {
+    if (!tag) { tag = document.createElement('style'); tag.id = 'accent-steps'; document.head.append(tag); }
+    const light = stepsFor(color, 'light'), dark = stepsFor(color, 'dark');
+    tag.textContent = `:root { ${light} } @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { ${dark} } } :root[data-theme="dark"] { ${dark} }`;
+  }
+  $('accent').value = ACCENT.mode; $('accent-own').hidden = ACCENT.mode !== 'own'; $('accent-own').value = ACCENT.own;
+  $('accent').options[1].textContent = 'color: system accent' + (SYSTEM ? ` (${SYSTEM.name})` : '');
+  guard('charts', renderCharts);
+}
+async function readSystemAccent() {                    // the Mac's accent, read again whenever the page comes back into view
+  try { const r = await fetch('/hub/accent'); if (r.ok) { const j = await r.json(); if (/^#[0-9a-f]{6}$/i.test(j.color || '')) SYSTEM = j; } } catch (e) { /* not recorded: Sapphire stays */ }
+  applyAccent();
+}
+function saveAccent() { try { localStorage.setItem('lm-accent', JSON.stringify(ACCENT)); } catch (e) {} }
+$('accent').addEventListener('change', ev => { ACCENT.mode = ev.target.value; saveAccent(); applyAccent(); if (ACCENT.mode === 'own') $('accent-own').click(); });
+$('accent-own').addEventListener('input', ev => { ACCENT.own = ev.target.value; saveAccent(); applyAccent(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && ACCENT.mode === 'system') readSystemAccent(); });
+try { const a = JSON.parse(localStorage.getItem('lm-accent') || 'null');
+  if (a && ['sapphire', 'system', 'own'].includes(a.mode)) ACCENT = {mode: a.mode, own: /^#[0-9a-f]{6}$/i.test(a.own || '') ? a.own : SAPPHIRE}; } catch (e) {}
+applyAccent(); readSystemAccent();
 try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
-let resizing; window.addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(() => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('Loaded models (fit)', fitModels); } guard('Recent requests', renderRecent); }, 150); });
+const relayout = () => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); } guard('Recent requests', renderRecent); };
+let resizing, laidOut = 0; window.addEventListener('resize', () => {    // at once on the first resize (a window shown or resized is drawn
+  if (Date.now() - laidOut > 250) { laidOut = Date.now(); relayout(); }   // for its new size in the same frame), again once it settles
+  clearTimeout(resizing); resizing = setTimeout(() => { laidOut = Date.now(); relayout(); }, 150); });
 
-tickNow(); tickHistory(); tickRecent();
-setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000);
+let reflowing; const reflow = () => { clearTimeout(reflowing); reflowing = setTimeout(() => { guard('charts', renderCharts); if (S) guard('page', renderNow); guard('Recent requests', renderRecent); }, 60); };
+if (document.fonts) {              // everything measured again once the web font is in: text measured in a fallback font fits differently
+  document.fonts.addEventListener('loadingdone', reflow);
+  document.fonts.load('13px "Libre Franklin"').then(reflow, () => {}); document.fonts.load('500 13px "Libre Franklin"').then(reflow, () => {});
+}
+let resized; if (window.ResizeObserver) { const ro = new ResizeObserver(() => { clearTimeout(resized); resized = setTimeout(() => guard('charts', renderCharts), 120); });
+  for (const id of ['ans', 'tok', 'req', 'mem']) ro.observe($(id)); }       // a box that changed size: its chart fills it again
+tickNow(); tickHistory(); tickRecent(); tickExt();
+setInterval(tickNow, 2000); setInterval(tickHistory, 10000); setInterval(tickRecent, 5000); setInterval(tickExt, 5000); setInterval(() => guard('clock', staleness), 1000);
 </script>
 </body>
 </html>

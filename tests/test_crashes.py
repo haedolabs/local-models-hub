@@ -6,6 +6,7 @@ never touches the hub's real records. `localmodels check` runs it; so can you: p
 import http.server, json, os, shutil, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import crashes, gateway, llmshare, models
 
 # LM Studio's log around an engine crash (trimmed), then a load of the model and, from an earlier day, an unload
@@ -56,6 +57,7 @@ def main():
     box = tempfile.mkdtemp(prefix='localmodels-crashtest-')
     try: run(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 
@@ -169,6 +171,36 @@ def run(box):
       jobs == [] and crashes._read(fresh=True)['down'][B]['state'] == 'left down' and 'one instance' in crashes._read(fresh=True)['down'][B]['why'], crashes._read(fresh=True)['down'].get(B, {}).get('why'))
     crashes.swapped(B); crashes.watch([row(B), row(C2)]); hour_passes()
 
+    print('the keeper on a dedicated Mac (a family with load_at_start): a load waits for the GPU wired limit, not for free memory')
+    shared, real_gpu = llmshare.settings, models.gpu
+    dedicated = lambda: dict(families={B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False, load_at_start=True)}, batch_at_once=8, headroom_gb=4)
+    gpu = {'v': dict(limit_gb=96.0, set=True, total_gb=128.0, boot=True)}
+    models.gpu = lambda: gpu['v']
+    free[0] = 35.0
+    t('a family on a shared Mac waits until its weights and headroom_gb are free',
+      models.room_for(shared()['families'][B], 35.16, 4, rows=[]) == '35 GiB free, an instance needs 39 GiB incl. headroom', models.room_for(shared()['families'][B], 35.16, 4, rows=[]))
+    t('...a dedicated one only until the GPU wired limit holds its weights and KV cache beside what is loaded',
+      models.room_for(dedicated()['families'][B], 35.16, 4, rows=[]) is None
+      and models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]) is None, models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]))
+    gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
+    t('...and says so when it does not (a second replica beside the first on a 40 GiB limit)',
+      models.room_for(dedicated()['families'][B], 35.16, 4, rows=[]) is None
+      and models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]) == 'GPU wired limit 40 GiB < 35.2 GiB + KV cache beside 37.8 GiB loaded',
+      models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]))
+    llmshare.settings, free[0] = dedicated, 20.0                     # measured on the 48 GiB M4 Pro: 35 to 39 GiB free a second after a crash
+    gpu['v'] = dict(limit_gb=96.0, set=True, total_gb=128.0, boot=True)
+    crash([B, C2], 0); jobs = fresh([]); done.clear(); models._again(jobs[0], 4)
+    t('a crash: both copies reloaded at once, with 20 GiB free (macOS compresses or swaps the rest, as at every recycle)',
+      done == [(B, 65536, 4), (C2, 65536, 4)] and not crashes.reloading(B), (done, crashes._read(fresh=True).get('down')))
+    crashes.watch([row(B), row(C2)]); hour_passes()
+    gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
+    crash([B, C2], 0); jobs = fresh([]); done.clear(); models._again(jobs[0], 4)
+    d = crashes._read(fresh=True).get('down', {}).get(B, {})
+    t('a GPU limit that holds one: the first copy serves at once, the second waits for the limit, and the words say why',
+      done == [(B, 65536, 4)] and d.get('state') == 'waiting for room' and 'GPU wired limit 40 GiB' in (d.get('why') or '') and crashes.down_copies(B) == {C2}, (done, d))
+    llmshare.settings, models.gpu, free[0] = shared, real_gpu, 100.0
+    crashes.swapped(B); crashes.watch([row(B), row(C2)]); hour_passes()
+
     open(log, 'a').write(UNLOAD.replace('2026-11-06 00:27:57', stamp(700)).replace(f'model: {B}', f'model: {C2}').replace(f'[{B}]', f'[{C2}]'))
     t('copy 2 unloaded by hand: left alone', crashes.watch([row(B)]) == [] and not crashes._read(fresh=True).get('down'))
     open(log, 'a').write(f'[{stamp(800)}][DEBUG] Fatal Python error: Segmentation fault\n')
@@ -199,6 +231,42 @@ def run(box):
     t('a crash split across two looks, with nothing kept in memory between them, is still read whole (keeper.json keeps the context)',
       first == [] and jobs and jobs[0]['ids'] == [C2], (first, jobs))
     done.clear(); models._again(jobs[0], 8); crashes.watch([row(B), row(C2)]); hour_passes()
+
+    print('the keeper: a family where only one replica fits')
+    crashes.swapped(B); hour_passes()
+    with crashes._state() as st: st['seen'].setdefault(C2, {})['loaded'] = False             # copy 2 never fitted beside copy 1
+    crash([B]); jobs = fresh([])
+    free[0] = 50.0; done.clear(); load_was = models.load
+    models.load = lambda key, ident, context, parallel: (done.append((ident, context, parallel)), free.__setitem__(0, free[0] - 46), (True, 'ok'))[2]
+    models._again(jobs[0], 8)
+    t('the crashed replica is loaded again and serves at once, though the other replica still has no room',
+      [x[0] for x in done] == [B] and crashes.down_copies(B) == set() and not crashes.reloading(B), (done, crashes._read(fresh=True).get('down')))
+    models.load, free[0] = load_was, 100.0
+    crashes.watch([row(B)]); hour_passes()
+    crash([B]); jobs = fresh([row(B)])
+    t('a crashed replica loaded again by someone else: the crash is closed, though its sibling is not loaded',
+      jobs == [] and not crashes._read(fresh=True).get('down') and crashes.records(1)[-1].get('event') == 'back', (jobs, crashes._read(fresh=True).get('down')))
+
+    print('the keeper: a family left down is tried again every hour, and leaves the dash a day after it was first left down')
+    hour_passes()
+    crash([B]); t0 = time.time(); jobs = fresh([])
+    free[0] = 20.0; done.clear(); models._again(jobs[0], 8)                                  # no room: it waits
+    jobs = crashes.watch([], now=t0 + 3700)
+    first = crashes._read(fresh=True)['down'][B]
+    t('not loaded within an hour: left down', jobs == [] and first['state'] == 'left down', first)
+    jobs = crashes.watch([], now=t0 + 3700 + 3601)
+    t('an hour later it is tried once more: a reload, not left down again in the same look',
+      jobs and jobs[0]['ids'] == [B, C2] and crashes._read(fresh=True)['down'][B]['state'] == 'loading again', (jobs, crashes._read(fresh=True)['down'][B].get('state')))
+    jobs = crashes.watch([], now=t0 + 3700 + 3601 + 60)
+    t('...and that try has its own hour', jobs and crashes._read(fresh=True)['down'][B]['state'] == 'loading again', crashes._read(fresh=True)['down'][B].get('state'))
+    jobs = crashes.watch([], now=t0 + 3700 + 3601 + 3700)
+    d = crashes._read(fresh=True)['down'][B]
+    t('not loaded in that hour either: left down again, its day counted from the first time', d['state'] == 'left down' and d['since'] == first['since'], (d.get('state'), d.get('since'), first['since']))
+    crashes.watch([], now=first['since'] + 86401)
+    t('a day after it was first left down: off the dash, only in the record', B not in (crashes._read(fresh=True).get('down') or {}))
+    free[0] = 100.0
+    with crashes._state() as st: st['down'] = {}
+    crashes.watch([row(B), row(C2)]); hour_passes()
     llmshare.loaded, llmshare.parallel_of = real
 
     print('nudges reach the instance manager in whichever gateway holds it')
@@ -212,6 +280,12 @@ def run(box):
     stop = threading.Event(); stop.set()
     t('a stop ends the wait at once', crashes.wait_nudge(20, stop) is True)
     crashes._seen_state['nudged'] = 0.0; crashes.WAKE.clear()       # (the debounce would hold back the next test's nudge)
+
+    print('the crash record rolls over, and its readers read both files')
+    open(crashes.RECORD + '.1', 'w').write(json.dumps(dict(at=time.time() - 3 * 86400, event='crash', model=B, family=B, cause='rolled')) + '\n')
+    t('a crash in the rolled-over file is still read', any(r.get('cause') == 'rolled' for r in crashes.records(7)), len(crashes.records(7)))
+    t('the record rolls over past its size', crashes.ROLL_AT and crashes.ROLL_AT <= 4_000_000, getattr(crashes, 'ROLL_AT', None))
+    os.remove(crashes.RECORD + '.1')
 
     print("the door's hold")
     class Fake(http.server.BaseHTTPRequestHandler):

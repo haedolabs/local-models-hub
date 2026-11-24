@@ -25,6 +25,6 @@ Set up the local-models hub on this Mac. It is already installed as a plugin; th
    - Point every client at `http://localhost:1235/v1` instead of LM Studio's port 1234 (any API key).
    - The dashboard is at http://localhost:1235 (`localmodels open`); `localmodels` in a terminal gives a short status.
    - To run a model as several replicas, or to enable or disable recycling, edit `~/Library/Application Support/LocalModels/models.json` (the `guide` tool explains the keys).
-   - The MCP tools `status`, `guide`, `ask`, `batch`, `job_status` and `swap_check` are available in every Claude Code session from the next session on.
+   - The MCP tools `status`, `guide`, `ask`, `batch`, `job_status`, `name` and `swap_check` are available in every Claude Code session from the next session on.
 
 7. If anything in the check fails, read `~/Library/Logs/LocalModels/gateway.log` and report what it says. Never stop LM Studio's server, and never unload or reload a model without `swap_check` first.

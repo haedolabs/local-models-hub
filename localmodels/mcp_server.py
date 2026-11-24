@@ -5,7 +5,7 @@ per line; tool calls run in threads, so a long `ask` never blocks a session's ot
 
   localmodels mcp              # started by Claude Code, which talks to it over stdin/stdout
 
-Tools: status, guide, ask, batch, job_status, swap_check. ask and batch run local agents on the loaded model with
+Tools: status, guide, ask, batch, job_status, name, swap_check. ask and batch run local agents on the loaded model with
 tools that only read the session's own project folder; they run as their own process (a session that ends does not
 stop them) and go through the hub like everything else.
 """
@@ -20,16 +20,17 @@ INSTRUCTIONS = (
     "(full rules: the guide tool). Send OpenAI-compatible requests to http://localhost:1235/v1 or Anthropic-compatible ones to http://localhost:1235 (the gateway), "
     "never directly to LM Studio's port 1234: the gateway runs admission control across all clients, attributes each request to its project and session, and "
     "logs metadata only (never content). The project's name on the hub's screens is set once with the name tool. Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
-    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA. The status tool lists the loaded models and their total concurrent slots (at_once): "
-    "a batch should keep that many requests in flight (the gateway queues the rest). For bulk read-only jobs, use ask and batch here "
+    "X-Step (what the request is for); a batch adds X-Run, X-Run-Total and X-Run-Done for a progress bar and ETA, and a run in phases X-Phase, X-Phase-Total and X-Phase-Done (its plan: POST /hub/runs) for an estimate per phase and for the whole run. The status tool lists the loaded models and their total concurrent slots (at_once): "
+    "a batch should keep that many requests in flight (the gateway queues the rest; 0 while this Mac's local models are switched off and requests get 503). For bulk read-only jobs, use ask and batch here "
     "(local agents with read-only tools scoped to your project's folder) instead of Claude multi-agent workflows. "
     "Treat their answers as leads to verify, not verdicts. Never stop LM Studio's server; before unloading or reloading a model, call "
     "swap_check, and if it names anyone, do not swap. Report briefly.")
 _o = lambda props, req=(): {'type': 'object', 'properties': props, 'required': list(req)}
+FOLDER = {'type': 'string', 'description': "a folder inside this session's project (default: the session's working folder)"}
 TOOLS = [
     {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each instance\'s tokens since load against its '
      'recycle threshold), the gateway, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every client using a model by '
-     'project and Claude session (batches with their progress), crashes and recycles, and the last hour by project.',
+     'project and Claude session (batches with their progress), crashes, stalled instances and recycles, the switched-off state (peers only: requests go to the peers), and the last hour by project.',
      'inputSchema': _o({})},
     {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (endpoints, "
      "leases, swaps, local agents, logs). section=... reads one part; no section: the Now section and the section list.",
@@ -41,16 +42,19 @@ TOOLS = [
      "wait_seconds (default 120), else returns a job id for job_status. Treat the answer as a lead to verify.",
      'inputSchema': _o({'prompt': {'type': 'string'}, 'read_files': {'type': 'boolean'}, 'schema': {'type': 'object'}, 'think': {'type': 'boolean'},
                         'max_turns': {'type': 'integer', 'minimum': 1, 'maximum': 40}, 'max_tokens': {'type': 'integer', 'minimum': 256, 'maximum': 32000},
-                        'folder': {'type': 'string'}, 'wait_seconds': {'type': 'integer', 'minimum': 0, 'maximum': 600}}, ['prompt'])},
+                        'folder': FOLDER, 'wait_seconds': {'type': 'integer', 'minimum': 0, 'maximum': 600}}, ['prompt'])},
     {'name': 'batch', 'description': "Many local-agent jobs in parallel (bulk reading: checking many files, summarising "
      "many documents), each with read-only tools scoped to this project's folder. jobs: [{label, prompt, schema?, think?}] "
      "(think=false: no thinking, for lookups and extraction). parallel: concurrency (default: the total slots of the loaded "
-     "replicas). Returns a job id immediately; poll it with job_status. A job whose request fails because the model is "
-     "down retries with backoff for up to an hour. Treat the answers as leads to verify.",
+     "replicas). run and phase: this batch is that phase of a larger run (the hub shows the whole run and estimates each "
+     "phase; declare the phases to come with POST /hub/runs, GUIDE.md). Returns a job id immediately; poll it with "
+     "job_status. A job whose request fails because the model is down retries with backoff for up to an hour. Treat the "
+     "answers as leads to verify.",
      'inputSchema': _o({'jobs': {'type': 'array', 'items': _o({'label': {'type': 'string'}, 'prompt': {'type': 'string'},
                         'schema': {'type': 'object'}, 'max_turns': {'type': 'integer'}, 'max_tokens': {'type': 'integer'}, 'think': {'type': 'boolean'}}, ['prompt'])},
-                        'parallel': {'type': 'integer', 'minimum': 1, 'maximum': 16}, 'folder': {'type': 'string'}}, ['jobs'])},
-    {'name': 'job_status', 'description': 'Progress of an ask or batch job: done, running, failed, and when finished a line per job. '
+                        'parallel': {'type': 'integer', 'minimum': 1, 'maximum': 16}, 'folder': FOLDER,
+                        'run': {'type': 'string', 'maxLength': 80}, 'phase': {'type': 'string', 'maxLength': 60}}, ['jobs'])},
+    {'name': 'job_status', 'description': 'Progress of an ask or batch job this project started: done, running, failed, and when finished a line per job. '
      'results=true adds every answer (capped); label=... one job\'s full answer.',
      'inputSchema': _o({'job': {'type': 'string'}, 'label': {'type': 'string'}, 'results': {'type': 'boolean'}}, ['job'])},
     {'name': 'name', 'description': "How this project appears on every screen of the hub (dashboard, localmodels, status tool), for its "
@@ -75,7 +79,9 @@ def status():
     s = dict(time=time.strftime('%H:%M:%S'), door=dash.door(), lmstudio=dash.lmstudio(), users=dash.users(),
              claude=dash.claude(), last_hour=dash.last_hour())
     lm = s['lmstudio']
-    out = dict(ok=True, hub=('gateway listening' if s['door']['up'] else 'gateway down') + f" on {llmshare.HUB}", dashboard=f'{llmshare.HUB}/',
+    out = dict(ok=True, hub=('gateway listening' if s['door']['up'] else 'gateway down') + f" on {llmshare.HUB}"
+               + (' · it runs other code than this session\'s hub: localmodels install (or /local-models:setup after a plugin update)' if s['door'].get('stale') else ''),
+               dashboard=f'{llmshare.HUB}/',
                lmstudio=f"server {lm['server']}; " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded'),
                at_once=llmshare.at_once() if lm['families'] or _peers_up() else 0, using_now=[],
                claude_sessions=dict(working=sum(c['working'] for c in s['claude']), idle=sum(not c['working'] for c in s['claude'])),
@@ -90,8 +96,16 @@ def status():
         from . import errors; errors.record('mcp status: recycle view', e, source='mcp')
     from . import maint
     mt = maint.view()
-    if mt: out['maintenance'] = mt['words'] + ('. Requests now get 503 with Retry-After.' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
-    if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error() + ' (last valid settings remain in effect)'
+    if mt: out['maintenance'] = mt['words'] + ('. Requests go to the peers only (at_once counts their slots), 503 with Retry-After when none can take one.' if mt.get('peers') else
+                                               '. Requests now get 503 with Retry-After (at_once 0).' if mt['phase'] == 'on' else '. Do not start a batch that would run past it.')
+    try:
+        from . import crashes
+        st_ = crashes.stalled()
+        if st_: out['stalled'] = [s['words'] for s in st_]
+    except Exception as e:
+        from . import errors; errors.record('mcp status: stalled instances', e, source='mcp')
+    if llmshare.settings_error(): out['settings_error'] = llmshare.settings_error()
+    if s['door'].get('write_problem'): out['records_not_written'] = s['door']['write_problem']
     from . import cli
     lines = cli.peer_lines(s['door']['up'])
     if lines: out['peers'] = [x.strip() for x in lines]          # at_once counts the peers' free slots for this Mac too
@@ -120,27 +134,52 @@ def guide(section=None):
     return dict(ok=True, text='\n\n'.join(hit).strip()[:12000]) if hit else dict(ok=False, error=f'no section like {section!r}')
 
 
-def _root(folder=None):
+def _inside(p, d):
+    """p is d or inside it, compared without regard to capitals (macOS volumes ignore them, and realpath keeps them as given)."""
+    return p.lower() == d.lower() or p.lower().startswith(d.lower().rstrip(os.sep) + os.sep)
+
+
+def _session_folder():
+    """The session's project folder: its working folder, a worktree's main checkout instead of the worktree, or the
+    first folder under ~/Documents (or another of whois.ROOTS) that holds it."""
+    path = os.path.realpath(os.environ.get('PWD') or os.getcwd())
+    path = re.split(r'/\.claude/worktrees/|/\.worktrees/', path)[0]
+    for r in whois.ROOTS:
+        r = os.path.realpath(r)
+        if _inside(path, r) and path.lower() != r.lower(): return os.path.join(r, path[len(r) + 1:].split(os.sep)[0])
+    return path
+
+
+def _root(folder=None, within=None):
+    """The folder a job's agents may read: `folder` (default: the session's working folder), resolved. It must be
+    inside the home folder and not the home folder itself (in any case), not in ~/Library, not under a dot-folder of the
+    home folder (~/.ssh, ~/.aws, ~/.claude, ~/.config: keys, tokens, other sessions' records), and, for an MCP call,
+    inside `within`, the session's own project folder. -> (root, None) or (None, why)."""
     root = os.path.realpath(os.path.expanduser(folder or os.environ.get('PWD') or os.getcwd()))
     home = os.path.realpath(os.path.expanduser('~'))
     if not os.path.isdir(root): return None, f'no folder {folder!r}'
-    lib = os.path.join(home, 'Library')
-    inside = lambda p, d: p.lower() == d.lower() or p.lower().startswith(d.lower() + os.sep)
-    if root == home or not inside(root, home) or inside(root, lib):
+    if _inside(home, root) or not _inside(root, home) or _inside(root, os.path.join(home, 'Library')):
         return None, f'{root} is not a project folder (it must be inside your home folder, not ~/Library)'
+    if root[len(home) + 1:].split(os.sep)[0].startswith('.'):
+        return None, f'{root} is under a dot-folder of the home folder ({root[len(home) + 1:].split(os.sep)[0]}): not a project folder'
+    if within and not _inside(root, within):
+        return None, (f"{root} is outside this session's project folder ({within}): the MCP tools read only the session's own project "
+                      '(from a terminal, localmodels ask --dir names any project folder)')
     return root, None
 
 
-def start(kind, jobs, parallel=1, folder=None, read_files=True):
-    """Write a job folder and start its runner as its own process. -> (job id, folder) or raises ValueError."""
-    root, err = _root(folder)
+def start(kind, jobs, parallel=1, folder=None, read_files=True, within=None, run=None, phase=None):
+    """Write a job folder and start its runner as its own process. within: the session's project folder (MCP calls),
+    which the root must be inside and which names the job's project. -> (job id, folder) or raises ValueError."""
+    root, err = _root(folder, within)
     if err: raise ValueError(err)
     m, err = agent.loaded_model()
     if err: raise ValueError(err)
-    project = whois.project_of(root) or os.path.basename(root)
+    project = whois.project_of(within or root) or os.path.basename(within or root)
     d = agent.new_dir(os.path.join(AGENTS, llmshare._safe(project)), kind)
     jobs = agent.unique_labels([dict(j, label=j.get('label') or f'{kind}-{i + 1}') for i, j in enumerate(jobs)])
-    json.dump(dict(project=project, root=root, model=m['id'], parallel=parallel, kind=kind, read_files=read_files, jobs=jobs),
+    json.dump(dict(project=project, root=root, model=m['id'], parallel=parallel, kind=kind, read_files=read_files, jobs=jobs,
+                   **({'run': str(run)[:80], 'phase': str(phase or 'all')[:60]} if run else {})),
               open(os.path.join(d, 'jobs.json'), 'w'), indent=1)
     py = shutil.which('python3') or sys.executable
     p = subprocess.Popen([py, os.path.join(HOME, 'bin', 'localmodels'), 'agent-run', d], cwd=root, start_new_session=True,
@@ -208,7 +247,11 @@ def call(name, a):
         models = a.get('models') or [r['id'] for r in llmshare.loaded(fresh=True)]
         why = llmshare.swap_blockers(models)
         return dict(ok=True, models=models, blockers=why, safe=not why)
-    if name == 'job_status': return job_status(a.get('job', ''), a.get('label'), bool(a.get('results')))
+    if name == 'job_status':
+        job, mine = str(a.get('job') or ''), _session_folder()
+        own = llmshare._safe(whois.project_of(mine) or os.path.basename(mine))
+        if job.split('/')[0] != own: return dict(ok=False, error=f'no job {job!r} in this project ({own}): job_status reads only the jobs this project started')
+        return job_status(job, a.get('label'), bool(a.get('results')))
     if name == 'name': return name_project(a.get('name'), a.get('formerly') or [], a.get('private'))
     if name in ('ask', 'batch'):
         if name == 'ask':
@@ -218,7 +261,8 @@ def call(name, a):
             jobs = [j for j in a.get('jobs') or [] if isinstance(j, dict) and j.get('prompt')]
             if not jobs: return dict(ok=False, error='no jobs with a prompt')
         at_once = llmshare.at_once() or llmshare.settings().get('batch_at_once', 8)
-        try: job, d = start(name, jobs, int(a.get('parallel') or (1 if name == 'ask' else at_once)), a.get('folder'), a.get('read_files', True))
+        try: job, d = start(name, jobs, int(a.get('parallel') or (1 if name == 'ask' else at_once)), a.get('folder'), a.get('read_files', True), within=_session_folder(),
+                               run=a.get('run') if name == 'batch' else None, phase=a.get('phase'))
         except (ValueError, TypeError) as e: return dict(ok=False, error=str(e))
         if name == 'batch': return dict(ok=True, job=job, jobs=len(jobs), note='follow it with job_status')
         t0, wait = time.time(), int(a.get('wait_seconds') if a.get('wait_seconds') is not None else 120)
@@ -241,7 +285,8 @@ def run_folder(d):
     defs = (lambda job: files.defs()) if spec.get('read_files', True) else (lambda job: [])
     kind = 'ask' if spec.get('kind') == 'ask' else 'batch'
     summary, _, _ = agent.batch(spec['jobs'], spec['model'], defs, lambda n, a, job: files.call(n, a), spec['project'],
-                                spec.get('parallel', 1), out_dir=d, quiet=True, by='claude' if os.environ.get('CLAUDECODE') == '1' else None, kind=kind)
+                                spec.get('parallel', 1), out_dir=d, quiet=True, by='claude' if os.environ.get('CLAUDECODE') == '1' else None, kind=kind,
+                                run=spec.get('run'), phase=spec.get('phase'))
     print(f"{summary['ok']} of {summary['jobs']} ok in {summary['seconds']} s")
     return 0 if summary['ok'] == summary['jobs'] else 1
 

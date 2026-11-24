@@ -51,11 +51,12 @@ _on_state = []         # what use_state() repoints: this module's paths, then ev
 
 def _paths(root):
     """Every path of the shared state, under one root."""
-    global SHARED, SLOTS, LEASES, INFLIGHT, WAITS, REQUESTS, MODELS, SWAP_LOCK, LISTING, RUN, GATEWAYS, ROLES, PEER_SLOTS
+    global SHARED, SLOTS, LEASES, INFLIGHT, WAITS, REQUESTS, MODELS, MODELS_GOOD, SWAP_LOCK, LISTING, RUN, GATEWAYS, ROLES, PEER_SLOTS
     SHARED = root
     SLOTS, LEASES, INFLIGHT = (os.path.join(root, d) for d in ('slots', 'leases', 'inflight'))
     WAITS, REQUESTS = os.path.join(root, 'waits.jsonl'), os.path.join(root, 'requests.jsonl')
     MODELS, SWAP_LOCK, LISTING = (os.path.join(root, f) for f in ('models.json', 'swap.lock', 'listing.json'))
+    MODELS_GOOD = os.path.join(root, 'models.last-good.json')    # the last settings file the gateway read well
     RUN = os.path.join(root, 'run')                          # mode 0700: the registry, roles, nudges, the server-start lock
     GATEWAYS, ROLES = os.path.join(RUN, 'gateways'), os.path.join(RUN, 'roles')
     PEER_SLOTS = os.path.join(root, 'peer-slots')
@@ -102,6 +103,15 @@ _fq = {'at': 0.0, 'rows': []}                            # other gateways' queue
 _listing = {'checked': 0.0, 'mtime': None}               # listing.json, looked at (a stat) at most every second
 
 
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def urlopen(req, timeout=None):
+    """urllib's urlopen with no proxy: every address the hub calls is this Mac's own (the gateway, LM Studio), so neither
+    http_proxy in the environment nor the system's web proxy may see a prompt on its way there."""
+    return _opener.open(req, timeout=timeout)
+
+
 def _int(x):
     try: return int(x)
     except (TypeError, ValueError): return 0
@@ -123,15 +133,31 @@ def _error(where, e):
     except Exception: pass                                   # not recorded: the recorder itself failed; nothing left to tell
 
 
+_unwritten = {}                                          # the last record this process could not write: path, error, since
+
+
 def _append(path, rec, roll_at=0):
-    """One JSON line, appended under a lock so two processes never interleave; past roll_at bytes the file becomes <path>.1."""
+    """One JSON line, appended under a lock so two processes never interleave; past roll_at bytes the file becomes
+    <path>.1. -> True when written; False when not (a full disk, a folder not writable), kept for write_problem()."""
     try:
         os.makedirs(SHARED, exist_ok=True)
         with open(path, 'a') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             f.write(json.dumps(rec) + '\n')
             if roll_at and f.tell() > roll_at and os.path.getsize(path) > roll_at: os.replace(path, path + '.1')
-    except OSError: pass
+    except OSError as e:
+        _unwritten.update(path=path, error=e.strerror or str(e), since=_unwritten.get('since') or time.time())
+        return False
+    _unwritten.clear()
+    return True
+
+
+def write_problem():
+    """Words when this process could not write the hub's records lately, else None: the request log feeds the recycle
+    counts, admission's bytes per token, batch progress and the charts, so they stand still until it can."""
+    if not _unwritten: return None
+    return (f"the hub's records are not writable since {time.strftime('%H:%M', time.localtime(_unwritten['since']))} "
+            f"({os.path.basename(_unwritten['path'])}: {_unwritten['error']}): recycle counts, batch progress and the charts are frozen")
 
 
 def _note(kind, model, seconds=0.0):
@@ -267,7 +293,7 @@ def api_models(timeout=3):
     answer. Cheap, and from the server itself, so it is the cross-check when `lms ps` and the door disagree."""
     if time.time() - _api['at'] < 2: return _api['ids']
     try:
-        d = json.load(urllib.request.urlopen(LMSTUDIO + '/api/v0/models', timeout=timeout))
+        d = json.load(urlopen(LMSTUDIO + '/api/v0/models', timeout=timeout))
         ids = {m['id']: m.get('loaded_context_length') for m in d.get('data', []) if m.get('state') == 'loaded' and m.get('id')}
     except (OSError, ValueError, KeyError, TypeError): ids = None
     _api.update(at=time.time(), ids=ids)
@@ -282,6 +308,7 @@ def parallel_of(model):
 
 # ---------------------------------------------------------------- copies: one model loaded more than once
 MODELS_DEFAULT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models.json')   # the repo's defaults (MODELS: the live settings on this Mac)
+KEEP_GOOD = False                                        # the gateway sets it: its process alone writes MODELS_GOOD
 _conf = {'path': None, 'mtime': None, 'data': {}, 'error': None}
 
 
@@ -289,23 +316,64 @@ def settings_path():
     return MODELS if os.path.exists(MODELS) else MODELS_DEFAULT
 
 
+def _number(v, positive=False, whole=False):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and (not whole or float(v).is_integer()) and (not positive or v > 0)
+
+
+def validate(d):
+    """The settings' shape, checked before a file is taken: ValueError naming the key that is wrong."""
+    if not isinstance(d, dict): raise ValueError('not a JSON object')
+    fams = d.get('families', {})
+    if not isinstance(fams, dict): raise ValueError('"families" must be an object of families')
+    for name, f in fams.items():
+        if not isinstance(f, dict): raise ValueError(f'family {name!r} must be an object')
+        for k in ('copies', 'context', 'parallel'):
+            if k in f and not _number(f[k], positive=True, whole=True): raise ValueError(f'{name}: "{k}" must be a whole number above 0, not {f[k]!r}')
+        for k in ('recycle', 'admit', 'watchdog'):
+            v = f.get(k)
+            if k in f and not (isinstance(v, bool) or isinstance(v, dict) and all(_number(x) for x in v.values())):
+                raise ValueError(f'{name}: "{k}" must be true, false or an object of numbers, not {v!r}')
+        if 'key' in f and not isinstance(f['key'], str): raise ValueError(f'{name}: "key" must be a model key')
+    for k, positive in (('headroom_gb', False), ('batch_at_once', True)):
+        if k in d and not _number(d[k], positive=positive): raise ValueError(f'"{k}" must be a number, not {d[k]!r}')
+    for k in ('peers', 'serve'):
+        if k in d and not isinstance(d[k], dict): raise ValueError(f'"{k}" must be an object')
+
+
 def settings():
     """The hub's settings: {"families": {id: {key, copies, context, parallel, recycle}}, "batch_at_once", "headroom_gb"}.
-    A file that cannot be read (bad JSON, half written) leaves the last good settings standing; settings_error() says so."""
+    A file that cannot be read (bad JSON, half written) or has the wrong shape (validate) leaves the last good settings
+    standing: in a process that has read none yet (a gateway just restarted), the last good copy the gateway kept;
+    settings_error() says which."""
     p = settings_path()
     try: m = os.path.getmtime(p)
     except OSError: return _conf['data']
     if (p, m) != (_conf['path'], _conf['mtime']):
+        first = _conf['path'] is None
         try:
             d = json.load(open(p))
-            if not isinstance(d, dict): raise ValueError('not a JSON object')
+            validate(d)
             _conf.update(path=p, mtime=m, data=d, error=None)
-        except (OSError, ValueError) as e: _conf.update(path=p, mtime=m, error=f'{p}: {type(e).__name__}: {e}')
+            if KEEP_GOOD and p == MODELS:
+                try:
+                    tmp = f'{MODELS_GOOD}.{os.getpid()}.tmp'
+                    with open(tmp, 'w') as f: json.dump(d, f, indent=2)
+                    os.replace(tmp, MODELS_GOOD)
+                except OSError: pass
+        except (OSError, ValueError) as e:
+            why, data = f'{p}: {type(e).__name__}: {e}', _conf['data']
+            if first:                                        # nothing read in this process yet: the last good copy, if any
+                try:
+                    data = json.load(open(MODELS_GOOD)); validate(data)
+                    why += f"; the last good copy (saved {time.strftime('%d %b %H:%M', time.localtime(os.path.getmtime(MODELS_GOOD)))}) is in effect"
+                except (OSError, ValueError): data, why = {}, why + '; no valid settings: running with none'
+            else: why += '; the last valid settings remain in effect'
+            _conf.update(path=p, mtime=m, data=data, error=why)
     return _conf['data']
 
 
 def settings_error():
-    """Why the settings file could not be read, or None (the last good settings stand meanwhile)."""
+    """Why the settings file could not be taken, and which settings are in effect meanwhile, or None."""
     return _conf['error']
 
 
@@ -339,23 +407,30 @@ def copies(model, fresh=False):
 
 
 def at_once(model=None):
-    """How many answers a model's loaded copies give at once in all (two copies of 4: 8). model None: the loaded model
-    that gives the most. Batches through the hub send this many."""
-    rows = loaded()
+    """How many answers a model's loaded copies give at once in all (two copies of 4: 8), with the slots its peers have
+    free for this Mac. model None: the loaded model that gives the most. Batches through the hub send this many. 0 while
+    the gateway refuses every request (maintenance that is on, or the local models switched off); switched off to peers
+    only, the peers' slots alone (0 when none is up)."""
+    try:
+        from . import maint
+        if maint.refusing(): return 0
+        here_too = not maint.peers_only()
+    except Exception as e: here_too = True; _error('at_once: maintenance', e)
+    rows = loaded() if here_too else []
     if model is None:
         fams = {family(r['id']) for r in rows}
         try:
             from . import peers                              # the families this Mac's peers serve for it count too
             fams |= {f for p in peers.view() for f in (p.get('families') or {})}
         except Exception as e: _error('at_once: peer families', e)
-        return max([at_once(f) for f in fams] or [1])
+        return max([at_once(f) for f in fams] or [1 if here_too else 0])
     ids = {r['id'] for r in rows}
     here = sum(parallel_of(c) for c in copies(model) if c in ids)
     try:
         from . import peers
         there = peers.capacity(model)
     except Exception as e: there = 0; _error('at_once: peer capacity', e)
-    return (here + there) or parallel_of(model)
+    return (here + there) or (parallel_of(model) if here_too else 0)
 
 
 @contextlib.contextmanager
@@ -631,7 +706,7 @@ class Counted:
 def server_up(timeout=3, url=None):
     """Whether LM Studio's server (url: LMSTUDIO) is up: only a refused connection means down. A slow answer, a reset or a
     cut answer means it is up and busy, and starting it then would restart it under every request in flight."""
-    try: urllib.request.urlopen((url or LMSTUDIO) + '/v1/models', timeout=timeout); return True
+    try: urlopen((url or LMSTUDIO) + '/v1/models', timeout=timeout); return True
     except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
     except ConnectionRefusedError: return False
     except OSError: return True
@@ -961,7 +1036,11 @@ def hub_up(fresh=False):
     """Whether the hub's door is answering (cached 5 s). A door that is slow to answer is up (something is listening and
     busy); only a refused connection means it is down."""
     if fresh or time.time() - _hub['at'] > 5:
-        try: up = json.load(urllib.request.urlopen(HUB + '/hub/health', timeout=3)).get('ok') is True
+        try:
+            health = json.load(urlopen(HUB + '/hub/health', timeout=3))
+            up = isinstance(health, dict) and health.get('ok') is True
+            _hub['health'] = health if up else {}
+        except urllib.error.HTTPError: up = False                # something answered, and it is not the gateway's health
         except urllib.error.URLError as e: up = not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
         except ConnectionRefusedError: up = False
         except (OSError, ValueError): up = True
@@ -975,7 +1054,7 @@ def base_url():
 
 
 def get(path, timeout=10):
-    return json.load(urllib.request.urlopen(base_url() + path, timeout=timeout))
+    return json.load(urlopen(base_url() + path, timeout=timeout))
 
 
 def post(path, body, project, kind='other', timeout=3600, headers=None):
@@ -986,21 +1065,21 @@ def post(path, body, project, kind='other', timeout=3600, headers=None):
         hub_headers = dict(base, **{'X-Project': str(project), 'X-Timeout': str(int(timeout))}, **(headers or {}))   # the door bounds its wait by it
         if kind in KINDS and kind != 'other': hub_headers['X-Kind'] = kind   # else the hub reads the kind from the run's lease
         req = urllib.request.Request(HUB + path, data=data, headers=hub_headers)
-        try: return json.load(urllib.request.urlopen(req, timeout=timeout))
+        try: return json.load(urlopen(req, timeout=timeout))
         except urllib.error.HTTPError: raise
         except urllib.error.URLError as e:                 # the door is restarting (refused: the request never reached the
             if not isinstance(e.reason, ConnectionRefusedError): raise    # model), so this once go straight to LM Studio
             _hub.update(at=time.time(), up=False)
     req = urllib.request.Request(LMSTUDIO + path, data=data, headers=base)
     with (slot(body['model']) if body.get('model') else contextlib.nullcontext()):
-        return json.load(urllib.request.urlopen(req, timeout=timeout))
+        return json.load(urlopen(req, timeout=timeout))
 
 
 def hub_post(path, body=None, timeout=5):
     """A small request to the hub itself (/hub/...), or None when the door does not answer."""
     try:
         req = urllib.request.Request(HUB + path, data=json.dumps(body or {}).encode(), headers={'Content-Type': 'application/json'})
-        return json.load(urllib.request.urlopen(req, timeout=timeout))
+        return json.load(urlopen(req, timeout=timeout))
     except (OSError, ValueError): return None
 
 

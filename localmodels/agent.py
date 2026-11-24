@@ -21,7 +21,7 @@ can never be empty says "nonempty": true and gets minItems: 1 on its lists from 
 answers). A request that fails because the model is down or LM Studio is not answering is tried again with growing pauses
 for up to "wait_down" seconds in all, so a crash in the night costs a job minutes, not its result.
 """
-import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, time, urllib.error
+import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, threading, time, urllib.error
 
 from . import llmshare
 
@@ -211,19 +211,45 @@ def answer(m):
     return re.sub(r'<think>.*?</think>', '', m.get('content') or '', flags=re.S).strip()
 
 
-def json_from(text):
+def json_from(text, kind=None):
+    """The JSON in a model's answer: the whole text (a code fence stripped), else the first object or list in it that
+    parses, so words before or after it do no harm. kind ('object' or 'array', the schema's): only that kind."""
     t = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', (text or '').strip())
-    for cand in (t, (re.search(r'\{.*\}', t, re.S) or [None])[0]):
-        if not cand: continue
-        try: return json.loads(cand)
-        except ValueError: pass
+    want = {'object': dict, 'array': list}.get(kind, (dict, list))
+    try:
+        v = json.loads(t)
+        if kind not in ('object', 'array') or isinstance(v, want): return v
+    except ValueError: pass
+    dec = json.JSONDecoder()
+    for m in list(re.finditer(r'[\[{]', t))[:400]:
+        try: v = dec.raw_decode(t, m.start())[0]
+        except ValueError: continue
+        if isinstance(v, want): return v
     return None
 
 
+def _is(v, kind):
+    if kind == 'integer': return (isinstance(v, int) or isinstance(v, float) and v.is_integer()) and not isinstance(v, bool)
+    if kind == 'number': return isinstance(v, (int, float)) and not isinstance(v, bool)
+    t = {'object': dict, 'array': list, 'string': str, 'boolean': bool, 'null': type(None)}.get(kind)
+    return isinstance(v, t) if t else True
+
+
 def valid(obj, schema):
-    if schema.get('type') == 'object': return isinstance(obj, dict) and all(k in obj for k in schema.get('required', []))
-    if schema.get('type') == 'array': return isinstance(obj, list)
-    return obj is not None
+    """obj matches the schema, all the way down: type, required, properties, items, enum, const, minItems and maxItems
+    (what strict mode enforces; a plain answer, asked without it, is held to the same)."""
+    if not isinstance(schema, dict): return True
+    if 'enum' in schema and obj not in schema['enum']: return False
+    if 'const' in schema and obj != schema['const']: return False
+    ty = schema.get('type')
+    if ty is not None and not any(_is(obj, k) for k in (ty if isinstance(ty, list) else [ty])): return False
+    if isinstance(obj, dict):
+        if not all(k in obj for k in schema.get('required') or []): return False
+        if not all(valid(obj[k], sub) for k, sub in (schema.get('properties') or {}).items() if k in obj): return False
+    if isinstance(obj, list):
+        if len(obj) < int(schema.get('minItems') or 0) or ('maxItems' in schema and len(obj) > int(schema['maxItems'])): return False
+        if isinstance(schema.get('items'), dict) and not all(valid(x, schema['items']) for x in obj): return False
+    return True
 
 
 def nonempty(schema):
@@ -237,10 +263,13 @@ def nonempty(schema):
 
 
 def empty(obj):
-    """An answer with nothing in it: a list with no items, or an object whose every value is empty (the model's whim on
-    a strict schema: it opens and closes its thinking and lists nothing)."""
+    """An answer with nothing in it (the model's whim on a strict schema: it opens and closes its thinking and lists
+    nothing): a list with no items, an object whose lists are all empty (a count or a note beside them changes nothing),
+    or an object with no list whose every value is empty."""
     if isinstance(obj, list): return not obj
-    if isinstance(obj, dict): return bool(obj) and all(v in ([], {}, None, '') for v in obj.values())
+    if isinstance(obj, dict) and obj:
+        lists = [v for v in obj.values() if isinstance(v, list)]
+        return all(not v for v in lists) if lists else all(v in ([], {}, None, '') for v in obj.values())
     return False
 
 
@@ -278,8 +307,10 @@ def step_words(fn, a):
 
 
 # ---------------------------------------------------------------- one agent
-def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None, system=SYSTEM, words=step_words, kind='batch'):
+def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None, system=SYSTEM, words=step_words, kind='batch', headers=None):
     """One job, start to answer. defs(job) -> the tools it may use (MCP-style dicts); call(name, args, job) -> a result.
+    headers: more for the hub on each request (a dict, or a function returning one, read at each request): the run and
+    phase it belongs to, e.g. agent.phase_headers(run, phase, total, done).
     -> {label, ok, model, answer, result, seconds, turns, calls, usage, log}."""
     t0, lab = time.time(), label(job.get('label'))
     mark = os.path.join(log_dir, lab + '.running') if log_dir else None   # the dash shows jobs in progress
@@ -307,7 +338,8 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
         t_first, k = time.time(), 0
         wait_down = WAIT_DOWN if job.get('wait_down') is None else float(job['wait_down'])
         while True:
-            try: r = post('/v1/chat/completions', req, project, kind, headers={'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
+            more = (headers() if callable(headers) else headers) or {}
+            try: r = post('/v1/chat/completions', req, project, kind, headers={**more, 'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
             except Exception as e:                       # not recorded: a failed request is retried or raised to the job, whose log holds it
                 again, pause, what = transient(e)
                 if not again or time.time() - t_first >= wait_down: raise
@@ -385,8 +417,9 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                 try: m = ask(body, think=think)
                 except urllib.error.HTTPError as e:
                     last_err = (e.code, err_text(e)); modes.pop(0); continue
-                obj = json_from(m.get('content'))                            # LM Studio may put it in either
-                if obj is None: obj = json_from(m.get('reasoning_content'))
+                kind = job['schema'].get('type')
+                obj = json_from(m.get('content'), kind)                      # LM Studio may put it in either
+                if obj is None: obj = json_from(m.get('reasoning_content'), kind)
                 if obj is None and m.get('_finish') == 'length' and not grown:                # cut off: once more with room
                     grown, tokens = True, tokens * 2; usage['cut'] = usage.get('cut', 0) + 1; continue
                 if obj is not None and valid(obj, job['schema']):
@@ -396,6 +429,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                                                {'role': 'user', 'content': 'That answer lists nothing. Look again at what you found and list every item, as the schema asks.'}]
                         continue
                     result = obj; break
+                if obj is not None: usage['invalid'] = usage.get('invalid', 0) + 1           # JSON, but not the schema's shape
                 if kept is not None: result = kept; break                                     # the plain ask gave nothing usable: the empty answer stands
                 modes.pop(0)
             if result is None and last_err:
@@ -430,6 +464,20 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
     return out
 
 
+def phase_headers(run, phase, total=None, done=None):
+    """The headers that put a request in a run's phase (X-Run, X-Phase, X-Phase-Total, X-Phase-Done), for run_job's headers."""
+    h = {'X-Run': str(run)[:80], 'X-Phase': str(phase)[:60]}
+    if total is not None: h['X-Phase-Total'] = str(int(total))
+    if done is not None: h['X-Phase-Done'] = str(int(done))
+    return h
+
+
+def plan_run(run, phases, project, end=False):
+    """Declare a run's phases to the hub, in order: [{"name", "items", "approx"}] (POST /hub/runs); again to update them,
+    end=True when the run is over. -> the hub's answer, or None when the hub does not answer."""
+    return llmshare.hub_post('/hub/runs', dict(run=run, phases=phases, project=project, end=end))
+
+
 def new_dir(logs, kind):
     """A fresh folder for a batch, never one another session is writing: the time, then -2, -3... if taken."""
     os.makedirs(logs, exist_ok=True)
@@ -441,25 +489,31 @@ def new_dir(logs, kind):
 
 
 def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None, extra=None, quiet=False, system=SYSTEM,
-          words=step_words, by=None, kind='batch'):
+          words=step_words, by=None, kind='batch', run=None, phase=None):
     """Run jobs side by side (as many as LM Studio answers at once), holding a lease the dash reads its progress from.
-    Asks the hub for fresh copies first (a copy far along its band is recycled before the work starts). -> (summary, folder, results)."""
+    Asks the hub for fresh copies first (a copy far along its band is recycled before the work starts). run and phase:
+    this batch is that phase of that run (its size declared to the hub, each request counted in it; plan_run declares
+    the phases still to come). -> (summary, folder, results)."""
     logs = logs or os.path.expanduser('~/Library/Logs/LocalModels/agents')
     out_dir = out_dir or new_dir(logs, 'batch')
     os.makedirs(out_dir, exist_ok=True)
     jobs = unique_labels(jobs)
     json.dump(dict(model=model, parallel=parallel, started=time.time(), jobs=[j['label'] for j in jobs], project=project, pid=os.getpid(),
-                   by=by or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you')),
+                   by=by or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you'), **({'run': run, 'phase': phase or 'all'} if run else {})),
               open(os.path.join(out_dir, 'plan.json'), 'w'))
     if kind == 'batch' and len(jobs) > 1: llmshare.hub_post('/hub/recycle', dict(model=model))
     t0, results = time.time(), []
+    if run: plan_run(run, [dict(name=phase or 'all', items=len(jobs))], project)
+    finished, flock = [0], threading.Lock()             # counted in the worker, before it takes its next job: the
+    more = (lambda: phase_headers(run, phase or 'all', len(jobs), finished[0])) if run else None   # main thread's results lag behind it
     try:
         with llmshare.lease(project, [model], kind, log_dir=out_dir), cf.ThreadPoolExecutor(max_workers=max(1, int(parallel))) as ex:
             def once_more(j):                                   # a local model sometimes ends with no answer: one retry
                 try:
-                    r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind)
-                    if not r['ok'] and not r.get('error'): r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind); r['retried'] = True
+                    r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind, more)
+                    if not r['ok'] and not r.get('error'): r = run_job(j, model, defs, call, project, out_dir, logs, extra, system, words, kind, more); r['retried'] = True
                 except Exception as e: r = dict(label=label(j.get('label')), ok=False, error=f'{type(e).__name__}: {e}', seconds=0, turns=0, calls=[], usage={})   # not recorded: the job's result
+                with flock: finished[0] += 1
                 return r
             for f in cf.as_completed([ex.submit(once_more, j) for j in jobs]):
                 r = f.result(); results.append(r)

@@ -88,9 +88,10 @@ def _app(argv, exe=''):
     first = argv[0] if argv else exe or ''
     name = os.path.basename(first)
     if re.match(r'(?i)(python[\d.]*|node|ruby|perl)$', name):
-        if len(argv) > 2 and argv[1] == '-m': return argv[2]
-        script = next((a for a in argv[1:] if not a.startswith('-')), '') if '-c' not in argv[1:2] else ''
-        if script: return os.path.basename(script)
+        if len(argv) > 2 and argv[1] == '-m': return argv[2][:80]
+        inline = any(a in ('-c', '-e', '-p', '--eval', '--print') for a in argv[1:])   # code on the command line: never a name
+        script = '' if inline else next((a for a in argv[1:] if not a.startswith('-')), '')
+        if script: return os.path.basename(script)[:80]
         return 'python' if name.lower().startswith('python') else name
     if re.match(r'(ba|z|fi)?sh$', name): return name
     m = re.search(r'/([^/]+)\.app/', first)

@@ -9,10 +9,24 @@
   localmodels keep               one instance-manager pass: crash reloads, missing replicas, due recycles
   localmodels recycle [model] | --status   request fresh instances before a batch (instances past before_batch of
                                  their threshold recycle first) | tokens since load against the recycle threshold
-  localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off
+  localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [reason ...] | off
                                  announce a maintenance window (X-Hub-Maintenance, dashboard, MCP status, Claude Code
                                  hook); while active, new requests get 503 + Retry-After and the instance manager pauses;
                                  off reloads the families loaded at its start. No arguments: the window and overlapping runs
+  localmodels off [--force] [reason ...]   switch the local models off: new requests get 503, every instance is unloaded
+                                 once the requests in flight finish, and nothing is loaded, reloaded or started (crash
+                                 recovery, load_at_start, LM Studio's server) until `localmodels on`; kept across restarts.
+                                 Refused while a run holds a lease on a loaded model, unless --force
+  localmodels off --peers [reason ...]   the same here, while the gateway keeps admitting requests and sends every one to
+                                 its peers' slots (503 with Retry-After when no peer can take it); nothing is cut and no
+                                 lease refuses it: this Mac's instances are unloaded once the requests on them finish
+  localmodels on                 switch them on again: the families loaded when switched off are loaded (all replicas)
+  localmodels app install | uninstall   the menu-bar app: built here from app/ with the Command Line Tools' swiftc, signed
+                                 ad hoc, in ~/Applications (state icon, on/off per host, two notifications, and a section
+                                 for each extension)
+  localmodels ext [check]        the extensions the menu-bar app draws (a manifest each in the state folder's extensions/,
+                                 GUIDE.md "Extensions"): each one's menu answering or not; check: every manifest and the
+                                 menu it serves read against the protocol (exit 1 on a problem)
   localmodels name               each project as seen and as shown on every screen, with its batches, jobs and scripts
   localmodels name project <as seen> <shown>            what every screen calls a project (a folder or an X-Project)
   localmodels name batch <project> <as seen> <shown>    a name for one of its batches, jobs or scripts
@@ -20,6 +34,9 @@
   localmodels name forget <project> [<as seen>]         drop a name: one label, or the project's whole entry
   localmodels present on [for 2h] [show a,b] | off      screenshot mode: screens show the projects named (the demo's
                                  and local-models by default) and every other one as "other", with no session titles
+  localmodels pictures [--out docs] [--dry]   the README's pictures of the dashboard (headless Chrome, 1512 x 900 and
+                                 1728 x 1117 at 2x, dark and light, close-ups cut along the page's own boxes); only in
+                                 screenshot mode with 5 minutes left
   localmodels demo [--minutes 60] [--dry]   a synthetic workload under generic names (made-up records, three projects,
                                  every slot filled) for screenshots and load tests
   localmodels crashes [--days 7] [--scan]   LM Studio's crashes, the reloads and recycles (--scan: older ones in its logs)
@@ -30,6 +47,11 @@
   localmodels peer add <name> <address>   add a peer gateway by its Thunderbolt Bridge address (port 1235 by default)
   localmodels peer remove <name>
   localmodels peer serve <address> | off  serve as a peer: bind a link listener on that address (token required)
+  localmodels peer off <name> [--force] [reason ...]   switch a peer's local models off from this host (what
+                                 `localmodels off` does there: unloaded once its requests in flight finish, 503 until on;
+                                 refused while a run there holds a lease, unless --force); no request is routed to it
+  localmodels peer on <name>     switch them on again there: the families loaded when switched off are loaded
+  localmodels peer log [--hours 24]   each change of a peer's state (up, down, refused, maintenance), with its reason
   localmodels peer token         create peer-token (0600) if missing; print the ssh command that copies it to another host
   localmodels peer gpu-limit     write the boot LaunchDaemon com.local-models.gpu-limit (iogpu.wired_limit_mb = total - 8 GiB)
                                  and print the sudo commands that install it; verify an installed one
@@ -53,10 +75,14 @@
   localmodels start | stop | restart     the gateway (start is a no-op when running; restart waits for no requests in flight)
   localmodels gateway            run the gateway in the foreground (what launchd runs)
   localmodels mcp                the MCP server (Claude Code starts it)
-  localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check and the privacy check, then
-                                 the version stamped, committed, tagged and pushed (--dry: the checks only)
+  localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check, the privacy and secrets
+                                 checks, then the version stamped, committed, tagged and pushed (--dry: the checks only)
+  localmodels prepush            git's pre-push hook (install writes it): the privacy and secrets checks on every push,
+                                 and no rewrite or deletion of a remote branch (LOCALMODELS_ALLOW_REWRITE=1 on purpose)
+  localmodels help | -h | --help anywhere: this text. An option a verb does not take, or a value it cannot use, runs
+                                 nothing (exit 2); --name=value is read as --name value, --dry-run as --dry
 """
-import glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
+import errno, glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
 
 from . import HOME, NAME, VERSION, llmshare
 
@@ -81,7 +107,7 @@ _HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.pa
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_code.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_extensions.py', 'test_code.py', 'test_handoff.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -92,8 +118,8 @@ def ago_left(s):
     s = max(0, int(round(s)))
     if s < 90: return f'{s} s'
     if s < 5400: return f'{round(s / 60)} min'
-    if s < 172800: h, m = s // 3600, round(s % 3600 / 60); return f'{h} h' + (f' {m} min' if m else '')
-    d, h = s // 86400, round(s % 86400 / 3600); return f'{d} d' + (f' {h} h' if h else '')
+    if s < 172800: s = round(s / 60) * 60; h, m = s // 3600, s % 3600 // 60; return f'{h} h' + (f' {m} min' if m else '')   # rounded first: never "1 h 60 min"
+    s = round(s / 3600) * 3600; d, h = s // 86400, s % 86400 // 3600; return f'{d} d' + (f' {h} h' if h else '')
 
 
 def finish_words(t):
@@ -110,7 +136,24 @@ def track_words(word, p):
     when = (f"{ago_left(p['left'])} left" + (f", done about {finish_words(p['finish'])}" if p.get('finish') else '') if p.get('left') else 'finishing') \
         if p.get('left') is not None \
         else 'estimating the time left' if p['done'] < p['total'] else 'done'
-    return f" · {word}{' ' + p['name'] if p.get('name') else ''}: {p['done']} of {p['total']}, {when}"
+    if p.get('left') is None and p.get('at_least'): when = f"at least {ago_left(p['at_least'])} left, still estimating"
+    return f" · {word}{' ' + p['name'] if p.get('name') else ''}: {p['done']} of {p['total']}, {when}" + phase_words(p)
+
+
+BASIS_WORDS = {'this run earlier': 'from this run earlier', 'an earlier run': 'from an earlier run', "this run's other phases": "from this run's other phases"}
+
+
+def phase_words(p):
+    """A run in phases, after its whole: '; phase C 19 of 50 (31 min), then D 40 (about 1 h 20 min, from an earlier run), E 10 (...)'."""
+    ps = [dict(x, name=x.get('name') or f'#{i + 1}') for i, x in enumerate(p.get('phases') or [])]   # unnamed: a private project's, numbered
+    todo = [x for x in ps if x.get('state') != 'done']
+    if not todo: return ''
+    def one(x, first):
+        size = f"{x['done']} of {x['total']}" if x['state'] == 'running' and x.get('total') else f"{'~' if x.get('approx') else ''}{x['total']}" if x.get('total') is not None else 'size not known'
+        est = 'not estimated yet' if x.get('left') is None else ago_left(x['left']) if x.get('basis') == 'measured' else f"about {ago_left(x['left'])}, {BASIS_WORDS.get(x.get('basis'), 'estimated')}"
+        return f"{'phase ' if first else ''}{x['name']} {size} ({est})"
+    done = [x['name'] for x in ps if x.get('state') == 'done']
+    return '; ' + (f"{', '.join(done)} done; " if done else '') + one(todo[0], True) + (', then ' + ', '.join(one(x, False) for x in todo[1:]) if todo[1:] else '')
 
 
 def num(a, name, default):
@@ -132,14 +175,25 @@ def status():
     d, lm, users, cs = dash.door(), dash.lmstudio(), dash.users(), dash.claude()
     from . import maint
     mt = maint.view()
-    if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + (' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
+    if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + ('' if mt.get('off') else ' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
     print(f"gateway: {'listening on ' + llmshare.HUB if d['up'] else 'down (localmodels start)'}"
           + (' · stale code: localmodels install' if d['up'] and d['stale'] else ''))
     gw = dash.gateway_words()
     if gw: print('  ' + gw[len('gateway: '):])                          # the workers: serving, and draining with what they finish
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
-    if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()} (last valid settings in effect)')
+    if mt and mt.get('off'):
+        n = llmshare.at_once()
+        print(f"  requests: sent to peers only, {n} slot{'s' if n != 1 else ''} free for this gateway (at_once)" if mt.get('peers') else
+              '  requests: refused (503 with Retry-After) until switched on; at_once 0. To keep work going on the peers: localmodels off --peers')
+    try:
+        from . import crashes, watchdog
+        for s in crashes.stalled(): print('  ' + s['words'])
+        w = watchdog.view()
+        if w and lm['families']: print('  ' + w)
+    except Exception as e: print(f'  (could not read the watchdog: {e})')   # not recorded: shown to the person running the command
+    if llmshare.settings_error(): print(f'  SETTINGS NOT READ: {llmshare.settings_error()}')
+    if d.get('write_problem'): print(f"  RECORDS NOT WRITTEN: {d['write_problem']}")
     for line in peer_lines(d['up']): print(line)
     try:
         v = recycle.view(lm['models'])
@@ -163,7 +217,7 @@ def status():
             f"{r['direct']} direct connections to LM Studio (bypassing the gateway)" if r['direct'] else 'idle (lease held)'
         who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
         print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or r.get('job') or {}).get('started') else 'since'} {ago(r['since'])}"
-              + (track_words('batch', b) if b.get('total') else '') + track_words('job', r.get('job')) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
+              + (track_words('run', b) if b.get('phases') else (track_words('run', b) if b.get('total') else '') + track_words('phase', r.get('job'))) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
     work = [c for c in cs if c['working']]
     print(f"Claude Code sessions: {len(work)} active" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
           + f", {len(cs) - len(work)} idle in the last 3 hours")
@@ -231,7 +285,7 @@ def door_link(force=False, timeout=8):
     when the door does not answer it (closed, or running code from before peers)."""
     try:
         req = urllib.request.Request(llmshare.HUB + '/hub/link', data=b'{}' if force else None, headers={'Content-Type': 'application/json'})
-        d = json.load(urllib.request.urlopen(req, timeout=timeout))
+        d = json.load(llmshare.urlopen(req, timeout=timeout))
         return d if isinstance(d, dict) and 'peers' in d else None
     except (OSError, ValueError): return None
 
@@ -398,9 +452,9 @@ def gpu_limit_cmd():
 
 
 def peer_cmd(a):
-    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model ...]."""
+    """localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | off <name> | on <name> | token | test [name] | gpu-limit | copy-model ...]."""
     from . import peers
-    w = [x for x in a if x != 'peer']
+    w = list(a)                                          # main() has taken the verb: a peer may be named "peer"
     verb = w[0] if w else ''
     if not verb:
         print(f'gateway name sent to peers: {peers.me()} (settings key "name")')
@@ -447,8 +501,28 @@ def peer_cmd(a):
         print('  ' + token_words())
         print('  the gateway binds it within 5 s (X-Hub-Token required); `localmodels peer` shows the listener state')
         return 0
+    if verb in ('off', 'on'):                            # a peer's local models off or on, as `localmodels off` / `on` there
+        names = [x for x in w[1:] if not x.startswith('--')]
+        if not names: print(f'localmodels peer {verb} <name>' + (' [--force] [reason ...]' if verb == 'off' else '')); return 2
+        name, why = names[0], ' '.join(names[1:])
+        code, j = peers.switch(name, verb == 'on', '--force' in a, why)
+        if code == 409 and j.get('blockers'): print(f"peer {name}: nothing switched off: in use: {'; '.join(j['blockers'])} (--force to switch off anyway)"); return 3
+        if code >= 300: print(f"peer {name}: nothing switched {verb}: {j.get('error') or f'HTTP {code}'}"); return 3 if code == 409 else 1
+        if llmshare.hub_up(fresh=True):                  # the gateway looks at the peer now, so routing follows at once
+            try: urllib.request.urlopen(urllib.request.Request(llmshare.HUB + '/hub/link', data=b'{}', headers={'Content-Type': 'application/json'}), timeout=10).read()
+            except OSError: pass
+        print(f"peer {name}: {j.get('note') or 'done'}" + ('' if verb == 'on' else f'. This gateway routes nothing there until: localmodels peer on {name}'))
+        return 0
     if verb == 'gpu-limit' and len(w) == 1: return gpu_limit_cmd()
     if verb == 'copy-model': return copy_model_cmd(w, '--dry' in a)
+    if verb == 'log':                                    # each change of a peer's state, with its reason
+        hours = num(w, '--hours', 24.0)
+        if hours is None: return 2
+        evs = peers.link_events(hours)
+        if not evs: print(f'no change of a peer state in the last {hours:g} h ({peers.EVENTS})'); return 0
+        for e in evs:
+            print(f"{time.strftime('%d %b %H:%M:%S', time.localtime(e['at']))}  {e.get('peer')}: {e.get('was')} -> {e.get('state')}" + (f"  ({e['why']})" if e.get('why') else ''))
+        return 0
     if verb == 'token' and len(w) == 1:
         print(token_words())
         print(f'copy to another host: {token_copy()}')
@@ -462,10 +536,9 @@ def peer_cmd(a):
         for p in ps:
             tok, here = peers.token(), None
             try:
-                req = urllib.request.Request(p['url'] + '/hub/health', headers={'X-Hub-Token': tok or ''})
-                peers._open(req, timeout=peers.CONNECT).read(); here = 'connected, token accepted'
-            except urllib.error.HTTPError as e: here = f"connected, HTTP {e.code}" + (' (peer-token mismatch)' if e.code in (401, 403) else '')
-            except OSError as e: here = peers.reach_words(e)
+                code, _ = peers.fetch(p['url'], '/hub/health', {'X-Hub-Token': tok or ''})
+                here = 'connected, token accepted' if code == 200 else f"connected, HTTP {code}" + (' (peer-token mismatch)' if code in (401, 403) else '')
+            except OSError as e: here = peers.reach_words(e) if e.errno != errno.ENETUNREACH else str(e.strerror or e)
             if p['state'] == 'down' and here.startswith('connected'):    # a process's first connection after the link comes up can
                 time.sleep(2)                                            # fail while macOS evaluates its Local Network policy: poll once more
                 p = next((q for q in (door_link(force=True) or {}).get('peers') or [] if q['name'] == p['name']), p)
@@ -480,7 +553,7 @@ def peer_cmd(a):
             bad += p['state'] != 'up'
         if d.get('serving'): print(f"link listener: {d.get('listening') or 'not bound yet'}")
         return 1 if bad else 0
-    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | token | test [name] | gpu-limit | copy-model <model> <user@peer>]')
+    print('localmodels peer [add <name> <address> | remove <name> | serve <address> | serve off | off <name> | on <name> | token | test [name] | gpu-limit | copy-model <model> <user@peer>]')
     return 2
 
 
@@ -542,7 +615,7 @@ def prune(days=30, root=None):
     from . import mcp_server
     root = root or mcp_server.AGENTS
     cutoff, folders, files, size = time.time() - days * 86400, 0, 0, 0
-    for p in glob.glob(os.path.join(root, '*', '*')):
+    for p in glob.glob(os.path.join(root, '*', '*')) + glob.glob(os.path.join(root, '*.json')):   # a run_job log can sit at the root
         try: m = os.path.getmtime(p)
         except OSError: continue
         if m >= cutoff: continue
@@ -673,8 +746,19 @@ HOOK_EVENTS = ('SessionStart', 'UserPromptSubmit')
 
 
 def hook_command():
-    """The command Claude Code runs before each prompt: the installed copy's `localmodels notice` (silent unless maintenance)."""
-    return f'"{PY}" "{os.path.join(INSTALLED, "bin", "localmodels")}" notice'
+    """The command Claude Code runs before each prompt: the installed copy's `localmodels notice` (silent unless
+    maintenance). It cannot fail: with the installed copy gone, python's exit 2 would make Claude Code refuse every
+    prompt in every session, the one that would repair it included."""
+    script = os.path.join(INSTALLED, 'bin', 'localmodels')
+    return f'[ -f "{script}" ] && "{PY}" "{script}" notice || true'
+
+
+def _claude(*args, timeout=60):
+    """One `claude` command, bounded in time. -> the finished process, or None when it could not run in time."""
+    claude = shutil.which('claude')
+    if not claude: return None
+    try: return subprocess.run([claude, *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError): return None
 
 
 def with_hook(settings, cmd, add=True):
@@ -682,7 +766,7 @@ def with_hook(settings, cmd, add=True):
     person's own hooks and settings are left as they are."""
     hooks = settings.setdefault('hooks', {})
     for ev in HOOK_EVENTS:
-        kept = [e for e in hooks.get(ev, []) if not any('localmodels' in h.get('command', '') and h.get('command', '').endswith(' notice')
+        kept = [e for e in hooks.get(ev, []) if not any('localmodels' in h.get('command', '') and ' notice' in h.get('command', '')   # either form
                                                       for h in e.get('hooks', []))]
         if add: kept.append(dict(hooks=[dict(type='command', command=cmd, timeout=5)]))
         if kept: hooks[ev] = kept
@@ -722,8 +806,19 @@ def _fitted_words(s):
                      for k, f in s['families'].items())
 
 
+def sandboxed():
+    """Words when this shell points the hub at another state folder (LOCALMODELS_STATE) without a LaunchAgent label of
+    its own (LOCALMODELS_LABEL): an install, uninstall, start, stop or restart from it would act on this Mac's real
+    LaunchAgent and Claude Code settings with that folder written into them. None otherwise."""
+    if os.environ.get('LOCALMODELS_STATE') and not os.environ.get('LOCALMODELS_LABEL'):
+        return (f"LOCALMODELS_STATE is set ({llmshare.SHARED}) and LOCALMODELS_LABEL is not: this would act on the LaunchAgent {LABEL} "
+                'and the Claude Code settings with that state folder. Set LOCALMODELS_LABEL too, or unset LOCALMODELS_STATE')
+    return None
+
+
 def install(wait=90, plugin=False, dry=False, no_claude=False):
     uid = f'gui/{os.getuid()}'
+    if not dry and sandboxed(): print(f'nothing installed: {sandboxed()}'); return 2
     if dry:
         if os.path.exists(llmshare.MODELS): print(f'would keep the settings: {llmshare.MODELS}')
         else: print(f'would write the settings file {llmshare.MODELS}, fitted to this Mac: {_fitted_words(_fitted())}')
@@ -734,6 +829,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
                     f"and add the maintenance hook to {SETTINGS_FILE} (silent unless maintenance is set)")
         print(f"would link the localmodels command into the first writable of {', '.join(BINS)}")
         if retire_loader(dry=True): print(retire_loader(dry=True))
+        print(f"would write the pre-push hook in {os.path.join(HOME, '.git', 'hooks')} (the privacy and secrets checks on every push)")
         print('nothing written (--dry)')
         return 0
     os.makedirs(LOGS, exist_ok=True)
@@ -765,8 +861,13 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
             deploy()
             print(f'1. gateway code copied to {INSTALLED} ({digest(INSTALLED)})')
             plist = _plist()
-            try: changed = plistlib.load(open(PLIST, 'rb')) != plist
-            except (OSError, ValueError): changed = True
+            try: was = plistlib.load(open(PLIST, 'rb'))
+            except (OSError, ValueError): was = {}
+            changed = was != plist
+            env, before = plist.get('EnvironmentVariables') or {}, was.get('EnvironmentVariables') or {}
+            print('   the LaunchAgent environment: ' + ', '.join(f'{k}={v}' for k, v in env.items() if k != 'PATH') if len(env) > 1 else
+                  '   the LaunchAgent environment: the defaults (PATH only)')
+            for k in sorted(set(before) - set(env)): print(f'   note: {k}={before[k]} was in the LaunchAgent and is not any more (it is not set in this shell)')
             os.makedirs(os.path.dirname(PLIST), exist_ok=True)
             with open(PLIST, 'wb') as f: plistlib.dump(plist, f)
             if _loaded() and changed: _launchctl('bootout', f'{uid}/{LABEL}'); time.sleep(1); r = _launchctl('bootstrap', uid, PLIST)
@@ -785,14 +886,14 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         claude = shutil.which('claude')
         if claude:
             want = [PY, os.path.join(HOME, 'bin', 'localmodels'), 'mcp']
-            cur = subprocess.run([claude, 'mcp', 'get', 'local-models'], capture_output=True, text=True)
-            if cur.returncode == 0 and all(x in cur.stdout for x in want) and 'User' in cur.stdout:
+            cur = _claude('mcp', 'get', 'local-models')
+            if cur and cur.returncode == 0 and all(x in cur.stdout for x in want) and 'User' in cur.stdout:
                 print('3. the hub\'s MCP tools are already registered for every Claude Code session (local-models)')
             else:
-                subprocess.run([claude, 'mcp', 'remove', '--scope', 'user', 'local-models'], capture_output=True, text=True)
-                r = subprocess.run([claude, 'mcp', 'add', '--scope', 'user', 'local-models', '--', *want], capture_output=True, text=True)
-                print('3. the hub\'s MCP tools registered for every Claude Code session (local-models)' if r.returncode == 0 else
-                      f'3. could not register the tools: {(r.stderr or r.stdout).strip()[:300]}')
+                _claude('mcp', 'remove', '--scope', 'user', 'local-models')
+                r = _claude('mcp', 'add', '--scope', 'user', 'local-models', '--', *want)
+                print('3. the hub\'s MCP tools registered for every Claude Code session (local-models)' if r and r.returncode == 0 else
+                      f"3. could not register the tools: {((r.stderr or r.stdout) if r else 'claude did not answer within 60 s').strip()[:300]}")
         else: print('3. the claude command is not on PATH: register the MCP tools manually (GUIDE.md, setting up)')
         os.makedirs(os.path.dirname(SIGNPOST_FILE), exist_ok=True)
         text = open(SIGNPOST_FILE).read() if os.path.exists(SIGNPOST_FILE) else ''
@@ -809,6 +910,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
             with open(SIGNPOST_FILE, 'a') as f: f.write(('' if not text or text.endswith('\n') else '\n') + SIGNPOST + '\n')
             print(f'4. the signpost line added to {SIGNPOST_FILE}')
         print('   ' + set_hook(True))
+    print('   ' + set_prepush_hook())
     src = os.path.join(HOME, 'bin', 'localmodels')
     for d in BINS:
         link = os.path.join(d, 'localmodels')
@@ -821,6 +923,8 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
 
 
 def uninstall():
+    if sandboxed(): print(f'nothing uninstalled: {sandboxed()}'); return 2
+    print('0. ' + set_hook(False))                         # first: a hook left pointing at removed code would refuse every prompt
     uid = f'gui/{os.getuid()}'
     for label in (LABEL,) + OLD_LABELS:
         if _loaded(label): _launchctl('bootout', f'{uid}/{label}')
@@ -828,14 +932,12 @@ def uninstall():
         except OSError: pass
     shutil.rmtree(INSTALLED, ignore_errors=True)
     print('1. gateway stopped; it no longer starts at login')
-    claude = shutil.which('claude')
-    if claude: subprocess.run([claude, 'mcp', 'remove', '--scope', 'user', 'local-models'], capture_output=True, text=True)
+    _claude('mcp', 'remove', '--scope', 'user', 'local-models')
     print('2. the hub\'s MCP tools are no longer registered')
     if os.path.exists(SIGNPOST_FILE):
         lines = [l for l in open(SIGNPOST_FILE).read().split('\n') if 'local-models hub signpost' not in l]
         tmp = SIGNPOST_FILE + '.tmp'; open(tmp, 'w').write('\n'.join(lines)); os.replace(tmp, SIGNPOST_FILE)
     print(f'3. the signpost line is out of {SIGNPOST_FILE}')
-    print('   ' + set_hook(False))
     src = os.path.join(HOME, 'bin', 'localmodels')
     for d in BINS:
         link = os.path.join(d, 'localmodels')
@@ -895,6 +997,54 @@ def _minutes(word):
     if not m or not any(m.groups()): return None
     h, mi, s = (int(x) if x else 0 for x in m.groups())
     return max(1, h * 60 + mi + round(s / 60))
+
+
+UNITS = dict(s=1 / 60, sec=1 / 60, secs=1 / 60, second=1 / 60, seconds=1 / 60, m=1, min=1, mins=1, minute=1, minutes=1,
+             h=60, hr=60, hrs=60, hour=60, hours=60)
+WHEN = ('in', 'at', 'for', 'now', 'after', 'after-batches')
+MAINT_USAGE = 'localmodels maintenance in 15m | at 20:30 | now | after-batches [for 30m] [reason ...]'
+
+
+def _duration(words, j):
+    """A duration at words[j]: '30m', '1h30m', '1.5h', '90' (minutes), or a number and a unit word ('2 hours').
+    -> (minutes, words used), or (None, 0); a bare number followed by a word that is neither a unit nor a time word
+    ('2 fortnights') is not read as minutes."""
+    if j >= len(words): return None, 0
+    w, nxt = words[j].lower(), (words[j + 1].lower() if j + 1 < len(words) else None)
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)([a-z]*)', w)
+    if m and m.group(2) in UNITS: return max(1, round(float(m.group(1)) * UNITS[m.group(2)])), 1
+    if m and not m.group(2):
+        if nxt in UNITS: return max(1, round(float(m.group(1)) * UNITS[nxt])), 2
+        if nxt is not None and nxt not in WHEN: return None, 0
+        return max(1, round(float(m.group(1)))), 1
+    mins = _minutes(w)
+    return (mins, 1) if mins else (None, 0)
+
+
+def maintenance_args(words, now=None):
+    """The maintenance command's words: the time words first (in, at, now, after-batches, for), then the reason, taken
+    verbatim from its first word on, so a reason's own words ("update now available") are never read as times.
+    -> (start, after_batches, minutes, reason); ValueError with the usage when a time word's value cannot be read or no
+    start is given."""
+    now = now or time.time()
+    start, after, minutes, i = None, False, 30, 0
+    while i < len(words):
+        w = words[i].lower()
+        if w in ('in', 'for'):
+            d, n = _duration(words, i + 1)
+            if d is None: raise ValueError(f'{w} needs a duration (15m, 2h, 1.5h, 90 min): {MAINT_USAGE}')
+            if w == 'in': start = now + 60 * d
+            else: minutes = d
+            i += 1 + n; continue
+        if w == 'at':
+            at = _at(words[i + 1]) if i + 1 < len(words) else None
+            if at is None: raise ValueError(f'at needs a time (20:30): {MAINT_USAGE}')
+            start, i = at, i + 2; continue
+        if w == 'now': start, i = now, i + 1; continue
+        if w in ('after-batches', 'after'): after, i = True, i + 1; continue
+        break
+    if start is None and not after: raise ValueError(f'say when: {MAINT_USAGE}')
+    return start, after, minutes, ' '.join(words[i:])
 
 
 def _at(word):
@@ -962,9 +1112,9 @@ def demo_cmd(a):
 
 
 def maintenance_cmd(a):
-    """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [why ...] | off."""
+    """localmodels maintenance [in 15m | at 20:30 | now | after-batches] [for 30m] [reason ...] | off."""
     from . import dash, maint, models
-    words = [x for x in a if x != 'maintenance']
+    words = list(a)
     if words[:1] == ['off']:
         for line in models.end_maintenance(): print(line)
         print('maintenance ended: requests are admitted again and the instance manager resumes')
@@ -980,21 +1130,9 @@ def maintenance_cmd(a):
                   + (f", done about {finish_words(p['finish'])}" if p.get('finish') else ', no estimate yet')
                   + (' · ends after maintenance starts' if clash else ''))
         return 0
-    start, after, minutes, why, i = None, False, 30, [], 0
-    while i < len(words):
-        w = words[i]
-        if w == 'in' and i + 1 < len(words) and _minutes(words[i + 1]):
-            start = time.time() + 60 * _minutes(words[i + 1]); i += 2; continue
-        if w == 'at' and i + 1 < len(words) and _at(words[i + 1]):
-            start = _at(words[i + 1]); i += 2; continue
-        if w == 'for' and i + 1 < len(words) and _minutes(words[i + 1]):
-            minutes = _minutes(words[i + 1]); i += 2; continue
-        if w == 'now': start = time.time(); i += 1; continue
-        if w in ('after-batches', 'after'): after = True; i += 1; continue
-        why.append(w); i += 1
-    if start is None and not after:
-        print('say when: localmodels maintenance in 15m | at 20:30 | now | after-batches [for 30m] [why ...]'); return 2
-    m = maint.announce(start=start, minutes=minutes, why=' '.join(why), after_batches=after)
+    try: start, after, minutes, why = maintenance_args(words)
+    except ValueError as e: print(f'nothing set: {e}'); return 2
+    m = maint.announce(start=start, minutes=minutes, why=why, after_batches=after)
     print('set: ' + maint.words(m))
     print('  every gateway response now carries X-Hub-Maintenance; the dashboard, `localmodels`, the status tool and the')
     print('  Claude Code hook report it; once active, new requests get 503 + Retry-After and the instance manager pauses')
@@ -1083,8 +1221,41 @@ def sweep_workers(grace=5.0):
     return len(pids)
 
 
+def off_cmd(a):
+    """localmodels off [--peers] [--force] [reason ...]: switch off (to peers only), then wait (up to 10 min) for the
+    instance manager's unload."""
+    from . import maint, models
+    code, body = models.switch_off('--force' in a, ' '.join(x for x in a if not x.startswith('--')), peers_only='--peers' in a)
+    if code != 200: print(f"nothing switched off: {body.get('error')}"); return 3
+    print(maint.words(maint.read()))
+    if body.get('note') and ('peer' in body['note'] or body['note'].startswith('requests now')): print('  ' + body['note'])
+    end, last = time.time() + 600, None
+    while time.time() < end:
+        off = maint.switched_off()
+        if not off: print('switched on again meanwhile'); return 0
+        if off.get('unloaded'): break
+        did = models.off_pass(off)                           # the gateway's instance manager does the same; the swap lock keeps one at a time
+        if did and did != last: print('  ' + '; '.join(did)); last = did
+        if (maint.switched_off() or {}).get('unloaded'): break
+        time.sleep(2)
+    off = maint.switched_off() or {}
+    rows = llmshare.loaded(fresh=True, force=True)
+    print('switched off: ' + (f"still listed: {', '.join(r['id'] for r in rows)}" if rows else 'no instance loaded')
+          + ('' if off.get('unloaded') else ' (the unload is still pending: the instance manager keeps trying)') + '. Turn on: localmodels on')
+    return 0
+
+
+def on_cmd():
+    from . import models
+    for line in models.switch_on(): print(line)
+    rows = llmshare.loaded(fresh=True, force=True)
+    print('loaded now: ' + (', '.join(r['id'] for r in rows) or 'nothing') + ' (the instance manager adds the other replicas within 20 s)')
+    return 0
+
+
 def door(verb, a=()):
     uid = f'gui/{os.getuid()}'
+    if sandboxed(): print(f'nothing done: {sandboxed()}'); return 2
     if verb == 'start' and _loaded() and llmshare.hub_up(fresh=True): print(f'gateway already listening on {llmshare.HUB}'); return 0
     sup = llmshare.supervisor()
     if verb in ('restart', 'rollback') and sup and '--cold' not in a:   # a handoff: no quiet gate, nothing refused or cut
@@ -1095,15 +1266,21 @@ def door(verb, a=()):
     if verb in ('stop', 'restart') and _loaded() and '--now' not in a and not quiet():
         print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle, or --now')
         return 3
-    if verb == 'stop' or (verb == 'restart' and sup):                  # restart --cold: a new run (load_at_start applies)
-        r = _launchctl('bootout', f'{uid}/{LABEL}')
-        n = sweep_workers()
-        if verb == 'stop':
-            print(('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()) + (f'; {n} workers ended' if n else ''))
-            return r.returncode
-    if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
-    if verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
-    else: r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)
+    if verb in ('stop', 'restart') and (_loaded() or sup):   # never under a load or a recycle half done (install does the same)
+        with llmshare.swapping(wait=120) as got:
+            if not got: print('a swap or a reload is under way: gateway left running; retry in a moment'); return 3
+            if verb == 'stop' or sup:                        # restart --cold: a new run (load_at_start applies)
+                r = _launchctl('bootout', f'{uid}/{LABEL}') if _loaded() else None
+                n = sweep_workers()                          # an adopted worker is not launchd's child
+                if verb == 'stop':
+                    print(('gateway stopped until the next login (localmodels start)' if r is None or r.returncode == 0 else r.stderr.strip()) + (f'; {n} workers ended' if n else ''))
+                    return r.returncode if r is not None else 0
+            if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
+            r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)
+    elif verb == 'stop': print('gateway not running'); return 0
+    elif not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
+    elif verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
+    else: r = _launchctl('bootstrap', uid, PLIST)
     up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
     print(f"gateway {'listening on ' + llmshare.HUB if up else 'not responding: see ' + os.path.join(LOGS, 'gateway.log')}")
     return 0 if up else 1
@@ -1115,14 +1292,145 @@ def run_tests(quiet=False):
     out = []
     for name in TESTS:
         path = os.path.join(HOME, 'tests', name)
-        if not os.path.exists(path): continue
+        if not os.path.exists(path):                          # a listed suite that is gone fails the gate; a copy with no tests/ has none to run
+            if os.path.isdir(os.path.join(HOME, 'tests')): out.append((name, False, 'listed in cli.TESTS but missing from tests/'))
+            continue
         try: p = subprocess.run([PY, path], capture_output=True, text=True, timeout=300)
         except subprocess.SubprocessError as e: out.append((name, False, str(e))); continue
         fails = [l.strip()[5:] for l in p.stdout.split('\n') if l.strip().startswith('FAIL')]
         last = (p.stdout.strip().split('\n') or [''])[-1]
         out.append((name, p.returncode == 0, last if not fails else '; '.join(fails)[:300] if p.returncode else last))
         if p.returncode and not fails: out[-1] = (name, False, (p.stderr.strip().split('\n') or ['?'])[-1][:300])
+    if swiftc() and os.path.exists(os.path.join(HOME, 'app', 'tests', 'main.swift')): out.append(app_tests())
     return out
+
+
+# ---------------------------------------------------------------- the menu-bar app (app/)
+APP_ID = 'com.haedolabs.localmodels'
+APP_BUNDLE = os.path.expanduser('~/Applications/Local Models Hub.app')
+APP_EXE = 'LocalModelsHub'
+
+
+def swiftc():
+    """The Command Line Tools' Swift compiler, or None when they are not installed."""
+    w = shutil.which('swiftc')
+    if w: return w
+    try: p = subprocess.run(['xcrun', '-f', 'swiftc'], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError): return None
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+
+
+def app_tests():
+    """The app's state logic (app/Glance.swift) against its fixture snapshots, and its menu kept in place (app/Menu.swift)
+    with real menu items. -> (name, ok, last line or the failures)."""
+    import tempfile
+    name = 'test_menubar.swift'
+    with tempfile.TemporaryDirectory(prefix='localmodels-app-') as d:
+        exe = os.path.join(d, 'tests')
+        try:
+            b = subprocess.run([swiftc(), '-swift-version', '5', *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'tests/main.swift')), '-o', exe],
+                               capture_output=True, text=True, timeout=300)
+            if b.returncode: return (name, False, 'build failed: ' + (b.stderr.strip().split('\n') or ['?'])[0][:300])
+            p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+        except subprocess.SubprocessError as e: return (name, False, str(e))
+    fails = [l.strip()[5:] for l in p.stdout.split('\n') if l.strip().startswith('FAIL')]
+    return (name, p.returncode == 0, '; '.join(fails)[:300] if fails else (p.stdout.strip().split('\n') or [''])[-1])
+
+
+def app_installed():
+    """The installed app's version, or None when it is not installed."""
+    try:
+        with open(os.path.join(APP_BUNDLE, 'Contents', 'Info.plist'), 'rb') as f: return plistlib.load(f).get('CFBundleShortVersionString') or '?'
+    except (OSError, ValueError, plistlib.InvalidFileException): return None
+
+
+def app_quit():
+    subprocess.run(['pkill', '-x', APP_EXE], capture_output=True)
+    for _ in range(30):
+        if subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode: return
+        time.sleep(0.2)
+
+
+def app_cmd(a):
+    """localmodels app install | uninstall: the menu-bar app, built on this Mac from app/ (no signing needed: a local
+    build carries no quarantine attribute), in ~/Applications."""
+    w = [x for x in a if not x.startswith('--')]
+    verb = w[0] if w else ''
+    if verb not in ('install', 'uninstall'):
+        v = app_installed()
+        print(f'menu-bar app: ' + (f'{v} installed at {APP_BUNDLE}' + (' (running)' if not subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode else ' (not running)')
+                                    if v else 'not installed') + '\n  localmodels app install | uninstall')
+        return 0 if verb == '' else 2
+    if sandboxed(): print(f'nothing done: {sandboxed()}'); return 2
+    if verb == 'uninstall':
+        if not app_installed(): print('menu-bar app: not installed'); return 0
+        subprocess.run([os.path.join(APP_BUNDLE, 'Contents', 'MacOS', APP_EXE), '--unregister-login'], capture_output=True, timeout=30)
+        app_quit(); shutil.rmtree(APP_BUNDLE, ignore_errors=True)
+        print(f'menu-bar app removed ({APP_BUNDLE}), with its login item'); return 0
+    sc = swiftc()
+    if not sc: print('menu-bar app: needs the Command Line Tools (swiftc): xcode-select --install'); return 2
+    name, good, note = app_tests()
+    if not good: print(f'menu-bar app not installed: its tests fail: {note}'); return 1
+    import tempfile
+    os.makedirs(os.path.dirname(APP_BUNDLE), exist_ok=True)
+    stage = tempfile.mkdtemp(prefix='.localmodels-app-', dir=os.path.dirname(APP_BUNDLE))
+    try:
+        app = os.path.join(stage, 'Local Models Hub.app'); macos, res = os.path.join(app, 'Contents', 'MacOS'), os.path.join(app, 'Contents', 'Resources')
+        os.makedirs(macos); os.makedirs(res)
+        b = subprocess.run([sc, '-O', '-swift-version', '5', '-target', f'{os.uname().machine}-apple-macos13.0',
+                            *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'main.swift')), '-o', os.path.join(macos, APP_EXE)],
+                           capture_output=True, text=True, timeout=600)
+        if b.returncode: print('menu-bar app: build failed:\n' + b.stderr.strip()[-1500:]); return 1
+        icon = subprocess.run(['sips', '-s', 'format', 'icns', os.path.join(HOME, 'brand', 'logo-1024.png'), '--out', os.path.join(res, 'AppIcon.icns')],
+                              capture_output=True, text=True, timeout=60)
+        cli = os.path.realpath(sys.argv[0]) if os.path.basename(sys.argv[0]) == 'localmodels' else os.path.join(HOME, 'bin', 'localmodels')
+        with open(os.path.join(app, 'Contents', 'Info.plist'), 'wb') as f:
+            plistlib.dump(dict(CFBundleIdentifier=APP_ID, CFBundleName='Local Models Hub', CFBundleDisplayName='Local Models Hub', CFBundleExecutable=APP_EXE,
+                               CFBundlePackageType='APPL', CFBundleShortVersionString=VERSION, CFBundleVersion=VERSION, LSMinimumSystemVersion='13.0',
+                               LSUIElement=True, NSHighResolutionCapable=True, LMHubURL=llmshare.HUB, LMHubCLI=cli, LMHubState=llmshare.SHARED,
+                               **({'CFBundleIconFile': 'AppIcon'} if icon.returncode == 0 else {})), f)
+        s = subprocess.run(['codesign', '--force', '--sign', '-', app], capture_output=True, text=True, timeout=120)
+        if s.returncode: print('menu-bar app: ad-hoc signing failed: ' + s.stderr.strip()[-300:]); return 1
+        was = app_installed()
+        app_quit()
+        if os.path.exists(APP_BUNDLE): shutil.rmtree(APP_BUNDLE)
+        os.rename(app, APP_BUNDLE)
+    finally: shutil.rmtree(stage, ignore_errors=True)
+    subprocess.run(['open', APP_BUNDLE], capture_output=True)
+    print(f"menu-bar app {VERSION} {'replaced ' + was if was else 'installed'}: {APP_BUNDLE} (built here, signed ad hoc; its tests: {note})")
+    print('  running in the menu bar; Launch at login is in its menu')
+    return 0
+
+
+def ext_cmd(a):
+    """localmodels ext [check]: the extensions the menu-bar app draws, each one's menu answering or not; check reads every
+    manifest and the menu it serves against the protocol (localmodels/extensions.py)."""
+    from . import extensions as ex
+    w = [x for x in a if not x.startswith('--')]
+    verb = w[0] if w else ''
+    if verb not in ('', 'check'): print('localmodels ext [check]'); return 2
+    found = ex.load()
+    if not found:
+        print(f'no extensions ({ex.DIR}): a program joins the menu-bar app by writing a manifest there (GUIDE.md, "Extensions")'); return 0
+    bad = 0
+    for x in found:
+        m = x['manifest'] if isinstance(x['manifest'], dict) else {}
+        label = (m.get('name') or x['file']) + (f" — {m['title']}" if m.get('title') else '') + (f" {m['version']}" if m.get('version') else '')
+        probs = list(x['problems'])
+        menu, why = (ex.fetch_menu(m) if not probs else (None, 'manifest not sound'))
+        if verb == 'check' and menu is not None: probs += [f'menu: {p}' for p in ex.validate_menu(menu, m)]
+        state = 'answering' if menu is not None else f'not answering ({why})'
+        print(f"  {label}: {state}" + (f" · {m.get('menu')}" if m.get('menu') else '') + (f" · {len(probs)} problem{'s' if len(probs) != 1 else ''}" if probs else ''))
+        for p in probs[:12]: print(f'      {p}')
+        bad += bool(probs) or (verb == 'check' and menu is None)
+    if verb == 'check': print(f"extensions: {len(found)}, {bad} with a problem" if bad else f'extensions: {len(found)}, all sound')
+    return 1 if (verb == 'check' and bad) else 0
+
+
+def lmstudio_up():
+    from . import models
+    try: return models.server_up()
+    except Exception: return False                         # not recorded: the check prints what it finds
 
 
 def check():
@@ -1131,12 +1439,16 @@ def check():
     def t(name, good, note=''): ok.append(good); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
     t('gateway responds', llmshare.hub_up(fresh=True), llmshare.HUB)
     try:
-        page = urllib.request.urlopen(llmshare.HUB + '/', timeout=5).read()
-        snap = json.load(urllib.request.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
+        page = llmshare.urlopen(llmshare.HUB + '/', timeout=5).read()
+        snap = json.load(llmshare.urlopen(llmshare.HUB + '/hub/snapshot', timeout=30))
         t('the dashboard answers', NAME.encode() in page and b'__HUB_NAME__' not in page and 'lmstudio' in snap, f'{llmshare.HUB}/ (localmodels open)')
     except (OSError, ValueError) as e: t('the dashboard answers', False, str(e))
-    try: models = json.load(urllib.request.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
-    except OSError as e: t('LM Studio reachable via the gateway', False, str(e))
+    from . import maint as _maint
+    if _maint.switched_off() and not lmstudio_up():     # switched off: the gateway starts no LM Studio server, by design
+        print("  skip LM Studio check (local models switched off: its server is not started until localmodels on)")
+    else:
+        try: models = json.load(llmshare.urlopen(llmshare.HUB + '/v1/models', timeout=5)).get('data', []); t('LM Studio reachable via the gateway', True, f'{len(models)} models listed')
+        except OSError as e: t('LM Studio reachable via the gateway', False, str(e))
     t('the lms command is found', lms_found(), llmshare.LMS if lms_found() else f"not at {llmshare.LMS} and not on PATH: open LM Studio once and run ~/.lmstudio/bin/lms bootstrap, or set LMS; without it the instance manager cannot load, reload or recycle instances")
     rows = llmshare.loaded(fresh=True)
     ids = {r['id'] for r in rows}
@@ -1154,14 +1466,17 @@ def check():
         t('link listener bound', bool(dl and (dl.get('listening') or '').startswith('listening')),
           (dl or {}).get('listening') or 'no status (gateway runs code without peer support: localmodels install)')
     for name, good, note in run_tests():
-        t(f'{name[5:-3]}: the sandbox tests pass', good, note)
+        t(f'{os.path.splitext(name)[0][5:]}: the sandbox tests pass', good, note)
     down = crashes.down()
     t('no model is down after a crash', not down, '; '.join(d['words'] for d in down) or 'localmodels crashes for the record')
     from . import errors as _errors
     errs = _errors.recent(60, 200)
     t('no errors recorded in the last hour', not errs,
       f"{len(errs)} recorded; last: {errs[0].get('source')} · {errs[0].get('where')}: {errs[0].get('error')} (localmodels errors --trace)" if errs else 'localmodels errors for the record')
+    from . import maint
     if dash.door()['stale']: print("  skip instance-manager check (the gateway runs stale code until localmodels install)")
+    elif maint.switched_off() or maint.on():            # paused: it skips the crash watch, which records each look
+        print(f"  skip instance-manager check (paused: {'local models switched off' if maint.switched_off() else 'maintenance window active'})")
     else:
         seen = time.time() - (crashes._read(fresh=True).get('at') or 0)
         t("instance manager polls every 20 s (crashes, replicas, recycles)", seen < 90, f'last look {seen:.0f} s ago')
@@ -1189,6 +1504,11 @@ def check():
         except (ValueError, AttributeError): pass
     t('the tools answer (MCP)', set(names) == {x['name'] for x in mcp_server.TOOLS}, ', '.join(names))
     t('gateway runs this code', not dash.door()['stale'], 'localmodels install refreshes it' if dash.door()['stale'] else digest(HOME))
+    av = app_installed()
+    if av:                                                 # the menu-bar app, when installed: running, and built from this release
+        running = not subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode
+        t('menu-bar app runs this release', running and av == VERSION,
+          f'{av}' + ('' if running else ', not running') + ('' if av == VERSION else f'; this release is {VERSION}: localmodels app install'))
     print(f"{sum(ok)} of {len(ok)} ok")
     return 0 if all(ok) else 1
 
@@ -1200,7 +1520,7 @@ def _git(*args, check=True):
     return r.stdout.strip()
 
 
-EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'     # git's empty tree: "since the start" when nothing is tagged
+STAMPED = ('localmodels/__init__.py', '.claude-plugin/plugin.json')   # the files a release commit changes, and nothing else
 
 
 def read_words(path):
@@ -1221,42 +1541,231 @@ def read_words(path):
     return words, allows
 
 
-def private_check(repo, words_file):
-    """What would go public in the next push, read against the private word list: every line added since the last
-    release tag, the names of files added, and the commit messages. -> {status ('skipped', 'clean' or 'hits'), since,
-    lines, files, commits, hits: [(where, text)]}."""
-    out = dict(status='skipped', since=None, lines=0, files=0, commits=0, hits=[])
+def _unquote(path):
+    """A file name as git prints it: in double quotes, with C escapes, when it holds a quote, a backslash or a control
+    character (core.quotePath=false leaves other characters as they are)."""
+    if not (path.startswith('"') and path.endswith('"')): return path
+    esc = dict(n='\n', t='\t', a='\a', b='\b', f='\f', r='\r', v='\v')
+    return re.sub(r'\\([0-7]{3}|.)', lambda m: chr(int(m.group(1), 8)) if len(m.group(1)) == 3 else esc.get(m.group(1), m.group(1)), path[1:-1])
+
+
+_SHA = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?$')
+_HUNK = re.compile(r'@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+
+
+def private_check(repo, words_file, tip='HEAD', remote='origin'):
+    """What the next push to origin makes public, read against the private word list: every commit on `tip` that no
+    origin ref holds (all of them before the first push), each on its own: the lines it adds (a merge against each
+    parent), the names of the files it adds or renames, its message, and the message of each annotated tag on it
+    (`--follow-tags` sends those). A word a later commit replaced is still in the commit that added it. ->
+    {status ('skipped', 'clean' or 'hits'), since ('origin', or None before the first push), lines, files, commits,
+    hits: [(where, text)]}; RuntimeError when a git command fails, so a failure never reads as clean."""
     wl = read_words(words_file)
-    if wl is None: return out
+    if wl is None: return dict(status='skipped', since=None, lines=0, files=0, commits=0, hits=[])
     words, allows = wl
-    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True).stdout
-    tag = git('describe', '--tags', '--abbrev=0').strip() or None
-    base, out['since'] = tag or EMPTY_TREE, tag
 
     def held(text):
         for a in allows: text = a.sub(' ', text)
         return any(w.search(text) for w in words)
-    path, n = None, 0
-    for line in git('diff', '--unified=0', '--no-color', '--no-ext-diff', f'{base}..HEAD').split('\n'):
-        if line.startswith('+++ '): path = line[6:] if line.startswith('+++ b/') else None; continue
-        if line.startswith('@@'):
-            m = re.search(r'\+(\d+)', line); n = int(m.group(1)) if m else 0; continue
-        if line.startswith('+') and path:
-            out['lines'] += 1
-            if held(line[1:]): out['hits'].append((f'{path}:{n}', line[1:].strip()[:160]))
-            n += 1
-    for f in git('diff', '--name-only', '--diff-filter=AR', f'{base}..HEAD').split('\n'):
-        if not f: continue
-        out['files'] += 1
-        if held(f): out['hits'].append((f'file name {f}', f))
-    for rec in git('log', '--format=%h%x00%B%x1e', f'{base}..HEAD' if tag else 'HEAD').split('\x1e'):
-        if '\x00' not in rec: continue
-        sha, body = rec.strip().split('\x00', 1)
-        out['commits'] += 1
-        for line in body.split('\n'):
-            if held(line): out['hits'].append((f'commit {sha}', line.strip()[:160]))
+    return _scan_push(repo, tip, held, held, remote)
+
+
+SECRETS = [re.compile(p) for p in (                      # credential formats with a fixed prefix: few false alarms
+    r'\bgh[pousr]_[A-Za-z0-9]{36,}', r'\bgithub_pat_[A-Za-z0-9_]{60,}',               # GitHub tokens
+    r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b',                                                  # AWS access key ids
+    r'-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----',                                        # PEM and OpenSSH private keys
+    r'\bxox[abposr]-[A-Za-z0-9-]{10,}', r'https://hooks\.slack\.com/services/T[A-Za-z0-9/]+',   # Slack
+    r'\bsk-ant-[A-Za-z0-9_-]{20,}', r'\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}',            # Anthropic, OpenAI
+    r'\bAIza[0-9A-Za-z_-]{35}\b',                                                      # Google API keys
+    r'\b[rs]k_live_[0-9A-Za-z]{24,}', r'\bnpm_[A-Za-z0-9]{36}\b', r'\bhf_[A-Za-z0-9]{34,}\b',   # Stripe, npm, Hugging Face
+    r'\b(?:password|passwd|secret|api[_-]?key|token)\s*[:=]\s*["\'][^"\'\s]{12,}["\']',   # a literal assigned to such a name
+)]
+SECRET_FILES = re.compile(r'(?:^|/)(?:\.env(?:\.[^/]*)?|id_(?:rsa|dsa|ecdsa|ed25519)|credentials(?:\.json)?|\.netrc|\.pypirc|'
+                          r'[^/]*\.(?:pem|p12|pfx|key|keystore|jks|mobileprovision))$', re.I)
+RUNS_CODE = re.compile(r'(?:^|/)(?:\.github/(?:workflows|actions)/.*|action\.ya?ml|package\.json|\.npmrc|setup\.py|'
+                       r'setup\.cfg|pyproject\.toml|Makefile|\.gitlab-ci\.yml|\.circleci/.*)$')
+SECRET_OK = re.compile(r'\.env\.(?:example|sample|template)$')
+
+
+def secret_check(repo, tip='HEAD', remote='origin'):
+    """What the next push sends, read for credentials (SECRETS: tokens and keys by their fixed formats), files that hold
+    them by name (SECRET_FILES), and files that make code run on GitHub or on install (RUNS_CODE: workflows, package
+    manifests and their install scripts; this repository runs nothing there, so a new one is a change to look at, the way
+    a planted CI step is the usual route to a repository's secrets). Same commits and same answer as private_check."""
+    names = lambda n: bool(SECRET_FILES.search(n) and not SECRET_OK.search(n)) or bool(RUNS_CODE.search(n))
+    return _scan_push(repo, tip, lambda text: any(p.search(text) for p in SECRETS), names, remote)
+
+
+def _scan_push(repo, tip, held, held_name, remote='origin'):
+    """The commits on `tip` that no ref of `remote` holds, each read on its own: the lines it adds, the names of the files
+    it adds or renames, its message, and the annotated tags on it; `held(text)` and `held_name(name)` say what is a hit."""
+    out = dict(status='clean', since=None, lines=0, files=0, commits=0, hits=[])
+
+    def git(*a, stdin=None):
+        r = subprocess.run(['git', '-C', repo, '-c', 'core.quotePath=false', *a], input=stdin, capture_output=True,
+                           encoding='utf-8', errors='replace')
+        if r.returncode: raise RuntimeError(f"git {a[0]}: {(r.stderr or r.stdout).strip()[:300]}")
+        return r.stdout
+
+    seen = set()
+
+    def hit(where, text, key):                         # once, under the oldest commit that has it (a merge repeats its parents' lines)
+        if key not in seen: seen.add(key); out['hits'].append((where, text))
+    out['since'] = remote if git('for-each-ref', '--count=1', f'refs/remotes/{remote}').strip() else None
+    shas = git('rev-list', '--reverse', tip, '--not', f'--remotes={remote}').split()
+    sha, path, n, old, new, names = '', '', 0, 0, 0, set()
+    patch = git('diff-tree', '--stdin', '--patch-with-raw', '-m', '-r', '--root', '-M', '--unified=0', '--no-color', '--no-ext-diff',
+                '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', stdin=''.join(s + '\n' for s in shas)) if shas else ''
+    for line in patch.split('\n'):
+        if old > 0 or new > 0:                         # inside a hunk, whose header counts its lines: nothing in it is a header
+            if line.startswith('+'):
+                new -= 1; out['lines'] += 1
+                if held(line[1:]): hit(f'{sha[:7]} {path}:{n}', line[1:].strip()[:160], (path, line[1:]))
+                n += 1
+            elif line.startswith('-'): old -= 1
+            elif line.startswith(' '): old, new, n = old - 1, new - 1, n + 1
+            continue
+        if _SHA.match(line): sha = line; continue      # the commit whose diff follows (a merge's comes once per parent)
+        if line.startswith(':') and '\t' in line:     # a raw line: the status and the file names
+            f = line.split('\t')
+            if f[0].split()[-1][:1] in ('A', 'R'):
+                name = _unquote(f[-1])
+                if name not in names: names.add(name); out['files'] += 1
+                if held_name(name): hit(f'{sha[:7]} file name {name}', name, ('name', name))
+        elif line.startswith('+++ '):
+            p = _unquote(line[4:].rstrip('\t'))
+            path = p[2:] if p.startswith('b/') else p
+        else:
+            m = _HUNK.match(line)
+            if m: old, n, new = int(m.group(1) or 1), int(m.group(2)), int(m.group(3) or 1)
+    if shas:
+        for rec in git('log', '--stdin', '--no-walk=unsorted', '--no-show-signature', '--format=%h%x00%B%x1e', stdin=''.join(s + '\n' for s in shas)).split('\x1e'):
+            if '\x00' not in rec: continue
+            short, body = rec.strip().split('\x00', 1)
+            out['commits'] += 1
+            for line in body.split('\n'):
+                if held(line): hit(f'commit {short}', line.strip()[:160], ('commit', short, line))
+        sent = set(shas)
+        for rec in git('for-each-ref', '--format=%(objecttype)%00%(*objectname)%00%(refname:short)%00%(contents)%1e', 'refs/tags').split('\x1e'):
+            kind, target, name, body = (rec.lstrip('\n').split('\x00', 3) + ['', '', '', ''])[:4]
+            if kind != 'tag' or target not in sent: continue
+            for line in body.split('\n'):
+                if held(line): hit(f'tag {name}', line.strip()[:160], ('tag', name, line))
     out['status'] = 'hits' if out['hits'] else 'clean'
     return out
+
+
+def secret_words(sc):
+    """The secrets check's hits as lines a person acts on."""
+    out = [f'{where}: {text}' for where, text in sc['hits'][:30]]
+    if len(sc['hits']) > 30: out.append(f"... and {len(sc['hits']) - 30} more")
+    return out + ['a credential stays in the commit that added it, so amend, squash or rebase that commit before it leaves this Mac,',
+                  'and revoke the credential if it was ever pushed; a file that runs code on GitHub or on install (RUNS_CODE in',
+                  'localmodels/cli.py) is a change to that rule: add its path there on purpose, in its own commit']
+
+
+ZERO = '0' * 40
+HOOK_MARK = 'localmodels pre-push hook'
+
+
+def prepush(a, stdin=None):
+    """git's pre-push hook (written by `localmodels install`): every push from this checkout, plain `git push` included,
+    gets the privacy and secrets checks publish runs, and a push that would rewrite or delete the branch on the remote is
+    refused (LOCALMODELS_ALLOW_REWRITE=1 for one done on purpose). git passes the remote's name and URL as arguments and
+    one line a ref on stdin: <local ref> <local sha> <remote ref> <remote sha>. -> 0 to let the push go, 1 to stop it."""
+    remote = a[0] if a else 'origin'
+    git = lambda *x: subprocess.run(['git', *x], capture_output=True, text=True)
+    repo = git('rev-parse', '--show-toplevel').stdout.strip() or os.getcwd()
+    why, tips = [], []
+    for line in (stdin if stdin is not None else sys.stdin.read()).split('\n'):
+        f = line.split()
+        if len(f) != 4: continue
+        lref, lsha, rref, rsha = f
+        if lsha == ZERO:
+            if rref.startswith('refs/heads/') and os.environ.get('LOCALMODELS_ALLOW_REWRITE') != '1':
+                why.append(f'the push deletes {rref} on {remote}')
+            continue
+        if rsha != ZERO and os.environ.get('LOCALMODELS_ALLOW_REWRITE') != '1':
+            if git('-C', repo, 'cat-file', '-e', rsha).returncode:
+                why.append(f'{remote} holds {rsha[:7]} on {rref}, which this checkout does not have: fetch and look at it first '
+                           f'(git fetch {remote}; git log {lsha[:7]}..{remote}/{rref.split("/")[-1]})')
+            elif rref.startswith('refs/heads/') and git('-C', repo, 'merge-base', '--is-ancestor', rsha, lsha).returncode:
+                why.append(f'the push rewrites {rref} on {remote} (a force push)')
+        tips.append(lsha)
+    for tip in tips:
+        try:
+            pc = private_check(repo, PRIVATE_WORDS, tip=tip, remote=remote)
+            sc = secret_check(repo, tip=tip, remote=remote)
+        except RuntimeError as e: why.append(f'could not read what the push sends: {e}'); continue
+        why += [f'private word: {w}: {t}' for w, t in pc['hits'][:20]]
+        if sc['hits']: why += secret_words(sc)
+    if why:
+        print('localmodels pre-push: push stopped', file=sys.stderr)
+        for w in why: print(f'  {w}', file=sys.stderr)
+        print('  (LOCALMODELS_ALLOW_REWRITE=1 lets a rewrite or a deletion through on purpose; the checks themselves have no bypass)', file=sys.stderr)
+        return 1
+    return 0
+
+
+def set_prepush_hook(repo=None):
+    """The pre-push hook in this checkout's .git/hooks (worktrees share it), calling this hub's command, so a push
+    from any session gets the checks. A hook that is not this one is left in place and named. -> words."""
+    repo = repo or HOME
+    gitdir = os.path.join(repo, '.git')
+    if not os.path.isdir(gitdir): return f'no pre-push hook: {repo} is not a git checkout'
+    path = os.path.join(gitdir, 'hooks', 'pre-push')
+    body = (f'#!/bin/sh\n# {HOOK_MARK} (written by localmodels install): the privacy and secrets checks on every push\n'
+            f'exec "{PY}" "{os.path.join(HOME, "bin", "localmodels")}" prepush "$@"\n')
+    try: cur = open(path).read()
+    except OSError: cur = None
+    if cur == body: return f'the pre-push hook is in place ({path})'
+    if cur is not None and HOOK_MARK not in cur: return f'a pre-push hook of its own is at {path}: left as it is, so pushes are not checked'
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f: f.write(body)
+    os.chmod(path, 0o755)
+    return f'the pre-push hook {"updated" if cur else "written"}: every push from this checkout gets the privacy and secrets checks ({path})'
+
+
+def preflight(repo, want, current, branch):
+    """What would make this release go wrong, checked before anything is stamped: a version that is not X.Y.Z or not
+    above the current one, its tag already here or on origin, or origin's branch holding commits HEAD lacks (the branch
+    push would be refused while the tag went out). Fetches origin. -> words, or None when all is well."""
+    if not re.match(r'^\d+\.\d+\.\d+$', str(want or '')): return f'{want!r} is not a version like 1.2.3'
+    cur = (current if current.count('.') == 2 else current + '.0').split('.')
+    if tuple(int(x) for x in want.split('.')) <= tuple(int(x) for x in cur): return f'{want} is not above the current version {current}'
+    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, timeout=120)
+    if git('rev-parse', '-q', '--verify', f'refs/tags/v{want}').returncode == 0: return f'the tag v{want} already exists here'
+    if 'origin' not in git('remote').stdout.split(): return None                   # the first push: nothing there yet
+    r = git('fetch', '-q', 'origin')
+    if r.returncode: return f'could not fetch origin ({(r.stderr or r.stdout).strip()[:200]}): nothing checked against it'
+    if git('ls-remote', '--tags', 'origin', f'refs/tags/v{want}').stdout.strip(): return f'the tag v{want} is already on origin'
+    if git('rev-parse', '-q', '--verify', f'refs/remotes/origin/{branch}').returncode == 0 and \
+            git('merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD').returncode != 0:
+        return f'origin/{branch} has commits this branch lacks: pull first (git pull --ff-only origin {branch})'
+    return None
+
+
+def stamp(repo, want, head):
+    """The version `want` stamped into the code and the plugin manifest and committed on its own, on `head`, the commit
+    the checks read. -> the release commit's sha; RuntimeError when HEAD has moved since the checks or anything is
+    staged or changed, so nothing goes into the release that was not read."""
+    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
+    now = git('rev-parse', 'HEAD').stdout.strip()
+    if now != head: raise RuntimeError(f'HEAD moved since the checks ({head[:7]} to {now[:7]}): run publish again')
+    if git('status', '--porcelain').stdout.strip(): raise RuntimeError('the working tree or the index changed since the checks: run publish again')
+    init = os.path.join(repo, 'localmodels', '__init__.py')
+    text = open(init).read()
+    new = re.sub(r"VERSION = '[^']*'", f"VERSION = '{want}'", text, count=1)
+    if new == text: raise RuntimeError('could not find VERSION in localmodels/__init__.py')
+    p = os.path.join(repo, STAMPED[1])
+    d = json.load(open(p)); d['version'] = want
+    open(init, 'w').write(new)
+    open(p, 'w').write(json.dumps(d, indent=2) + '\n')
+    r = git('commit', '-q', '-m', f'Release {want}', '--', *STAMPED)
+    if r.returncode:
+        git('checkout', 'HEAD', '--', *STAMPED)                # the stamp is undone: the tree is as the checks left it
+        raise RuntimeError((r.stderr or r.stdout).strip())
+    return git('rev-parse', 'HEAD').stdout.strip()
 
 
 def publish(a):
@@ -1264,8 +1773,15 @@ def publish(a):
     until the push, and the push needs a remote (--remote URL the first time, or set up by hand)."""
     try:
         if _git('status', '--porcelain'): print('the working tree has changes: commit or stash them first (git status)'); return 2
-        branch = _git('rev-parse', '--abbrev-ref', 'HEAD')
+        branch, head = _git('rev-parse', '--abbrev-ref', 'HEAD'), _git('rev-parse', 'HEAD')
     except RuntimeError as e: print(f'git: {e}'); return 2
+    if branch == 'HEAD': print('HEAD is detached: check out the branch to release first'); return 2
+    cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
+    want = opt(a, '--version')
+    if not want:
+        x, y, z = (int(p) for p in cur.split('.')); want = f'{x}.{y}.{z + 1}'
+    why = preflight(HOME, want, VERSION, branch)
+    if why: print(f'nothing published: {why}'); return 2
     print('1. the sandbox tests:')
     bad = False
     for name, good, note in run_tests():
@@ -1282,38 +1798,32 @@ def publish(a):
         print('   claude plugin validate: passed' + (' with warnings' if 'warning' in (r.stdout + r.stderr).lower() else ''))
     else: print('   the claude command is not on PATH: not checked')
     print('3. the privacy check:')
-    pc = private_check(HOME, PRIVATE_WORDS)
+    try: pc = private_check(HOME, PRIVATE_WORDS, tip=head)
+    except RuntimeError as e: print(f'   could not read what the push sends ({e}); nothing published'); return 1
     if pc['status'] == 'skipped':
         print(f'   no private word list at {PRIVATE_WORDS}: not checked (one word or pattern a line, `allow: <pattern>` for what may')
         print('   appear, # for notes; then every release is read against it before anything is pushed)')
     elif pc['status'] == 'hits':
         for where, text in pc['hits'][:30]: print(f'   {where}: {text}')
         if len(pc['hits']) > 30: print(f"   ... and {len(pc['hits']) - 30} more")
-        print(f"   nothing published: change these, or add an `allow:` line to {PRIVATE_WORDS} for what is fine to make public"); return 1
+        print('   nothing published. A hit stays in the commit named before it: a later commit does not remove it, so amend,')
+        print(f"   squash or rebase that commit (none of these is on origin yet), or add an `allow:` line to {PRIVATE_WORDS}")
+        print('   for text that is fine to make public'); return 1
     else:
-        print(f"   clean: {pc['lines']} new lines, {pc['files']} new files and {pc['commits']} commit messages since {pc['since'] or 'the start'}")
-    if '--dry' in a: print('--dry: the checks only; nothing stamped, committed or pushed'); return 0
-    cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
-    want = opt(a, '--version')
-    if not want:
-        x, y, z = (int(p) for p in cur.split('.')); want = f'{x}.{y}.{z + 1}'
-    if not re.match(r'^\d+\.\d+\.\d+$', want): print(f'{want!r} is not a version like 1.2.3'); return 2
-    init = os.path.join(HOME, 'localmodels', '__init__.py')
-    text = open(init).read()
-    new = re.sub(r"VERSION = '[^']*'", f"VERSION = '{want}'", text, count=1)
-    if new == text: print('could not find VERSION in localmodels/__init__.py'); return 2
-    open(init, 'w').write(new)
-    for mf in ('.claude-plugin/plugin.json',):
-        p = os.path.join(HOME, mf)
-        try:
-            d = json.load(open(p)); d['version'] = want
-            open(p, 'w').write(json.dumps(d, indent=2) + '\n')
-        except (OSError, ValueError) as e: print(f'   {mf}: {e}')
+        print(f"   clean: {pc['lines']} added lines, {pc['files']} new file names and {pc['commits']} commit messages, in "
+              + ('the commits not yet on origin' if pc['since'] else 'every commit (nothing is on origin yet)'))
+    print('   the secrets check:')
+    try: sc = secret_check(HOME, tip=head)
+    except RuntimeError as e: print(f'   could not read what the push sends ({e}); nothing published'); return 1
+    if sc['hits']:
+        for line in secret_words(sc): print('   ' + line)
+        print('   nothing published'); return 1
+    print('   clean: no credential, no key file, no file that runs code on GitHub or on install')
+    if '--dry' in a: print(f'--dry: the checks only; nothing stamped, committed or pushed (this release would be {want})'); return 0
     try:
-        _git('add', 'localmodels/__init__.py', '.claude-plugin/plugin.json')
-        _git('commit', '-q', '-m', f'Release {want}')
-        _git('tag', '-a', f'v{want}', '-m', f'Release {want}')
-    except RuntimeError as e: print(f'git: {e}'); return 1
+        release = stamp(HOME, want, head)
+        _git('tag', '-a', f'v{want}', '-m', f'Release {want}', release)
+    except (RuntimeError, OSError, ValueError) as e: print(f'nothing published: {e}'); return 1
     print(f'4. version {want} stamped, committed and tagged (v{want}) on {branch}')
     remote = opt(a, '--remote')
     try:
@@ -1323,7 +1833,7 @@ def publish(a):
                   f'   localmodels publish --remote git@github.com:<owner>/<repo>.git   (next time; this release is committed and tagged)\n'
                   '   or: git remote add origin <url> && git push -u origin main --follow-tags')
             return 0
-        _git('push', 'origin', branch, '--follow-tags')
+        _git('push', '--atomic', 'origin', f'{release}:refs/heads/{branch}', '--follow-tags')   # the checked commit and its release commit, with its tag, or nothing
         url = _git('remote', 'get-url', 'origin')
     except RuntimeError as e: print(f'5. push failed: {e}'); return 1
     m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', url)
@@ -1332,9 +1842,48 @@ def publish(a):
     return 0
 
 
+FLAGS = {   # verb: (options that take a value, options that stand alone); a verb not listed reads its own words
+            # demo's --project, --workers, --model and --seed: one project's program, started by the demo itself
+    'status': ((), ()), 'st': ((), ()), 'open': ((), ()), 'log': (('--hours',), ()), 'swapcheck': ((), ()),
+    'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
+    'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'pictures': (('--out',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
+    'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
+    'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
+    'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
+    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+}
+LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
+
+
+def checked_args(verb, a):
+    """The options after a verb, checked before anything runs: one it does not take, one that needs a value and has
+    none, or a number below what it allows -> words for a person (exit 2); None when all is well."""
+    values, alone = FLAGS[verb]
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x in values:
+            if i + 1 >= len(a) or a[i + 1].startswith('--'): return f'{x} needs a value (localmodels help)'
+            if x in LEAST:
+                try: bad = float(a[i + 1]) < LEAST[x]
+                except ValueError: return f'{x}: {a[i + 1]!r} is not a number'
+                if bad: return f'{x}: {a[i + 1]} is below {LEAST[x]}'
+            i += 2; continue
+        if x in alone or not x.startswith('-'): i += 1; continue
+        return f'unknown option {x} for {verb} (localmodels help)'
+    return None
+
+
 def main(argv):
-    a = list(argv)
+    a = []
+    for x in argv:                                       # --flag=value is --flag value; --dry-run is --dry
+        if x.startswith('--') and '=' in x: a += x.split('=', 1)
+        else: a.append('--dry' if x == '--dry-run' else x)
+    if '-h' in a or '--help' in a: print(__doc__.strip()); return 0   # anywhere: a help flag never runs a verb
     verb = a.pop(0) if a and not a[0].startswith('-') else 'status'
+    if verb in FLAGS:
+        why = checked_args(verb, a)
+        if why: print(why); return 2
     if verb in ('status', 'st'): return status()
     if verb == 'dash':
         from . import dash
@@ -1356,8 +1905,16 @@ def main(argv):
     if verb == 'keep': return keep()
     if verb == 'recycle': return recycle_cmd(a)
     if verb == 'maintenance': return maintenance_cmd(a)
+    if verb == 'off': return off_cmd(a)
+    if verb == 'app': return app_cmd(a)
+    if verb == 'ext': return ext_cmd(a)
+    if verb == 'on': return on_cmd()
     if verb == 'present': return present_cmd(a)
     if verb == 'demo': return demo_cmd(a)
+    if verb == 'pictures':
+        from . import pictures
+        out = a[a.index('--out') + 1] if '--out' in a else None
+        return pictures.take(os.path.abspath(os.path.expanduser(out)) if out else None, dry='--dry' in a)
     if verb == 'name': return name_cmd(a[1:] if a[:1] == ['name'] else a)
     if verb in ('peer', 'peers'): return peer_cmd(a)
     if verb == 'notice':
@@ -1397,6 +1954,7 @@ def main(argv):
         if not a: print('localmodels agent-run <folder>'); return 2
         return mcp_server.run_folder(a[0])
     if verb == 'publish': return publish(a)
-    if verb in ('help', '-h', '--help'): print(__doc__.strip()); return 0
+    if verb == 'prepush': return prepush(a)
+    if verb == 'help': print(__doc__.strip()); return 0
     if verb == 'version': print(VERSION); return 0
     print(f'unknown: {verb} (localmodels help)'); return 2

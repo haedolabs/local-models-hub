@@ -6,8 +6,9 @@ all than one copy of eight (GUIDE.md, "Where to send requests"). So:
   keep()   whenever a family's first copy is loaded, its other copies are loaded too, with the same context and slots
            and no time limit. The door runs it at its start and every 20 s. Nothing is loaded from nothing (a Mac with no
            model loaded stays free), except a model that crashed: LM Studio does not reload one, so the keeper does
-           (crashes.py: at most 3 times an hour). A copy is recycled before the work at which the engine has crashed
-           (recycle.py). Nothing is unloaded for being idle.
+           (crashes.py: at most 3 times an hour). A copy whose engine stalled is taken out of routing and reloaded
+           (watchdog.py). A copy is recycled before the work at which the engine has crashed (recycle.py). Nothing is
+           unloaded for being idle.
   use()    a swap: refused while another run is using anything it would unload; then the rest is unloaded and the model
            loaded, with all its copies when it is a family. Swapping away drops the second copy with the first, so the
            other model has the room; swapping back brings both.
@@ -28,16 +29,18 @@ it once nothing of it is loaded, after LM Studio is up (its daemon started if it
 it: at most 3 tries, 30 s apart, then it says how to load it by hand. Once loaded (or unloaded later by a person), it
 is not loaded at start again until the door starts again. While the login loader from before the hub is installed
 (com.local-models.load-at-login), the keeper leaves loading to it; `localmodels install` retires that loader once a
-family is loaded at start, so one loader runs, never two.
+family is loaded at start, so one loader runs, never two. On a dedicated Mac no load waits for free memory (room_for):
+at start, after a crash, or a missing replica, it waits only for the GPU's wired limit.
 """
 import json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
-from . import crashes, errors, llmshare, maint, peers, recycle
+from . import crashes, errors, llmshare, maint, peers, recycle, watchdog
 
 GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resource guardrail', re.I)
 GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # sets the GPU's limit at every boot (a person installs it)
 LOADER = os.path.expanduser('~/Library/LaunchAgents/com.local-models.load-at-login.plist')   # a dedicated Mac's loader from before the hub
 START_TRIES, START_GAP = 3, 30                            # loads tried at start, and seconds between them
+KV_ROOM = 1.5                                             # GiB an instance needs within the GPU's limit beside its weights, at least
 _gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
 _sizes, _BORN = {}, time.time()                          # sizes on disk (read once a process); when this process started
 
@@ -124,12 +127,12 @@ def gpu_words(g, size_gb):
     if not g or not size_gb or not g.get('limit_gb'): return None
     total = g.get('total_gb', 0)
     room = int(total) - 8                                    # what the GPU may hold with 8 GB left to macOS and the apps
-    if size_gb + 1.5 > g['limit_gb']:
-        if size_gb + 1.5 > room:
+    if size_gb + KV_ROOM > g['limit_gb']:
+        if size_gb + KV_ROOM > room:
             return f"model needs {size_gb:.1f} GiB + KV cache, above the maximum GPU wired limit for this host ({room} GiB): use a smaller quantization"
         return (f"GPU wired limit {g['limit_gb']:.0f} GiB < model {size_gb:.1f} GiB + KV cache: run `sudo sysctl iogpu.wired_limit_mb={room * 1024}`, "
                 "then restart LM Studio; the value resets on reboot (`localmodels peer gpu-limit` writes the boot LaunchDaemon)")
-    if g.get('set') and not g.get('boot') and size_gb + 1.5 > total * (0.75 if total >= 36 else 2 / 3):
+    if g.get('set') and not g.get('boot') and size_gb + KV_ROOM > total * (0.75 if total >= 36 else 2 / 3):
         return (f"GPU wired limit {g['limit_gb']:.0f} GiB is set at runtime only and resets on reboot: "
                 "`localmodels peer gpu-limit` writes the boot LaunchDaemon")
     return None
@@ -159,6 +162,26 @@ def free_gb():
     get = lambda k: int((re.search(rf'{k}:\s+(\d+)', vm) or [0, 0])[1])
     held = get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')
     return (total - held * page) / 2**30                   # what programs hold (models included), not the file cache
+
+
+def room_for(f, size, room, rows=None):
+    """Why an instance of `size` GiB of family settings `f` cannot be loaded on this Mac now, in words, or None when it
+    can: the test before every load the keeper makes (load_at_start, crash recovery, a missing replica; a recycle reloads
+    what it has just unloaded and asks nothing). A family with "load_at_start" marks a dedicated Mac: it waits only until
+    the GPU's wired limit holds its weights and KV cache beside what is loaded (rows: the listing, the last in hand by
+    default). What other programs hold there is for macOS to compress or swap, as it does at every recycle, and waiting
+    for it to be free never ends: macOS fills freed memory with caches and decompressed pages (on the 48 GiB M4 Pro, 9.0
+    GiB in use a second after a crash and 13.2 GiB an hour later, while the reload waited for 39.2 GiB free). Any other
+    family waits until its weights and `room` (headroom_gb) are free."""
+    if not size: return None
+    if isinstance(f, dict) and f.get('load_at_start'):
+        g, listed = gpu(), (llmshare.loaded() if rows is None else rows)
+        weights = sum(gb(r.get('size')) for r in listed)
+        if g.get('limit_gb') and weights + size + KV_ROOM * (len(listed) + 1) > g['limit_gb']:
+            return f"GPU wired limit {g['limit_gb']:.0f} GiB < {size:.1f} GiB + KV cache" + (f' beside {weights:.1f} GiB loaded' if listed else '')
+        return None
+    free = free_gb()
+    return f'{free:.0f} GiB free, an instance needs {size + room:.0f} GiB incl. headroom' if free < size + room else None
 
 
 def downloaded():
@@ -274,7 +297,7 @@ def unload(ident):
     req = urllib.request.Request(llmshare.LMSTUDIO + '/api/v1/models/unload', data=json.dumps(dict(instance_id=ident)).encode(),
                                  headers={'Content-Type': 'application/json'})
     try:
-        d = json.load(urllib.request.urlopen(req, timeout=120))
+        d = json.load(llmshare.urlopen(req, timeout=120))
         if isinstance(d, dict) and d.get('instance_id') == ident: return True, f'{ident} unloaded'
     except urllib.error.HTTPError as e:                     # 404 model_not_found: the API is there and the instance is not
         try: err = (json.loads(e.read() or b'{}') or {}).get('error')
@@ -315,6 +338,8 @@ def keep():
     try:
         if maint.tick(llmshare.inflight(), llmshare.requests_log(0.1)): did.append('maintenance begins: no batch requests in flight')
     except Exception as e: did.append(f'maintenance check failed: {type(e).__name__}: {e}'); errors.record('instance manager: maintenance check', e)
+    off = maint.switched_off()
+    if off: return did + off_pass(off)                       # switched off: unload once, then nothing at all
     if maint.on():                                           # the person is working on LM Studio: note what is loaded, do nothing
         rows = llmshare.loaded(fresh=True)
         if llmshare.read_ok(): maint.freeze(llmshare.family(r['id']) for r in rows)
@@ -332,8 +357,12 @@ def keep():
             if not llmshare.read_ok(): return did
             busy = llmshare.busy_slots(); back = crashes.watch(rows, listed_at=began, busy=busy)
     except Exception as e: back = []; did.append(f'crash watcher failed: {type(e).__name__}: {e}'); errors.record('instance manager: crash watcher', e)
+    try: did += watchdog.check(rows, fams)                  # an instance still listed whose engine stopped: out of routing, reloaded below
+    except Exception as e: did.append(f'watchdog failed: {type(e).__name__}: {e}'); errors.record('instance manager: watchdog', e)
     have = {r['id'] for r in rows}
-    down = set((crashes._read(fresh=True).get('down') or {}))
+    downs = crashes._read(fresh=True).get('down') or {}
+    down = set(downs)
+    reloading = {b for b, d in downs.items() if d.get('state') in ('loading again', 'waiting for room')}
     todo = []
     for b, f in fams.items():
         if b not in have or b in down: continue             # the first copy is not loaded, or the crash machinery has the family
@@ -352,7 +381,8 @@ def keep():
         if w: did.append(w)
     except Exception as e: did.append(f'recycle planner failed: {type(e).__name__}: {e}'); errors.record('instance manager: recycle planner', e)
     job, ready = recycle.ready(rows, busy)
-    if down: job, ready = None, False                        # a family down after a crash: its reload first, no recycle in the same pass
+    if job and (job['family'] in reloading if job.get('stall') else down): job, ready = None, False   # a crash reload first, no recycle in the
+    # same pass; a stalled copy waits only for a reload under way in its family, not for a sibling left down (it serves nothing as it is)
     if not todo and not back and not boot and not (job and ready): return did
     with llmshare.swapping(wait=0) as got:
         if not got: return did                              # a swap is under way: the next pass looks again
@@ -363,9 +393,9 @@ def keep():
             if base not in ids or c in ids: continue        # it changed meanwhile
             blocked = crashes.load_blocked(base, conditions())
             if blocked: did.append(f'{c}: load skipped: {blocked}'); break
-            first, free = ids[base], free_gb()
-            if free < gb(first['size']) + room:
-                did.append(f"{c}: load deferred: {free:.0f} GB free, an instance needs {gb(first['size']) + room:.0f} GB incl. headroom"); break
+            why = room_for(f, gb(ids[base]['size']), room, list(ids.values()))
+            if why: did.append(f"{c}: load deferred: {why}"); break
+            first = ids[base]
             ok, out = load(f.get('key') or first['key'], c, f.get('context') or first['context'], f.get('parallel') or first['parallel'])
             did.append(f'{c} loaded' if ok else f'{c}: load failed: {refused(out) or out[-200:]}')
         if job and ready: did += _recycle(job, fams)
@@ -398,8 +428,8 @@ def _size_of(key):
 def at_start(b, f, have, room):
     """Whether to load a family marked load_at_start now: -> (load now, words or None). Not when any copy of it is loaded
     (then this start is done), when it was loaded or given up on in this door run, while the login loader from before the
-    hub is installed (it loads it), when LM Studio refused it and nothing has changed, when the GPU may not hold it yet,
-    when there is not room, or during the pause after a failed try."""
+    hub is installed (it loads it), when LM Studio refused it and nothing has changed, while the GPU's wired limit does not
+    hold it yet (room_for: a dedicated Mac waits for no free memory), or during the pause after a failed try."""
     s = start_state(b)
     if any(llmshare.family(i) == b for i in have):
         if not s['done']: _start_update(b, done=True)
@@ -408,11 +438,8 @@ def at_start(b, f, have, room):
     if os.path.exists(LOADER): return False, f'{b}: load_at_start deferred to LaunchAgent com.local-models.load-at-login (`localmodels install` retires it)'
     blocked = crashes.load_blocked(b, conditions())
     if blocked: return False, f'{b}: load_at_start blocked: {blocked}'
-    size, g = _size_of(f.get('key') or b), gpu()
-    if size and g.get('limit_gb') and size + 1.5 > g['limit_gb']:
-        return False, f"{b}: load_at_start waiting for GPU wired limit ({g['limit_gb']:.0f} GiB < {size:.1f} GiB + KV cache)"
-    free = free_gb()
-    if size and free < size + room: return False, f'{b}: load_at_start waiting for memory: {free:.0f} GiB free, {size + room:.0f} GiB required (incl. headroom_gb)'
+    why = room_for(f, _size_of(f.get('key') or b), room)  # a dedicated Mac's: the GPU's wired limit, never free memory
+    if why: return False, f'{b}: load_at_start waiting: {why}'
     if time.time() < s['next']: return False, None
     return True, None
 
@@ -441,20 +468,115 @@ def end_maintenance():
     crashes.after_maintenance(rows)                          # before the record goes, so no keeper pass reads the restart as crashes
     prev = maint.end()
     if not prev: return ['no maintenance was set']
-    have = {r['id'] for r in rows}
-    todo = [b for b in prev.get('before') or [] if b not in have]
-    if not todo: return ['maintenance is over; what was loaded before is loaded']
+    return _load_back(prev.get('before') or [], {r['id'] for r in rows}, 'maintenance')
+
+
+def _load_back(families, have, after):
+    """Load each family's first copy again (the keeper adds the other copies on its next pass). -> words."""
+    todo = [b for b in families if b not in have]
+    if not todo: return [f'{after} is over; what was loaded before is loaded']
     fams, did = llmshare.settings().get('families') or {}, []
-    ensure_server('after maintenance')
+    ensure_server(f'after {after}')
     with llmshare.swapping(wait=120) as got:
-        if not got: return [f"maintenance ended during a model swap: load {', '.join(todo)} manually (localmodels use <model>)"]
+        if not got: return [f"{after} ended during a model swap: load {', '.join(todo)} manually (localmodels use <model>)"]
         for b in todo:
             f = fams.get(b)
-            if not f: did.append(f'{b} was loaded before maintenance but is not in settings: load it manually (localmodels use {b})'); continue
+            if not f: did.append(f'{b} was loaded before {after} but is not in settings: load it manually (localmodels use {b})'); continue
             ok, out = load(f.get('key') or b, b, f.get('context') or 32768, f.get('parallel') or 4)
-            did.append(f'{b} reloaded after maintenance' if ok else f'{b}: reload after maintenance failed: {out[-200:]}')
+            did.append(f'{b} reloaded after {after}' if ok else f'{b}: reload after {after} failed: {out[-200:]}')
     llmshare.loaded(fresh=True)
     return did
+
+
+def _peer_words():
+    """Words when no peer can take requests now (switched off to peers only then refuses them all), else ''."""
+    v = peers.view()
+    if not v: return 'no peer is configured (localmodels peer add <name> <address>): every request gets 503 until one is'
+    if not any(p.get('state') == 'up' for p in v): return 'no peer is reachable now: requests get 503 until one is (' + '; '.join(p.get('words') or p['name'] for p in v) + ')'
+    return ''
+
+
+def switch_off(force=False, why='', peers_only=False):
+    """Switch the local models off (POST /hub/off, localmodels off): refused (409) while a run holds a lease on a loaded
+    model, unless forced. peers_only (localmodels off --peers): the gateway keeps admitting requests and sends them to its
+    peers, so no run loses its model and nothing is refused for a lease; this Mac's instances are unloaded once the requests
+    in flight on them finish. Already off: the mode changes when it differs. -> (HTTP code, body)."""
+    cur = maint.switched_off()
+    if cur and bool(cur.get('peers')) == bool(peers_only): return 200, dict(ok=True, note='already switched off', maintenance=maint.view())
+    if cur:
+        maint.switch_off([], why=why, peers=peers_only)
+        crashes.nudge()
+        w = _peer_words() if peers_only else ''
+        return 200, dict(ok=True, note=('requests now go to peers only' if peers_only else 'requests now get 503; peers are no longer used') + (f'; {w}' if w else ''),
+                         maintenance=maint.view())
+    rows = llmshare.loaded(fresh=True)
+    ids = [r['id'] for r in rows]
+    blockers = llmshare.swap_blockers(ids) if ids and not peers_only else []
+    if blockers and not force:
+        return 409, dict(ok=False, blockers=blockers, error='in use: ' + '; '.join(blockers) + ' (force to switch off anyway, or switch to peers only)')
+    fams = set((llmshare.settings().get('families') or {}).keys())
+    maint.switch_off(sorted({llmshare.family(i) for i in ids} & fams), why=why, peers=peers_only)
+    crashes.nudge()                                          # in the gateway: the instance manager unloads now, not in 20 s
+    if peers_only:
+        w = _peer_words()
+        return 200, dict(ok=True, note='switched off, peers only: new requests go to the peers; every instance here is unloaded once the requests in flight on it finish'
+                         + (f'; {w}' if w else ''), maintenance=maint.view())
+    return 200, dict(ok=True, note='switched off: new requests get 503; every instance is unloaded once the requests in flight finish',
+                     maintenance=maint.view())
+
+
+def off_pass(off):
+    """Switched off (maint.switch_off): once no request is in flight, unload every instance LM Studio lists, under the swap
+    lock, and see it gone from LM Studio's own listing; then record it done, so a model a person loads by hand afterwards
+    is left alone. Until then each pass tries again. Peers only: the requests going to peers never end, so it waits only
+    for those on this Mac's own instances (their in-flight markers, and every slot held on them, a program's own included).
+    -> words."""
+    did = ['switched off: crash recovery, stalls and the recycle under way cancelled (switching on starts them afresh)'] if crashes.switched_off() else []
+    if off.get('unloaded'):
+        return did + [('switched off, peers only: requests go to the peers' if off.get('peers') else 'switched off')
+                      + '; instance manager paused (no loads, reloads, recycles or server starts)']
+    if off.get('peers'):                                     # slot locks are this Mac's alone: a peer's slots are counted by the link
+        n = max(len(maint.local_work()), sum(llmshare.busy_slots().values()))
+    else: n = len(llmshare.inflight())
+    if n: return did + [f'switching off: waiting for {n} request{"s" if n != 1 else ""} in flight' + (' on this Mac' if off.get('peers') else '') + ' to finish before unloading']
+    if not server_up():
+        maint.off_done(off['at'], "LM Studio's server is not running: nothing loaded"); return did + ["switched off: LM Studio's server is not running, nothing to unload"]
+    with llmshare.swapping(wait=0) as got:
+        if not got: return did + ['switching off: a swap is under way; the unload is tried on the next pass']
+        for _ in range(12):
+            now = _listed()
+            if now is None: return did + ["switching off: LM Studio's listing did not answer; the unload is tried on the next pass"]
+            if not now: break
+            ident = sorted(now, key=lambda i: (':' not in i, i))[0]   # :N replicas first: a bare id names the oldest instance of its key
+            ok, words, gone = unload_exactly(ident)
+            did.append(f"{ident} unloaded" + (f" (LM Studio unloaded {', '.join(gone)})" if gone and gone != [ident] else '') if gone else f'{ident}: unload failed: {words[-160:]}')
+        left = _listed()
+        if left == set():
+            maint.off_done(off['at'], '; '.join(did))
+            did.append("switched off: no instance listed by LM Studio")
+        else: did.append(f"switching off: still listed: {', '.join(sorted(left or [])) or 'listing unavailable'}; tried again on the next pass")
+    llmshare.loaded(fresh=True)
+    return did
+
+
+def switch_on():
+    """Switched on again: skip what LM Studio logged while off (the unloads), clear the off record, then load each family
+    that was loaded when it was switched off (every family in the settings when none was). -> words."""
+    rec = maint.switched_off()
+    if not rec: return ['the local models were not switched off']
+    with llmshare.swapping(wait=120) as got:                 # an unload under way finishes first; then no pass reads the record
+        if not got: return ['a swap or an unload is under way: retry in a moment (localmodels on)']
+        rows = llmshare.loaded(fresh=True, force=True)
+        crashes.after_maintenance(rows)
+        maint.switch_on()
+    fams = list(rec.get('before') or (llmshare.settings().get('families') or {}).keys())
+    maint.on_started([b for b in fams if b not in {r['id'] for r in rows}])
+    did = []
+    try: did = _load_back(fams, {r['id'] for r in rows}, 'switch-off')
+    finally:
+        bad = [w for w in did if 'failed' in w or 'manually' in w or 'not in settings' in w]
+        maint.on_done(not bad, '; '.join(bad) if bad else (lambda n: f"{n} instance{'s' if n != 1 else ''} loaded; the instance manager adds the other replicas")(len(llmshare.loaded(fresh=True))))
+    return ['switched on: requests are admitted and the instance manager resumes'] + did
 
 
 def _again(job, room):
@@ -462,21 +584,22 @@ def _again(job, room):
     base, did, t0, tried = job['base'], [], time.time(), False
     blocked = crashes.load_blocked(base, conditions())
     if blocked: return [f'{base}: crash recovery reload skipped: {blocked}']     # it would be refused again: nothing has changed
+    f = (llmshare.settings().get('families') or {}).get(base)
     for c in job['ids']:
-        if c in {r['id'] for r in llmshare.loaded(fresh=True)}: continue
-        need, free = (gb(job['size']) + room if job['size'] else 0), free_gb()
-        if free < need:
-            why = f'{free:.0f} GB free, an instance needs {need:.0f} GB incl. headroom'
+        rows = llmshare.loaded(fresh=True)
+        if c in {r['id'] for r in rows}: continue
+        why = room_for(f, gb(job['size']), room, rows)     # a dedicated Mac's reload waits only for the GPU's wired limit
+        if why:
             crashes.waiting(base, why); did.append(f'{c} crashed; reload deferred: {why}'); return did
         if not tried: crashes.trying(base); tried = True
+        t1 = time.time()
         ok, out = load(job['key'], c, job['context'] or 32768, job['parallel'] or 4)
         if not ok:
             crashes.loaded(base, [c], False, time.time() - t0, refused(out) or out)
             did.append(f'{c}: crash recovery reload failed: {refused(out) or out[-200:]}'); return did
-    if not tried: return did                               # someone else loaded it meanwhile: the next look records it
-    ensure_server()                                        # LM Studio may turn its server off when a model changes
-    crashes.loaded(base, job['ids'], True, time.time() - t0)
-    did.append(f"{', '.join(job['ids'])} crashed; reloaded in {time.time() - t0:.0f} s")
+        ensure_server()                                    # LM Studio may turn its server off when a model changes
+        crashes.loaded(base, [c], True, time.time() - t1)   # each copy serves as soon as it is back, whatever its siblings do
+        did.append(f'{c} reloaded after the crash in {time.time() - t1:.0f} s')
     return did
 
 
@@ -486,6 +609,12 @@ def _recycle(job, fams):
     f = fams.get(base) or {}
     key, context, parallel = f.get('key') or base, f.get('context') or 32768, f.get('parallel') or 4
     recycle.reloading(copy)
+    listed = _listed()
+    if listed is not None and copy not in listed:          # resumed after a cut between the unload and the load: only the load is
+        ok, out = load(key, copy, context, parallel)       # left (an unload by its name would take a sibling of that model key)
+        ensure_server()
+        recycle.done(copy, ok, time.time() - t0, '' if ok else refused(out) or out)
+        return [f'{copy} loaded to finish its recycle in {time.time() - t0:.0f} s: {job["why"]}' if ok else f'{copy}: reload after recycle failed: {refused(out) or out[-200:]}']
     uok, uwords, gone = unload_exactly(copy)
     wrong = [i for i in gone if i != copy]
     if wrong or copy not in gone:                            # another instance went (its requests are resent), or none did
@@ -528,6 +657,7 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         add = [c for c in want if c not in have or c in drop]
         if dry: return 0, f"would unload {', '.join(drop) or 'nothing'}; would load {', '.join(add) or 'nothing'}"
         drop = sorted(drop, key=lambda i: llmshare.family(i) == i)   # <id>:N first: a bare id (a model key) is unambiguous once its siblings are gone
+        asked = list(drop)
         for _ in range(2):                                   # what is still listed is unloaded again, once
             for i in drop: unload(i)
             now = _listed()
@@ -535,6 +665,7 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
             drop = [i for i in drop if i in now]
             if not drop: break
         now = _listed()
+        if now is not None: crashes.unloaded_now([i for i in asked if i not in now])   # gone on purpose, not crashed
         if now is not None: add = [c for c in want if c not in now or c in drop]   # a wanted one that went is loaded back
         for c in add:
             ok, out = load(key, c, context, parallel)

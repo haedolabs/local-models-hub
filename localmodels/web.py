@@ -8,11 +8,12 @@
   /hub/history      the last minutes from the hub's request log and the requests in flight now: answers at once by
                     project, waits, tokens a second, requests by project, and the memory the door samples every 15 s
   /hub/recent       the last requests (project, kind, copy, seconds, waits, tokens, the step; never the content)
+  /hub/accent       the Mac's system accent color (System Settings > Appearance), for the page's color setting
 
 Readings are gathered when the page asks (cached 2 s, one computation at a time however many pages ask), so nothing
 runs while nobody looks, except the memory sample.
 """
-import collections, json, os, re, threading, time
+import collections, json, os, re, subprocess, threading, time
 
 from . import HOME, NAME, VERSION, admission, crashes, dash, errors, llmshare, maint, names, peers, recycle, sessions
 from . import names as names_mod          # colors() takes a parameter called names
@@ -31,6 +32,23 @@ SLOTS = 7                                               # categorical slots for 
 _lock, _cache = threading.Lock(), {}
 _locks = collections.defaultdict(threading.Lock)
 _mem = collections.deque(maxlen=24 * 60 * 4)            # (time, GB used here, {peer: [used, total]} or None) every 15 s: a day
+
+
+# ---------------------------------------------------------------- the Mac's accent color
+# AppleAccentColor as System Settings > Appearance writes it, with the sRGB value macOS draws for it (controlAccentColor);
+# no key is Multicolor, which draws blue. The page offers it beside Haedo Labs Sapphire, its default, and a color of one's own.
+ACCENTS = {-1: ('Graphite', '#989898'), 0: ('Red', '#e0383e'), 1: ('Orange', '#f7821b'), 2: ('Yellow', '#ffc726'),
+           3: ('Green', '#62ba46'), 4: ('Blue', '#007aff'), 5: ('Purple', '#953d96'), 6: ('Pink', '#f74f9e')}
+
+
+def accent():
+    """-> {name, color}: the Mac's accent now (read on each call; it changes when the person changes it)."""
+    try:
+        r = subprocess.run(['defaults', 'read', '-g', 'AppleAccentColor'], capture_output=True, text=True, timeout=3)
+        n = int(r.stdout.strip()) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError): n = None
+    name, color = ACCENTS.get(n, ('Multicolor', ACCENTS[4][1]))
+    return dict(name=name, color=color)
 
 
 # ---------------------------------------------------------------- colors that follow the project
@@ -73,6 +91,14 @@ def _cached(key, seconds, fn):
         return val
 
 
+def extensions():
+    """The extensions for the dashboard's launcher (localmodels/extensions.py, GET /hub/extensions), their menus asked at
+    most every 5 s; none in screenshot mode, where only the projects kept are named."""
+    if names.presenting(): return []
+    from . import extensions as ext
+    return _cached('extensions', 5, ext.view)
+
+
 # ---------------------------------------------------------------- now
 def about(home=None):
     """The dashboard's corner: {version, license, copyright, copyright_url, source}, read from the hub's own LICENSE and
@@ -111,14 +137,14 @@ def _snapshot():
     job = view.get('job')
     fams = []
     for f in lm['families']:
-        cps, downs = [], crashes.down_copies(f['id'])
+        cps, downs, stalls = [], crashes.down_copies(f['id']), crashes.stalled_copies(f['id'])
         for c in f['copies']:
             hold = [dict(project=p, n=n) for p, n in holders.get(c['id'], collections.Counter()).most_common()]
             other = max(0, c.get('busy', 0) - sum(h['n'] for h in hold))         # held by a program that went straight in
             if other: hold.append(dict(project='direct to LM Studio', n=other))
             cps.append(dict(id=c['id'], state=c['state'], parallel=c['parallel'], busy=c.get('busy', 0), context=c['context'],
                             size=c.get('size'), holders=hold, served=view['copies'].get(c['id']),
-                            recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs,
+                            recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs, stalled=c['id'] in stalls,
                             ctx=dict(load=loads.get(c['id'], 0), budget=admission.budget(c['id']))))
         fams.append(dict(id=f['id'], at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps,
                          waiting_room=sum(n for m, n in room.items() if llmshare.family(m) == f['id'])))
@@ -126,15 +152,17 @@ def _snapshot():
     out = dict(time=time.time(), clock=time.strftime('%H:%M:%S'),
                door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting()),       # every live gateway's queue
                lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age())),
-               settings_error=llmshare.settings_error(),
-               crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7))),
-               recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10])),
+               settings_error=llmshare.settings_error(), write_problem=llmshare.write_problem(),
+               crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7)), stalled=crashes.stalled()),
+               recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10]), held=recycle.held_back()),
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],
                claude=[dict(c, uses=any(u.get('session') == c['id'] for u in users)) for c in cs],
-               mac=dash.mac(), top=dash.every('top', 5, dash.top), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
+               mac=dash.mac(), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
     out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
     except Exception as e: out['maintenance'] = None; errors.record('snapshot: maintenance', e)
+    try: out['switching'] = maint.switching()
+    except Exception as e: out['switching'] = None; errors.record('snapshot: switching', e)
     try:                                          # this Mac's peers (each one's state, the link, the families it serves) and this Mac as a peer
         out['peers'] = peers.view()
         for p in out['peers']:
@@ -268,6 +296,11 @@ def sampler(stop=None):
         except Exception as e: errors.record('memory sampler', e)
         if stop is None: time.sleep(15)
         elif stop.wait(15): return
+
+
+def asset(name):
+    """A file shipped beside the page, as bytes: the typeface (Libre Franklin, SIL OFL: libre-franklin-OFL.txt) or the board behind it."""
+    return open(os.path.join(os.path.dirname(PAGE), name), 'rb').read()
 
 
 def page():

@@ -5,7 +5,8 @@ Every Mac runs the same hub. The Mac the projects run on is the front: its setti
 ("peers": {"<name>": {"url": "http://<address>:1235"}}). A peer's settings say where it listens for the front
 ("serve": {"address": "<its Thunderbolt Bridge address>"}). Both hold the same token in peer-token (mode 0600, beside the
 settings; never in the repo or in models.json). Over the link a peer's door answers only requests with that token, never a
-web page, a load or unload, a recycle or the dashboard (gateway.Door.over_link).
+web page, a load or unload, a recycle or the dashboard (gateway.Door.over_link); the one control it takes is switching its
+local models off and on (POST /hub/off, /hub/on), which the front sends with `localmodels peer off|on <name>` (switch()).
 
   report()      what a peer tells a front (GET /hub/peer): each family loaded there with its copies, its slots, how many
                 are busy and how many of those a front's requests hold, its fingerprint, its maintenance, its keeper's
@@ -31,30 +32,30 @@ address; route_of() says which interface the route to a peer takes. macOS's Loca
 LaunchAgent's connections to the local network with "no route to host" and no prompt: reach_words() says where to turn it
 on. LM Link (LM Studio's own linking) is not used: llmshare leaves its rows (deviceIdentifier set) out of the listing.
 """
-import collections, errno, hashlib, hmac, ipaddress, json, os, re, secrets, shlex, socket, subprocess, threading, time, urllib.error, urllib.parse, urllib.request
+import collections, errno, hashlib, hmac, http.client, ipaddress, json, os, re, secrets, shlex, socket, subprocess, threading, time, urllib.parse
 
 from . import VERSION, errors, llmshare, maint
 
-TOKEN_FILE = STATE = None     # peer-token (the same on every Mac of the set; mode 0600) and link.json (the front's look at its peers)
+TOKEN_FILE = STATE = EVENTS = None   # peer-token (the same on every Mac of the set; mode 0600), link.json (the front's look at
+                                     # its peers) and link-events.jsonl (each change of a peer's state: time, peer, from, to, why)
 
 
 @llmshare.on_state
 def _state_paths(root):
-    global TOKEN_FILE, STATE
-    TOKEN_FILE, STATE = os.path.join(root, 'peer-token'), os.path.join(root, 'link.json')
+    global TOKEN_FILE, STATE, EVENTS
+    TOKEN_FILE, STATE, EVENTS = (os.path.join(root, f) for f in ('peer-token', 'link.json', 'link-events.jsonl'))
 
 
 LMSTUDIO_HOME = (os.path.dirname(os.path.dirname(llmshare.LMS)) if llmshare.LMS.endswith(os.sep + os.path.join('bin', 'lms'))
                  else os.path.expanduser('~/.lmstudio'))
 NAME = re.compile(r'^[A-Za-z0-9._-]{1,40}$')
 ON = ' on '                    # a copy on a peer is "<family> on <peer>": model ids hold no spaces, so it is never a local id
-POLL, BACKOFF_MAX, REFUSED_AGAIN, ROUTE_EVERY, WRITE_EVERY = 2.0, 60.0, 300.0, 300.0, 10.0
+POLL, BACKOFF_MAX, REFUSED_AGAIN, ROUTE_EVERY, WRITE_EVERY = 2.0, 10.0, 300.0, 300.0, 10.0   # a peer is only ever on a direct link: a look at one that is away costs a connect timeout at most
 STRIKES, STRIKE_WINDOW = 3, 60   # requests a peer failed though its look was fine, within this many seconds: it is backed off
 PEER_WAIT = 5                  # seconds a peer's door may keep this Mac's request waiting for a slot before it answers 503
 CONNECT = 3                    # seconds to connect to a peer
 WAKE = threading.Event()       # a request to a peer failed: look again at once
 LISTEN = {'words': None}       # in the door: what its listener for peers does now, in words (gateway.listen_link)
-_open = urllib.request.build_opener(urllib.request.ProxyHandler({})).open    # never through a proxy from the environment
 _cache = {}
 
 
@@ -166,6 +167,16 @@ def serving():
     return dict(address=addr, port=port)
 
 
+def serve_problem(address):
+    """Why this Mac will not listen for peers on `serve`'s address, or None: it must be one address of this Mac, so the
+    listener is bound to its interface; 0.0.0.0 or :: would listen on every interface, Wi-Fi included."""
+    a = str(address or '').strip('[]')
+    try: ip = ipaddress.ip_address(a.split('%')[0])
+    except ValueError: return f'serve address {a!r} is not an IP address: give the Thunderbolt Bridge address of this Mac'
+    if ip.is_unspecified: return f'serve address {a} listens on every interface: give the Thunderbolt Bridge address of this Mac'
+    return None
+
+
 def cid(model, peer):
     """The copy id the door gives a family on a peer: '<family> on <peer>'."""
     return f'{model}{ON}{peer}'
@@ -205,6 +216,61 @@ def interface_of(address, text=None):
     for name, addrs in interfaces(text).items():
         if any(a == address for a, _ in addrs): return name
     return None
+
+
+def on_link(host, text=None):
+    """Where a peer is reached: (interface, this Mac's address there, the peer's address) when the peer's IPv4 address,
+    or one its name resolves to, is on the subnet of one of this Mac's interfaces (a direct link, no router); else
+    (None, words, None), and nothing is sent to it. With the Thunderbolt cable out the bridge has no address, and the
+    peer's address would take the default route to whatever answers there. A loopback peer is on lo0; an IPv6 link-local
+    address names its interface (fe80::2%bridge0)."""
+    h = str(host or '').strip('[]')
+    if loopback(h): return 'lo0', None, h
+    if '%' in h: return h.split('%', 1)[1], None, h
+    try: ips = [ipaddress.ip_address(h)]
+    except ValueError:
+        try: ips = [ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(h, None, socket.AF_INET, socket.SOCK_STREAM)]
+        except (OSError, UnicodeError, ValueError): ips = []
+    ifs = interfaces(text) if text is not None else _every('interfaces', 2, interfaces)
+    for ip in ips:
+        for name, addrs in ifs.items():
+            for a, n in addrs:
+                if ip.version == 4 and str(ip) != a and ip in ipaddress.ip_network(f'{a}/{n}', strict=False): return name, a, str(ip)
+    return None, (f"{h} is not on a subnet of this Mac's interfaces (Thunderbolt cable out, the bridge without its static address, "
+                  'or a routed address): nothing is sent to it'), None
+
+
+class LinkConnection(http.client.HTTPConnection):
+    """An HTTP connection to a peer's door that leaves only through the interface the peer is on (IP_BOUND_IF, from this
+    Mac's address there), so with the link down nothing takes another route; with no such interface it is never opened
+    (ENETUNREACH). http.client follows no redirect and reads no proxy from the environment."""
+    def connect(self):
+        iface, src, addr = on_link(self.host)
+        if not iface: raise OSError(errno.ENETUNREACH, src)
+        fam = socket.AF_INET6 if ':' in addr else socket.AF_INET
+        info = socket.getaddrinfo(addr, self.port, fam, socket.SOCK_STREAM)[0]
+        s = socket.socket(info[0], info[1], info[2])
+        try:
+            idx = socket.if_nametoindex(iface)
+            if fam == socket.AF_INET6: s.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
+            else: s.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+            if src: s.bind((src, 0))
+            s.settimeout(self.timeout)
+            s.connect(info[4])
+        except OSError: s.close(); raise
+        self.sock = s
+
+
+def fetch(url, path, headers, timeout=CONNECT, method='GET', body=None):
+    """GET (or POST `body`) a path on a peer's door over a LinkConnection. -> (status, body); OSError when the peer cannot
+    be reached."""
+    u = urllib.parse.urlsplit(url)
+    c = LinkConnection(u.hostname, u.port or 80, timeout=timeout)
+    try:
+        c.request(method, path, body=body, headers=dict(headers, **({'Content-Type': 'application/json'} if body is not None else {})))
+        r = c.getresponse()
+        return r.status, r.read(4_000_000)
+    finally: c.close()
 
 
 def ports(text=None):
@@ -485,7 +551,7 @@ def report(front=None):
     except Exception as e: mem = None; errors.record('peer report: memory', e)
     try: chip = {k: v for k, v in dash.every('soc', 2, dash.soc).items() if k != 'cpu'}   # the front shows this host's chip at work
     except Exception as e: chip = None; errors.record('peer report: soc', e)
-    return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(),
+    return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(), switching=maint.switching(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
                 keeper=keeper, memory=mem, soc=chip)
 
@@ -500,6 +566,7 @@ class Peer:
         self.refused_token, self.refused_at, self.tries_refused = None, 0.0, 0
         self.report, self.route, self.route_at = None, (None, None), 0.0
         self.strikes = []                               # when requests failed there though the peer looked up
+        self.since = time.time()                        # when it came into its state (link-events.jsonl has each change)
         self.cap = {}                                   # family -> how many this Mac (all its gateways) may have there, from the last look
         self.ctx = {}                                   # family -> (its context budget, what others hold there), from the last look
         self.match = {}                                 # family -> (True, None) or (False, words)
@@ -552,6 +619,7 @@ class Link:
                 p.match = {b: (bool(f.get('match')), f.get('why')) for b, f in fams.items()}
                 p.first = {b: int(f.get('first') or 0) for b, f in fams.items()}
                 p.seen_at = float(e.get('seen') or 0)
+                if e.get('since'): p.since = float(e['since'])
                 peers_[name] = p; order.append(name)
             self.peers, self.order = peers_, order
 
@@ -579,7 +647,12 @@ class Link:
             if not force:
                 if p.state == 'refused' and tok == p.refused_token and now - p.refused_at < REFUSED_AGAIN: continue
                 if p.state != 'refused' and now < p.next_at: continue
-            self._look(p, tok); looked = True
+            was = p.state
+            try: self._look(p, tok)
+            except Exception as e:                       # one peer's look never stops the others' or link.json
+                errors.record(f'peer poller: {name}', e); self._down(p, f'look failed: {type(e).__name__}: {e}')
+            self._changed(p, was)
+            looked = True
         if (self.peers or had or os.path.exists(STATE)) and (looked or force or time.time() - self.wrote > WRITE_EVERY): self.write()
 
     def _look(self, p, tok):
@@ -587,16 +660,18 @@ class Link:
         if not tok:
             with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', token_problem() or 'no peer-token on this host', tok, t0
             p.tries_refused += 1; return
-        req = urllib.request.Request(p.url + '/hub/peer', headers={'X-Hub-Token': tok, 'X-Hub-From': me()})
+        iface, why, _ = on_link(p.host)
+        if not iface: return self._down(p, why)                 # the token goes nowhere but the link
         try:
-            with _open(req, timeout=CONNECT) as r: rep = json.load(r)
-            if not isinstance(rep, dict) or rep.get('hub') != 'local-models': raise ValueError('response is not a local-models hub report')
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', f'auth failed (HTTP {e.code}): peer-token mismatch; both hosts need the same peer-token', tok, t0
+            code, data = fetch(p.url, '/hub/peer', {'X-Hub-Token': tok, 'X-Hub-From': me()})
+            if code in (401, 403):
+                with self.lock: p.state, p.why, p.refused_token, p.refused_at = 'refused', f'auth failed (HTTP {code}): peer-token mismatch; both hosts need the same peer-token', tok, t0
                 p.tries_refused += 1; return
-            return self._down(p, f'peer gateway returned HTTP {e.code}')
-        except (OSError, ValueError) as e: return self._down(p, reach_words(e) if isinstance(e, OSError) else f'invalid poll response ({e})')
+            if code != 200: return self._down(p, f'peer gateway returned HTTP {code}')
+            rep = json.loads(data)
+            if not isinstance(rep, dict) or rep.get('hub') != 'local-models': raise ValueError('response is not a local-models hub report')
+        except OSError as e: return self._down(p, reach_words(e))
+        except (ValueError, http.client.HTTPException) as e: return self._down(p, f'invalid poll response ({type(e).__name__}: {e})')
         with self.lock:
             p.rtt, p.report, p.seen_at, p.fails, p.next_at, p.tries_refused = time.time() - t0, rep, time.time(), 0, time.time() + POLL, 0
             m = rep.get('maintenance') or {}
@@ -622,7 +697,7 @@ class Link:
         with self.lock:
             p.fails += 1
             p.state, p.why = 'down', why
-            p.next_at = time.time() + min(BACKOFF_MAX, POLL * 2 ** (p.fails - 1))
+            p.next_at = time.time() + min(BACKOFF_MAX, POLL * 2 ** min(p.fails - 1, 6))   # the exponent bounded: a float overflows past 2**1023
             p.cap = {}
 
     def _mine(self):
@@ -708,6 +783,7 @@ class Link:
         with self.lock:
             p = self.peers.get(name)
             if not p: return
+            was = p.state
             if code in (401, 403): p.state, p.why, p.refused_token, p.refused_at, p.cap = 'refused', f'auth failed (HTTP {code}): peer-token mismatch', token(), time.time(), {}
             elif mh.startswith('on'):
                 p.state, p.why, p.cap = 'maintenance', 'maintenance window active' + (f" ({mh.split('why=', 1)[1]})" if 'why=' in mh else ''), {}
@@ -719,7 +795,15 @@ class Link:
                 p.strikes = [t for t in p.strikes if t > time.time() - STRIKE_WINDOW] + [time.time()]
                 if len(p.strikes) >= STRIKES:            # its look is fine but its requests fail: back off as if it were down
                     p.strikes = []; self._down(p, f'{STRIKES} request failures within {STRIKE_WINDOW} s ({words or code})')
+        self._changed(p, was)
         self.write(); WAKE.set()
+
+    def _changed(self, p, was):
+        """A peer whose state changed since `was`: the time it did, and one line in link-events.jsonl (names, states,
+        the reason and the time; never anything a request carried)."""
+        if p.state == was: return
+        p.since = time.time()
+        llmshare._append(EVENTS, dict(at=round(p.since, 1), peer=p.name, was=was, state=p.state, why=p.why), roll_at=1_000_000)
 
     def answered(self, c):
         """A request on a peer was answered: its failures in a row start again."""
@@ -746,8 +830,8 @@ class Link:
                 d = dict(name=name, url=p.url, host=p.host, state=p.state, why=p.why, seen=round(p.seen_at, 1) if p.seen_at else None,
                          rtt_ms=round(p.rtt * 1000, 1) if p.rtt is not None else None, route=dict(interface=p.route[0], port=p.route[1]),
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
-                         address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, families=fams,
-                         maintenance=rep.get('maintenance'), keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
+                         address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, since=round(p.since, 1), families=fams,
+                         maintenance=rep.get('maintenance'), switching=rep.get('switching') if p.state in ('up', 'maintenance') else None, off=bool((rep.get('maintenance') or {}).get('off')) if p.state == 'maintenance' else False, keeper=rep.get('keeper'), version=rep.get('version'), their_name=rep.get('name'),
                          memory=rep.get('memory') if p.state in ('up', 'maintenance') else None,
                          soc=rep.get('soc') if p.state in ('up', 'maintenance') else None)
                 d['words'] = words(d)
@@ -768,6 +852,26 @@ class Link:
 LINK = Link()
 
 
+def switch(name, on, force=False, why=''):
+    """Switch a peer's local models off or on from this gateway: POST /hub/off or /hub/on over the link, with the token.
+    The peer does what `localmodels off` / `on` does there (its own leases refuse an off with 409 unless forced); this
+    gateway then sees it in maintenance and routes nothing there until it is on. -> (HTTP code, body)."""
+    c = configured().get(name)
+    if not c: return 404, dict(ok=False, error=f"no peer named {name} in this host's settings (localmodels peer)")
+    tok = token()
+    if not tok: return 409, dict(ok=False, error=token_problem() or 'no peer-token on this host')
+    body = b'{}' if on else json.dumps(dict(force=bool(force), why=llmshare.clean(why, 100) or '')).encode()
+    try: code, data = fetch(c['url'], '/hub/on' if on else '/hub/off', {'X-Hub-Token': tok, 'X-Hub-From': me()}, timeout=15, method='POST', body=body)
+    except OSError as e: return 502, dict(ok=False, error=f'peer {name}: {reach_words(e)}')
+    except http.client.HTTPException as e: return 502, dict(ok=False, error=f'peer {name}: invalid response ({type(e).__name__}: {e})')
+    try: j = json.loads(data or b'{}')
+    except ValueError: j = {}
+    if not isinstance(j, dict): j = {}
+    if code in (401, 403) and not j.get('error'): j['error'] = f'auth failed (HTTP {code}): peer-token mismatch'
+    if code == 403 and 'only inference' in str(j.get('error')): j['error'] = f'peer {name} runs a release without remote switching ({j["error"]}): install the current release there'
+    return code, dict(j, peer=name)
+
+
 def poller(stop=None):
     """The peer-poller role's loop, in one gateway on this Mac: it alone looks at the peers and writes link.json. Every
     second it looks at those that are due (each every 2 s while up); at once after a request to one failed here (WAKE);
@@ -785,6 +889,19 @@ def poller(stop=None):
 
 
 # ---------------------------------------------------------------- every screen reads the front's look from link.json
+def link_events(hours=24):
+    """The changes of the peers' states in the last hours, oldest first: [{at, peer, was, state, why}]."""
+    since, out = time.time() - hours * 3600, []
+    for path in (EVENTS + '.1', EVENTS):
+        try:
+            for line in open(path):
+                try: e = json.loads(line)
+                except ValueError: continue
+                if isinstance(e, dict) and e.get('at', 0) >= since: out.append(e)
+        except OSError: pass
+    return sorted(out, key=lambda e: e.get('at', 0))
+
+
 def view(max_age=30):
     """The front's look at its peers, as the door last wrote it: [peer dicts], or [] when there are none (or the door has
     not looked for max_age seconds: its look is then stale, and each peer says so)."""
@@ -848,4 +965,5 @@ def words(p):
         n = len(f.get('copies') or [])
         bits.append(f"{b}: {n} instance{'s' if n != 1 else ''}, {f.get('free_here')}/{f.get('slots')} slots free for this gateway ({f.get('busy')} busy, {f.get('here')} from this gateway)")
     warn = [w for w in (p.get('route_words'), p.get('address_words')) if w] + list((p.get('keeper') or {}).get('warnings') or [])
+    if p.get('version') and p['version'] != VERSION: warn.append(f"runs release {p['version']}, this host {VERSION}")
     return f"peer {name}: reachable{link} · " + ('; '.join(bits) or 'no model loaded') + (' · ' + '; '.join(warn) if warn else '')

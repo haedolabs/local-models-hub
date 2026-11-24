@@ -3,7 +3,7 @@
 pretend LM Studio behind each, on random ports: this Mac's door in this process, the peer's door as its own process with
 its own state folder. Local slots first, then the peer's; never more in flight to the peer than it says it has free; the
 project, session, kind, step and run forwarded; the token refused when wrong or missing; web pages, swaps and the
-dashboard refused over the link; a peer in maintenance or gone skipped, and a request it could not take sent again here;
+dashboard refused over the link; a peer switched off and on from this Mac; a peer in maintenance or gone skipped, and a request it could not take sent again here;
 the network checks (the interface, the route, link-local addresses, macOS's Local Network permission); a model's identity
 across Macs (its variant, size and definition); LM Link's rows left out of the listing; and the peer's keeper, which
 says plainly when LM Studio's guardrail refuses a load, does not try again until something changed, and never recycles
@@ -14,6 +14,7 @@ import collections, errno, http.server, json, os, shutil, socket, subprocess, sy
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HOME)
+import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
 from localmodels import crashes, gateway, llmshare, models, peers, recycle
 
 F, F2 = 'test/family', 'test/family:2'
@@ -108,12 +109,24 @@ def test_units(box):
     w = peers.address_words('169.254.12.34')
     t('a link-local address is warned about (it changes after a restart and may take the slow interface)', w and 'static address' in w, w)
     t('a fixed private address is fine', peers.address_words('192.168.213.2') is None)
+    w = peers.words(dict(name='m4', state='up', version='0.9.0', families={}))
+    t("a peer on another release is named with both versions", '0.9.0' in w and peers.VERSION in w, w)
+    t("a peer on the same release: no word about it", 'release' not in peers.words(dict(name='m4', state='up', version=peers.VERSION, families={})))
     w = peers.route_words('en7', {'en7': 'Ethernet Adapter (en7)', 'bridge0': 'Thunderbolt Bridge'})
     t('a route that does not take the Thunderbolt Bridge is said, naming the port', w and 'Thunderbolt Bridge' in w and 'en7' in w, w)
     t('a route over the Thunderbolt Bridge is fine', peers.route_words('bridge0', {'bridge0': 'Thunderbolt Bridge'}) is None)
     w = peers.reach_words(OSError(errno.EHOSTUNREACH, 'No route to host'))
     t("EHOSTUNREACH is read as macOS's Local Network permission, with where to turn it on", 'Local Network' in w and 'Privacy' in w, w)
     t('a refused connection is read as the peer gateway not listening', 'ECONNREFUSED' in peers.reach_words(ConnectionRefusedError(errno.ECONNREFUSED, 'Connection refused')))
+    t("a peer on a subnet of this Mac's interfaces is reached only through that interface, from this Mac's address there",
+      peers.on_link('192.168.213.1', ifc) == ('bridge0', '192.168.213.2', '192.168.213.1'), peers.on_link('192.168.213.1', ifc))
+    out = ifc.replace('\tinet 192.168.213.2 netmask 0xffffff00 broadcast 192.168.213.255\n', '')    # the cable out: the bridge has no IPv4 address
+    t('with the cable out the peer is on no subnet here: no interface, and the words say nothing is sent',
+      peers.on_link('192.168.213.1', out)[0] is None and 'nothing is sent' in peers.on_link('192.168.213.1', out)[1], peers.on_link('192.168.213.1', out))
+    t('the link listener is bound to one address of this Mac: an unspecified address (every interface) or a name is refused',
+      peers.serve_problem('0.0.0.0') and peers.serve_problem('::') and peers.serve_problem('mac.local') and peers.serve_problem('192.168.213.1') is None)
+    t('a loopback peer (a sandbox) is on lo0; an IPv6 link-local address names its interface',
+      peers.on_link('127.0.0.1', ifc)[0] == 'lo0' and peers.on_link('fe80::2%bridge0', ifc)[0] == 'bridge0')
 
     mine = dict(variant='test/family@8bit', bytes=1000, format='safetensors', definition='abc')
     t('the same variant, size, format and definition: the same model', peers.match(mine, dict(mine))[0])
@@ -236,7 +249,7 @@ def test_keeper(box):
     L.settings = lambda: dict(families=fams, batch_at_once=4, headroom_gb=4)
     L.read_ok, L.busy_slots, L.api_models = (lambda: True), (lambda: {}), (lambda timeout=3: {})
     L.loaded = lambda fresh=False, force=False: list(state['rows'])
-    models.free_gb, models.ensure_server, models.conditions = (lambda: 45.0), (lambda *a, **k: True), (lambda: (1.0, 40960))
+    models.free_gb, models.ensure_server, models.conditions = (lambda: 30.0), (lambda *a, **k: True), (lambda: (1.0, 40960))   # less than its weights and headroom_gb
     models.downloaded = lambda: [dict(modelKey=F, sizeBytes=int(37.75 * 2**30), type='llm')]
     models.LOADER = os.path.join(box, 'no-such-agent.plist')
     L.SWAP_LOCK = os.path.join(box, 'swap.lock')
@@ -248,7 +261,7 @@ def test_keeper(box):
     t('the GPU may not hold it yet: no load, and the words say it waits for the limit', not [c for c in calls if c[0] == 'load'] and any('GPU' in x for x in w), w)
     gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
     w = models.keep()
-    t('the limit is up: the first copy is loaded, as the family says (identifier, context, slots)',
+    t('the limit is up: the first copy is loaded, as the family says (identifier, context, slots), with 30 GiB free (a dedicated Mac waits for no free memory)',
       [c for c in calls if c[0] == 'load'] == [('load', F, '--identifier', F, '-c', '65536', '--parallel', '4', '-y')], calls)
     calls.clear(); models.keep()
     t('a load that failed is tried again only after 30 s', not [c for c in calls if c[0] == 'load'], calls)
@@ -302,7 +315,7 @@ def test_commands(box):
         code, out = run('add', 'macbook', '192.168.213.2')
         conf = json.load(open(llmshare.MODELS))
         tok = open(peers.TOKEN_FILE).read().strip()
-        t('peer add writes the peer into the settings, beside what was there', code == 0 and conf.get('peers') == {'macbook': {'url': 'http://192.168.213.2:1235'}} and F in conf['families'], conf)
+        t('peer add writes the peer into the settings, beside what was there', code == 0 and conf.get('peers') == {'macbook': {'url': f'http://192.168.213.2:{llmshare.HUB_PORT}'}} and F in conf['families'], conf)
         t('...and makes the token: 64 hex characters, mode 0600', len(tok) == 64 and os.stat(peers.TOKEN_FILE).st_mode & 0o777 == 0o600, oct(os.stat(peers.TOKEN_FILE).st_mode))
         t('...and never prints it: the next steps copy it over SSH from its file', tok not in out and 'ssh <user>@192.168.213.2' in out and peers.TOKEN_FILE in out, out[-300:])
         code, out2 = run('add', 'macbook', '192.168.213.2')
@@ -499,6 +512,91 @@ def test_link_rules(box):
           L.ctx_fits(c, 0, 50000) and not L.ctx_fits(c, 9000, 2000) and (setattr(p, 'ctx', {}) or L.ctx_fits(c, 9000, 50000)))
     finally: llmshare.settings = real
 
+    print('the link: the token goes only to a peer on a subnet of this Mac, and never follows a redirect')
+    got = []
+
+    class Catch(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            got.append(self.headers.get('X-Hub-Token')); self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+    catch = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Catch); threading.Thread(target=catch.serve_forever, daemon=True).start()
+
+    class Move(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            self.send_response(302); self.send_header('Location', f'http://127.0.0.1:{catch.server_address[1]}/hub/peer'); self.end_headers()
+    move = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Move); threading.Thread(target=move.serve_forever, daemon=True).start()
+    tok_was, peers.token = peers.token, lambda: TOKEN
+    real_conn = peers.LinkConnection.connect if hasattr(peers, 'LinkConnection') else None
+    tried = []
+    try:
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'off': dict(url='http://192.0.2.7:1235'),
+                                                                                    'moved': dict(url=f'http://127.0.0.1:{move.server_address[1]}')})
+        L = peers.Link()
+        if real_conn: peers.LinkConnection.connect = lambda self: (tried.append(self.host), real_conn(self))[1]
+        L.poll(force=True)
+        off, moved = L.peers['off'], L.peers['moved']
+        t('a peer address on no subnet of this Mac (the cable out, or a routed address): down, and no connection is even tried',
+          off.state == 'down' and 'nothing is sent' in (off.why or '') and '192.0.2.7' not in tried, (off.state, off.why, tried))
+        t("a redirect from a peer's address is not followed: the token reaches nothing else", moved.state == 'down' and '302' in (moved.why or '') and not got,
+          (moved.state, moved.why, got))
+    finally:
+        llmshare.settings, peers.token = real, tok_was
+        if real_conn: peers.LinkConnection.connect = real_conn
+        catch.shutdown(); move.shutdown()
+
+    print('the link: a peer away for days keeps its 60 s backoff, and one peer that fails to be read never stops the others')
+    fetch_was, peers.token = peers.fetch, lambda: TOKEN
+    asked = []
+
+    def fetch(url, path, headers, timeout=peers.CONNECT):
+        asked.append(url)
+        if url.endswith(':1'): raise RuntimeError('a look that fails in an unforeseen way')
+        raise ConnectionRefusedError(errno.ECONNREFUSED, 'refused')
+    try:
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'first': dict(url='http://127.0.0.1:1'), 'second': dict(url='http://127.0.0.1:2')})
+        L = peers.Link(); L.sync()
+        p = L.peers['first']; p.fails = 2000
+        try: L._down(p, 'away'); err = None
+        except Exception as e: err = e
+        t('after 2,000 failed looks (about 18 hours away) the next look is at most 10 s later: a cable plugged back in shows within seconds', err is None and 9 <= p.next_at - time.time() <= 11, repr(err) if err else p.next_at - time.time())
+        peers.fetch = fetch
+        try: L.poll(force=True); err = None
+        except Exception as e: err = e
+        t('a first peer whose look raises: recorded, marked down, and the second peer is still polled',
+          err is None and asked == ['http://127.0.0.1:1', 'http://127.0.0.1:2'] and L.peers['first'].state == 'down' and L.peers['second'].state == 'down', (repr(err), asked))
+    finally: llmshare.settings, peers.fetch, peers.token = real, fetch_was, tok_was
+
+    print('the link: every change of a peer\'s state is recorded with its reason and time, and read back')
+    answers = []
+
+    def fetch2(url, path, headers, timeout=peers.CONNECT):
+        a = answers.pop(0)
+        if isinstance(a, Exception): raise a
+        return 200, json.dumps(a).encode()
+    peers.fetch, peers.token = fetch2, lambda: TOKEN
+    events_was = peers.EVENTS; peers.EVENTS = os.path.join(box, 'link-events-test.jsonl')   # its own file: the box's has the tests' earlier changes
+    try:
+        llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2)}, peers={'m4': dict(url='http://127.0.0.1:3')})
+        L = peers.Link()
+        refused = ConnectionRefusedError(errno.ECONNREFUSED, 'refused')
+        answers[:] = [refused, refused, dict(hub='local-models', families={})]
+        L.poll(force=True); first = L.peers['m4'].since
+        L.poll(force=True)
+        L.poll(force=True)
+        ev = peers.link_events(1)
+        t('down, still down, then up: two records (a state that stays is not recorded again), each with its time and reason',
+          [(e['peer'], e['was'], e['state']) for e in ev] == [('m4', 'new', 'down'), ('m4', 'down', 'up')] and 'ECONNREFUSED' in ev[0]['why'] and all(e.get('at') for e in ev), ev)
+        t('the peer says since when it is in its state', L.peers['m4'].since >= first and L.view()[0].get('since'), (first, L.peers['m4'].since))
+        t('the record holds names, states, reasons and times only', all(set(e) <= {'at', 'peer', 'was', 'state', 'why'} for e in ev), ev)
+        import contextlib, io
+        from localmodels import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out): code = cli.peer_cmd(['log'])
+        t('localmodels peer log reads them back, oldest first', code == 0 and 'm4' in out.getvalue() and out.getvalue().index('down') < out.getvalue().index('up'), out.getvalue())
+    finally:
+        llmshare.settings, peers.fetch, peers.token, peers.EVENTS = real, fetch_was, tok_was, events_was
+
 
 # ---------------------------------------------------------------- two doors
 def test_link_followers(box):
@@ -641,13 +739,13 @@ def test_two_doors(box):
         code, r, h = ask('a1')
         t('one request with this Mac\'s slots free is answered here', code == 200 and [s[1] for s in A.seen] == ['a1'] and not B.seen, (code, A.seen, B.seen))
         plan(A, 'slow', 'slow'); plan(B, 'slow', 'slow'); A.slow = B.slow = 2.0
-        out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}))
+        out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}), stagger=0.4)   # in order even when a request takes longer to reach the queue
         t("a batch, four at once: this Mac's first copy, then the peer's (its own GPU), then this Mac's second copy; all answered",
           all(out[k][0] == 200 for k in out) and [s[1] for s in A.seen] == ['b1', 'b4'] and sorted(s[1] for s in B.seen) == ['b2', 'b3'],
           ({k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
         t('the answer from the peer names the model asked for', out['b2'][1].get('model') == F, out['b2'][1])
         plan(A, 'slow', 'slow'); plan(B, 'slow'); A.slow = B.slow = 2.0
-        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')))
+        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')), stagger=0.4)
         t("a person waiting gets this Mac's second copy before the peer (the fastest free slot); the batch after it goes to the peer",
           [s[1] for s in A.seen] == ['h1', 'h2'] and [s[1] for s in B.seen] == ['h3'] and all(v_[0] == 200 for v_ in out.values()), (A.seen, B.seen))
         mine = [x for x in logged(llmshare.REQUESTS, 9) if x.get('peer') == 'peer']
@@ -659,7 +757,8 @@ def test_two_doors(box):
         print('two doors: who a request is from, forwarded')
         with crashes._state() as st: st['down'] = {F: dict(crashed=time.time(), models=[F, F2], state='loading again')}
         plan(A); plan(B)
-        hd = {'X-Session': 'sess-1', 'X-Kind': 'batch', 'X-Step': 'extract 3 of 9', 'X-Run': 'nightly', 'X-Run-Total': '9', 'X-Run-Done': '2'}
+        hd = {'X-Session': 'sess-1', 'X-Kind': 'batch', 'X-Step': 'extract 3 of 9', 'X-Run': 'nightly', 'X-Run-Total': '9', 'X-Run-Done': '2',
+              'Authorization': 'Bearer sk-the-clients-own', 'x-api-key': 'the-clients-own', 'OpenAI-Organization': 'org-own'}
         code, r, h = ask('c1', kind='batch', headers=hd)
         prow = (logged(os.path.join(peer_dir, 'requests.jsonl')) or [{}])[0]
         t('this Mac\'s copies down after a crash: the peer answers at once, nothing held', code == 200 and B.seen and not A.seen, (code, A.seen, B.seen))
@@ -668,6 +767,8 @@ def test_two_doors(box):
           == ('proj', 'sess-1', 'batch', 'extract 3 of 9', 'nightly', 9, 2), prow)
         t('the peer logs which Mac sent it', prow.get('from') == 'front', prow)
         t("the token never reaches the peer's LM Studio", B.heads and not any(k.startswith('x-hub') for k in B.heads[-1]), B.heads[-1:] if B.heads else None)
+        t("the client's own API credentials stay on this Mac: the peer gets the token, never Authorization, x-api-key or the organization",
+          B.heads and not {'authorization', 'x-api-key', 'openai-organization'} & set(B.heads[-1]), B.heads[-1:] if B.heads else None)
         plan(B, 'sse')
         code, data, h = ask('s1', stream=True)
         frow = logged(llmshare.REQUESTS)[0]
@@ -717,6 +818,78 @@ def test_two_doors(box):
         os.remove(os.path.join(peer_dir, 'maintenance.json'))
         L.poll(force=True)
         t('maintenance over: up again', ({p['name']: p for p in peers.view()}.get('peer') or {}).get('state') == 'up')
+
+        print("two doors: the peer's models switched off and on from this Mac")
+        off_file = os.path.join(peer_dir, 'off.json')
+
+        def front(path, body):
+            req = urllib.request.Request(url + path, data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+            try: r = urllib.request.urlopen(req, timeout=15); return r.status, json.load(r)
+            except urllib.error.HTTPError as e: return e.code, json.loads(e.read() or b'{}')
+        t('switch off over the link without the token: 401, nothing switched off', link('/hub/off', token=None, method='POST', body={})[0] == 401 and not os.path.exists(off_file))
+        t('switch off over the link from a web page (an Origin): 403', link('/hub/off', method='POST', body={}, headers={'Origin': 'http://example.com'})[0] == 403 and not os.path.exists(off_file))
+        code, j = front('/hub/link/off', dict(peer='nobody'))
+        t('a peer not in the settings: 404, in words', code == 404 and 'nobody' in (j.get('error') or ''), (code, j))
+        code, j = front('/hub/link/off', dict(peer='peer'))
+        t("a run on the peer holds a lease there: refused (409), naming it, nothing switched off",
+          code == 409 and j.get('blockers') and not os.path.exists(off_file), (code, j))
+        code, j = front('/hub/link/off', dict(peer='peer', force=True))
+        rec = json.load(open(off_file)) if os.path.exists(off_file) else {}
+        t("POST /hub/link/off, forced: the peer is switched off (its off.json), naming this Mac as the one that did it",
+          code == 200 and j.get('ok') and rec.get('before') == [F] and 'front' in (rec.get('why') or ''), (code, j, rec))
+        v = {p['name']: p for p in peers.view()}.get('peer') or {}
+        t('this Mac looks at once: the peer shows as switched off, excluded from routing',
+          v.get('state') == 'maintenance' and v.get('off') is True and 'switched off' in (v.get('words') or '') and not L.replicas(F), (v.get('state'), v.get('off'), v.get('words')))
+        code, j = front('/hub/link/off', dict(peer='peer'))
+        t('switching it off again: 200, already switched off', code == 200 and 'already' in (j.get('note') or ''), (code, j))
+        plan(A); plan(B)
+        code, r, h = ask('o1')
+        t('a request while the peer is switched off is answered here; its LM Studio never sees it', code == 200 and not B.seen and [s[1] for s in A.seen] == ['o1'], (code, A.seen, B.seen))
+        code, j = front('/hub/link/on', dict(peer='peer'))
+        for _ in range(50):
+            if not os.path.exists(off_file): break
+            time.sleep(0.1)
+        L.poll(force=True)
+        v = {p['name']: p for p in peers.view()}.get('peer') or {}
+        t('POST /hub/link/on: the peer is switched on (202), and this Mac routes to it again',
+          code == 202 and not os.path.exists(off_file) and v.get('state') == 'up' and not v.get('off') and L.replicas(F) == [peers.cid(F, 'peer')], (code, j, v.get('state')))
+        import contextlib, io
+        from localmodels import cli
+
+        def peer_cli(*a):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out): code_ = cli.peer_cmd(list(a))
+            return code_, out.getvalue()
+        code, out = peer_cli('off', 'peer', '--force', 'cooling', 'down')
+        rec = json.load(open(off_file)) if os.path.exists(off_file) else {}
+        t('localmodels peer off <name> [reason]: switched off there, with the reason', code == 0 and 'cooling down' in (rec.get('why') or '') and 'switched off' in out, (code, out, rec))
+        code, out = peer_cli('on', 'peer')
+        for _ in range(50):
+            if not os.path.exists(off_file): break
+            time.sleep(0.1)
+        t('localmodels peer on <name>: switched on there', code == 0 and not os.path.exists(off_file) and 'switching on' in out, (code, out))
+        t('localmodels peer off with no name: usage, exit 2', peer_cli('off')[0] == 2)
+        L.poll(force=True)
+
+        print('two doors: this Mac switched off to peers only')
+        from localmodels import maint
+        maint.OFF, maint.SWITCHING = os.path.join(front_dir, 'off.json'), os.path.join(front_dir, 'switching.json')
+        code, j = front('/hub/off', dict(peers=True))
+        plan(A); plan(B)
+        out = together(('q1', {}), ('q2', {}), ('q3', {}))
+        t("peers only: every request answered by the peer (the third waits for one of its 2 slots), this Mac's LM Studio sees none",
+          code == 200 and all(v_[0] == 200 for v_ in out.values()) and not A.seen and sorted(s_[1] for s_ in B.seen) == ['q1', 'q2', 'q3'],
+          (code, {k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
+        t("at_once: the peer's 2 slots alone, this Mac's 2 not counted", llmshare.at_once(F) == 2 and llmshare.at_once() == 2, (llmshare.at_once(F), llmshare.at_once()))
+        snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=10).read())
+        t('the dashboard\'s snapshot says peers only, in words', (snap.get('maintenance') or {}).get('peers') is True and 'peers only' in ((snap.get('maintenance') or {}).get('words') or ''), snap.get('maintenance'))
+        code, j = front('/hub/on', {})
+        for _ in range(100):
+            if not maint.switched_off(): break
+            time.sleep(0.2)
+        plan(A); plan(B)
+        code, r, h = ask('q4')
+        t('on: answered here again, this Mac first', code == 200 and [s_[1] for s_ in A.seen] == ['q4'] and not B.seen, (code, A.seen, B.seen))
         proc.terminate(); proc.wait(10)
         plan(A, 'slow', 'slow', 'ok'); plan(B)
         out = together(('g1', {}), ('g2', {}), ('g3', {}))
@@ -777,6 +950,7 @@ def main():
         test_two_doors(box)
         test_pool(box)
     finally: shutil.rmtree(box, ignore_errors=True)
+    t('no hub path points into the live state folder (tests/_sandbox.py)', not _sandbox.stray(), _sandbox.stray())
     print(f'{sum(ok)} of {len(ok)} ok')
     return 0 if all(ok) else 1
 

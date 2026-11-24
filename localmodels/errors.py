@@ -9,7 +9,7 @@ recorded at most once a minute (a loop that fails every second does not flood th
 errors.jsonl in the hub's state folder rolls over past 1 MB. `localmodels errors` and GET /hub/errors read it; the
 dashboard shows a line when something was recorded in the last 10 minutes. Recording costs nothing until something fails.
 """
-import json, os, threading, time, traceback
+import json, os, sys, threading, time, traceback
 
 from . import llmshare
 
@@ -42,13 +42,18 @@ def record(where, exc=None, words=None, trace=None, source='gateway'):
                **({'gen': os.environ['LOCALMODELS_GEN']} if os.environ.get('LOCALMODELS_GEN') else {}), **({'repeats': repeats} if repeats else {}))
     try: llmshare._append(FILE, rec, roll_at=ROLL_AT)
     except OSError: pass
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", flush=True)
+    try: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", file=sys.stderr, flush=True)   # stdout is a protocol channel (MCP, the hook)
+    except (OSError, ValueError): pass                     # not recorded: the log itself cannot be written; the record above stands
     return rec
 
 
 def recent(minutes=1440, n=200):
-    """The records of the last minutes, newest first (from the file, so any process can read them)."""
-    out, since = [], time.time() - float(minutes) * 60
+    """The records of the last minutes, newest first (from the file, so any process can read them). A window that is not a
+    number (GET /hub/errors?minutes=...) reads as a day."""
+    try: minutes = float(minutes)
+    except (TypeError, ValueError): minutes = 1440.0
+    if minutes != minutes: minutes = 1440.0                  # NaN
+    out, since = [], time.time() - minutes * 60
     for path in (FILE + '.1', FILE):
         try:
             for line in open(path):

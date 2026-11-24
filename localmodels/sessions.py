@@ -67,25 +67,25 @@ def _workflows(sdir):
         done = {e.get('agentId') or e.get('key') for e in ev if e.get('type') == 'result'}
         live = age < 900
         out.append(dict(name=os.path.basename(os.path.dirname(j)), agents=len(started), finished=len(done & set(started)),
-                        running=[v for k, v in started.items() if k not in done] if live else [], live=live))
+                        running=len([k for k in started if k not in done]) if live else 0, live=live))   # a count: labels are free text
     return out
 
 
 def _subagents(sdir):
-    out = []
+    """How many subagents of this session wrote in the last 90 s (their descriptions are free text: never read out)."""
+    out = 0
     for meta in glob.glob(os.path.join(sdir, 'subagents', 'agent-*.meta.json')):
         log = meta.replace('.meta.json', '.jsonl')
         try:
             if time.time() - os.path.getmtime(log) > 90: continue
         except OSError: continue
-        d = _cached(meta, lambda p: json.load(open(p))) or {}
-        out.append(d.get('description') or 'a subagent')
+        out += 1
     return out
 
 
 def recent(hours=3.0):
     """Every Claude Code session that wrote in the last `hours` hours, newest first:
-    [{id, host, project, title, working, last, model, subagents, workflows}]."""
+    [{id, host, project, title, working, last, model, subagents (how many), workflows ({name, agents, finished, running: how many, live})}]."""
     by_cli, _ = desktop()
     out, since = [], time.time() - hours * 3600
     for t in glob.glob(os.path.join(CLAUDE, '*', '*.jsonl')):
@@ -99,7 +99,7 @@ def recent(hours=3.0):
         sdir = t[:-6]
         out.append(dict(id=sid, host=d.get('host'), project=whois.project_of(folder) or '?', title=d.get('title') or 'a terminal session',
                         working=time.time() - m < WORKING, last=m, model=d.get('model'),
-                        subagents=_subagents(sdir) if os.path.isdir(sdir) else [],
+                        subagents=_subagents(sdir) if os.path.isdir(sdir) else 0,
                         workflows=_workflows(sdir) if os.path.isdir(sdir) else []))
     return sorted(out, key=lambda s: -s['last'])
 
