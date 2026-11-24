@@ -607,9 +607,12 @@ def test_link_followers(box):
         lead, follow = peers.Link(), peers.Link(); follow.leader = False
         lead.sync()
         p = lead.peers['mac']; p.state, p.cap, p.match, p.first = 'up', {F: 2}, {F: (True, None)}, {F: 2}
-        p.report = dict(families={F: dict(slots=4, busy=0, copies=[])})
+        p.report = dict(families={F: dict(slots=4, busy=0, copies=[])}); p.ctx = {F: (1000, 300)}
         lead.write()
         c = peers.cid(F, 'mac')
+        t("a follower keeps the room the peer reported (its context budget, what others hold there): it admits by it too",
+          follow.replicas(F) == [c] and follow.peers['mac'].ctx == {F: (1000, 300)} and not follow.ctx_fits(c, 600, 200) and follow.ctx_fits(c, 0, 200),
+          follow.peers.get('mac') and follow.peers['mac'].ctx)
         t("a follower takes the leader's look from link.json: state, cap, match, first", follow.replicas(F) == [c] and follow.peers['mac'].cap == {F: 2}
           and follow.peers['mac'].first == {F: 2}, (follow.replicas(F), follow.peers.get('mac') and follow.peers['mac'].cap))
         h1, h2 = lead.take(c), follow.take(c)

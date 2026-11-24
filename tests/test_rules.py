@@ -1569,6 +1569,11 @@ if what == 'gateway':
 elif what == 'role': out = 'took' if L.Role(arg).try_take() else 'busy'
 elif what == 'slot': out = 'took' if L.Counted('peer', 'family').take(int(arg)) is not None else 'full'
 elif what == 'start': out = 'up' if L.start_server('test', 60) else 'down'
+elif what == 'ctx':                                       # a gateway's request of `arg` tokens holding a slot (admission by context size)
+    L.parallel_of = lambda m: 4
+    with L.slot_any(['test/ctx'], wait=5, need=int(arg), fits=lambda m, load, need: load <= 0 or load + need <= 100) as (m, w):
+        print('took', flush=True); sys.stdin.read()
+    sys.exit(0)
 print(out, flush=True)
 if what != 'start': sys.stdin.read()                      # hold what it took until the test lets go
 """
@@ -1602,6 +1607,21 @@ def test_shared(box):
     old, procs = L.use_state(state), []
     real = L.parallel_of, L.LMS, L.api_models, dict(L._ps)
     try:
+        print('  admission by context size across gateways: the context a slot holds is written in its lock file')
+        L.parallel_of = lambda m: 4
+        fit = lambda m, load, need: load <= 0 or load + need <= 100          # a budget of 100 tokens
+        g, said = helper(state, 'ctx', '60'); procs.append(g)
+        t('another gateway holds 60 of the instance\'s 100 tokens: every process reads it', said == 'took' and L.slot_load('test/ctx') == 60, (said, L.slot_load('test/ctx')))
+        try:
+            with L.slot_any(['test/ctx'], wait=1, need=60, fits=fit): took = True
+        except TimeoutError: took = False
+        t('a request of 60 more in this process waits (a handoff never admits twice against one budget)', not took)
+        with L.slot_any(['test/ctx'], wait=2, need=30, fits=fit) as (m, w):
+            t('one of 30 fits beside it, and the load counts both', m == 'test/ctx' and L.slot_load('test/ctx') == 90, L.slot_load('test/ctx'))
+        t('released: its slot no longer counts', L.slot_load('test/ctx') == 60, L.slot_load('test/ctx'))
+        stop(g, kill=True); procs.remove(g)
+        t('a gateway killed with its slot held: the kernel frees the lock, and what its file says no longer counts', L.slot_load('test/ctx') == 0, L.slot_load('test/ctx'))
+        L.parallel_of = real[0]
         t("use_state: every shared path moves, every module's too", L.SHARED == state and L.GATEWAYS == os.path.join(state, 'run', 'gateways')
           and L.LISTING == os.path.join(state, 'listing.json') and errors.FILE == os.path.join(state, 'errors.jsonl') and crashes.STATE.startswith(state))
 

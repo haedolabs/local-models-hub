@@ -138,6 +138,50 @@ def main():
     return 0 if all(ok) else 1
 
 
+class FakeConn:
+    """A lifeline the test reads: what the supervisor sends a worker."""
+    def __init__(self):
+        self.sock, self.peer = socket.socketpair()
+        self.peer.setblocking(False); self.kind = self.pid = None
+
+    def got(self):
+        try: return [json.loads(l)['op'] for l in self.peer.recv(65536).decode().split('\n') if l]
+        except BlockingIOError: return []
+
+
+def unit_restart(state, r1, r2, r3):
+    """Review finding: a restarted supervisor forgot what its workers run, and the hub link decided what started next."""
+    n = lambda d: os.path.basename(d)
+    json.dump(dict(pid=1, current=n(r2), last_good=n(r1), bad=[n(r3)], next_gen=7, probation=dict(release=n(r2), until=time.time() + 60, pid=4242)),
+              open(os.path.join(state, 'run', 'supervisor.json'), 'w')) if os.path.isdir(os.path.join(state, 'run')) else None
+    s = SUP.Supervisor(); s.restore()
+    t('restored from supervisor.json: current, last good, bad, the next gen and the probation under way',
+      s.state['current'] == n(r2) and s.state['last_good'] == n(r1) and s.state['bad'] == [n(r3)] and s.state['next_gen'] == 7
+      and (s.state.get('probation') or {}).get('release') == n(r2), s.state)
+    hub = os.path.join(state, 'hub')
+    if os.path.lexists(hub): os.remove(hub)
+    os.symlink(os.path.relpath(r3, state), hub)            # the link points at a release that failed
+    t('with no worker serving, a new one starts from the release that last served, not from the hub link',
+      s.release_dir(None) == os.path.realpath(r2), s.release_dir(None))
+    s.state['bad'].append(n(r2))
+    t('...and from the last good one when that release is marked bad', s.release_dir(None) == os.path.realpath(r1), s.release_dir(None))
+    s.state['bad'].remove(n(r2))
+    os.remove(hub)
+    a, b = FakeConn(), FakeConn()
+    s.hello(a, dict(pid=91001, gen=4, role='serving', release=n(r2), state_protocol=0, accepting=True, keys=[]))
+    s.hello(b, dict(pid=91002, gen=5, role='serving', release=n(r2), state_protocol=1, accepting=True, keys=[]))
+    wa, wb = s.workers[91001], s.workers[91002]
+    t('an adopted worker keeps the release and state protocol it said in its hello', wa.release == os.path.realpath(r2) and wa.protocol == 0 and wb.protocol == 1,
+      (wa.release, wa.protocol))
+    time.sleep(0.1)
+    t('two serving workers adopted (a crash during the overlap): the newest gen serves, every older one drains',
+      'drain' in a.got() and 'drain' not in b.got() and wa.role == 'draining' and wb.role == 'serving', (wa.role, wb.role))
+    t("a deploy compares state protocols with the serving worker's own (not its release's file)",
+      s.same_protocol(SUP.release_info(r1), wb) and not s.same_protocol(SUP.release_info(r1), wa), (SUP.release_info(r1) or {}).get('state_protocol'))
+    for c in (a, b): c.sock.close(); c.peer.close()
+    os.remove(os.path.join(state, 'run', 'supervisor.json'))
+
+
 def run(box, procs):
     state, port = os.path.join(box, 's'), free_port()
     os.makedirs(os.path.join(state, 'releases')); os.makedirs(os.path.join(box, 'logs'))
@@ -150,6 +194,9 @@ def run(box, procs):
     r1 = build(state, 'r1')
     r2 = build(state, 'r2', lambda d: open(os.path.join(d, 'localmodels', 'marker.txt'), 'w').write('r2\n'))
     r3 = build(state, 'r3', lambda d: open(os.path.join(d, 'localmodels', 'web.py'), 'a').write('\nraise RuntimeError("this release cannot start")\n'))
+    os.makedirs(os.path.join(state, 'run'), mode=0o700, exist_ok=True)
+    print('what a supervisor knows after a restart (unit: no worker started)')
+    unit_restart(state, r1, r2, r3)
     os.symlink(os.path.relpath(r1, state), os.path.join(state, 'hub'))
     env = dict(os.environ, LOCALMODELS_STATE=state, LOCALMODELS_PORT=str(port), LMSTUDIO_URL=f'http://127.0.0.1:{up.server_address[1]}', LMS=lms,
                LMSTUDIO_LOGS=os.path.join(box, 'logs'), LOCALMODELS_PY=sys.executable, LOCALMODELS_NO_KEEPER='1',
@@ -206,6 +253,9 @@ def run(box, procs):
     sup = start(); procs.append(sup)
     st = wait_for(lambda: (lambda s: s if [w for w in s.get('workers', []) if w.get('adopted') and w['role'] == 'serving'] and sorted(s.get('listeners') or {}) == ['v4', 'v6'] else None)(call(state, 'status', timeout=5)), 30)
     t('a new supervisor adopts the serving worker and its listeners', st, st or tail())
+    ad = [w for w in (st or {}).get('workers', []) if w.get('adopted')]
+    t('...knowing the release it runs and the release that last served', ad and ad[0].get('release') == os.path.basename(r2)
+      and (st or {}).get('current') == os.path.basename(r2) and os.path.basename(r3) in ((st or {}).get('bad') or []), st)
     with Hammer(port) as hm:
         r = call(state, 'deploy', release=os.path.basename(r1))
     t('...and hands off from it to release 1, nothing refused', r.get('ok') and health(port).get('code') == os.path.basename(r1) and not hm.errors, (r, hm.errors[:3]))

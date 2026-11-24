@@ -11,6 +11,9 @@ messages, and the first other message (for a prompt given as one string, its fir
 model asked for. It names one conversation: every turn of an agent loop resends the same opening. Only digests and copy
 names are kept, in this process's memory (never on disk, never in a record), at most SIZE of them, each for TTL seconds.
 
+The table is per process: a new gateway worker after a handoff starts with none, so each conversation's next turn goes
+where fill-first sends it and is remembered from there (one prefix processed again per conversation, as before this rule).
+
 order() puts the remembered copy first among the copies a request may take; slot_any then takes the first with a free
 slot, so a busy preferred copy costs nothing: the request goes where it would have gone without this rule."""
 import hashlib, json, threading, time

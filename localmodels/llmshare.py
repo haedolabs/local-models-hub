@@ -752,8 +752,49 @@ class _Remote:
 
 def _release(h):
     if isinstance(h, _Remote): h.release(); return
-    try: fcntl.flock(h, fcntl.LOCK_UN)
+    try:
+        try: h.seek(0); h.truncate()                     # its context no longer counts (slot_load), before the lock goes
+        except OSError: pass
+        fcntl.flock(h, fcntl.LOCK_UN)
     finally: h.close()
+
+
+def _slot_dir(m):
+    d = os.path.join(SLOTS, _safe(m)); os.makedirs(d, exist_ok=True)
+    return d
+
+
+def slot_load(model):
+    """The context in flight on one of this Mac's copies, in tokens, held by every process: the sum of what each held slot's
+    lock file says (a gateway writes its request's context there when it takes the slot and clears it before it lets go).
+    A file left written by a process that died is not counted: its lock is free."""
+    d, total = _slot_dir(model), 0
+    for i in range(parallel_of(model)):
+        p = os.path.join(d, f'slot-{i}.lock')
+        try:
+            with open(p) as f: n = int(f.read().strip() or 0)
+        except (OSError, ValueError): continue
+        if n <= 0: continue
+        h = open(p, 'a+')
+        try:
+            fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)  # free: what it says is left from a holder that died
+            try: h.seek(0); h.truncate()
+            except OSError: pass
+            fcntl.flock(h, fcntl.LOCK_UN)
+        except OSError: total += n                         # held: it counts
+        finally: h.close()
+    return total
+
+
+@contextlib.contextmanager
+def _take_lock(m):
+    """The per-copy mutex of a take by context size: the load is read and a slot taken under it, by any gateway."""
+    h = open(os.path.join(_slot_dir(m), 'take.lock'), 'a+')
+    try:
+        fcntl.flock(h, fcntl.LOCK_EX); yield
+    finally:
+        try: fcntl.flock(h, fcntl.LOCK_UN)
+        finally: h.close()
 
 
 def _take(models):
@@ -764,11 +805,56 @@ def _take(models):
             h = REMOTE.take(m) if REMOTE is not None else None
             if h is not None: return _Remote(m, h), m
             continue
-        d = os.path.join(SLOTS, _safe(m)); os.makedirs(d, exist_ok=True)
-        for i in range(parallel_of(m)):
-            h = open(os.path.join(d, f'slot-{i}.lock'), 'a+')
-            try: fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB); return h, m
-            except OSError: h.close()
+        h = _take_slot(m)
+        if h is not None: return h, m
+    return None, None
+
+
+def _take_slot(m, need=0):
+    """One free slot of a local copy, or None; need: the context written into it (slot_load)."""
+    d = _slot_dir(m)
+    for i in range(parallel_of(m)):
+        h = open(os.path.join(d, f'slot-{i}.lock'), 'a+')
+        try: fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError: h.close(); continue
+        if need:
+            try: h.seek(0); h.truncate(); h.write(str(int(need))); h.flush()
+            except OSError as e: _error('slot: write its context', e)
+        return h
+    return None
+
+
+_pl = {'at': 0.0, 'v': {}}                                 # peer_load(), cached 0.25 s
+
+
+def peer_load(copy):
+    """The context this Mac's gateways have in flight on a peer's copy, in tokens: every live gateway's answering marks
+    there, and this process's own requests (a request counts in _load from its take, before its mark says answering)."""
+    now = time.time()
+    if now - _pl['at'] >= 0.25:
+        v = {}
+        for d in inflight():
+            c = d.get('copy')
+            if c and ' on ' in c and d.get('state') == 'answering' and d.get('ctx') and d.get('hub_pid') != os.getpid():
+                v[c] = v.get(c, 0) + int(d['ctx'])
+        _pl.update(at=now, v=v)
+    with _load_lock: mine = _load.get(copy, 0)
+    return _pl['v'].get(copy, 0) + mine
+
+
+def _take_fitting(mine, need, fits):
+    """The first of these copies that has a free slot and room for `need` (fits), with every gateway's context counted: a
+    local copy under its take mutex (slot_load), a peer's by what this Mac holds there. -> (handle, copy) or (None, None)."""
+    for m in mine:
+        if ' on ' in m:
+            if fits(m, peer_load(m), need):
+                h, got = _take([m])
+                if h is not None: return h, got
+            continue
+        with _take_lock(m):
+            if not fits(m, slot_load(m), need): continue
+            h = _take_slot(m, need)
+            if h is not None: return h, m
     return None, None
 
 
@@ -781,9 +867,15 @@ RESERVE = 20               # seconds a request waits for room (admission.fits) b
 _load, _load_lock = {}, threading.Lock()   # this process's context in flight per copy, in tokens (admission.py)
 
 
-def load_here():
-    """The context in flight per copy that this process admitted, in tokens: {copy: n}."""
-    with _load_lock: return {m: n for m, n in _load.items() if n > 0}
+def load_here(copies=None):
+    """The context in flight per copy, in tokens: {copy: n}. A local copy's counts every gateway's requests (slot_load);
+    a peer's, what this process sent there. copies: those to read (default: the copies this process holds context on)."""
+    with _load_lock: mine = {m: n for m, n in _load.items() if n > 0}
+    out = {}
+    for m in (mine if copies is None else copies):
+        n = peer_load(m) if ' on ' in m else slot_load(m)
+        if n > 0: out[m] = n
+    return out
 
 
 @contextlib.contextmanager
@@ -812,8 +904,8 @@ def slot_any(models, wait=3600, kind='other', since=None, publish=None, need=0, 
             cands = list(pick() or [])
             if fits is None: room = cands
             else:
-                with _load_lock: loads = {m: _load.get(m, 0) for m in cands}
-                room = [m for m in cands if fits(m, loads[m], need)]           # outside the lock: fits may read the listing
+                loads = load_here(cands)
+                room = [m for m in cands if fits(m, loads.get(m, 0), need)]    # a first look; the take checks again under the copy's mutex
             reserve = fits is not None and time.time() - t0 >= RESERVE
             want = cands if reserve or fits is None else room                    # the copies it holds its place on
             if publish is not None and want != shown:
@@ -825,11 +917,10 @@ def slot_any(models, wait=3600, kind='other', since=None, publish=None, need=0, 
                 ahead = {m for t, ms in _q.items() if t < ticket for m in ms}
             if publish is not None: ahead |= _ahead_elsewhere(ticket)
             mine = [m for m in room if m not in ahead]
-            if mine:
-                with _load_lock:                             # the check again with the take: no other waiter takes the room meanwhile
-                    if fits is not None: mine = [m for m in mine if fits(m, _load.get(m, 0), need)]
-                    if mine: held, got = _take(mine)
-                    if held is not None and need: _load[got] = _load.get(got, 0) + need
+            if mine:                                         # the check again with the take: no other waiter, in any gateway, takes the room meanwhile
+                held, got = _take(mine) if fits is None else _take_fitting(mine, need, fits)
+                if held is not None and need:
+                    with _load_lock: _load[got] = _load.get(got, 0) + need
             if held is None:
                 unfit = tuple(m for m in cands if m not in room)
                 if waiting and unfit != said:

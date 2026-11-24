@@ -618,6 +618,8 @@ class Link:
                 p.cap = {b: int(f.get('cap') or 0) for b, f in fams.items()}
                 p.match = {b: (bool(f.get('match')), f.get('why')) for b, f in fams.items()}
                 p.first = {b: int(f.get('first') or 0) for b, f in fams.items()}
+                p.ctx = {b: (int(f['ctx'][0]), int(f['ctx'][1])) for b, f in fams.items()          # the room it reported (ctx_fits)
+                         if isinstance(f.get('ctx'), list) and len(f['ctx']) == 2}
                 p.seen_at = float(e.get('seen') or 0)
                 if e.get('since'): p.since = float(e['since'])
                 peers_[name] = p; order.append(name)
@@ -825,7 +827,8 @@ class Link:
                     cap, here = p.cap.get(b, 0), self.held(name, b)
                     fams[b] = dict(match=good, why=why, slots=f.get('slots'), busy=f.get('busy'), cap=cap, here=here, first=p.first.get(b, 0),
                                    free_here=max(0, cap - here), copies=f.get('copies') or [], holders=f.get('holders') or {},
-                                   answering=f.get('answering') or {}, fingerprint=f.get('fingerprint'))
+                                   answering=f.get('answering') or {}, fingerprint=f.get('fingerprint'),
+                                   ctx=list(p.ctx[b]) if b in p.ctx else None)
                 rep = p.report or {}
                 d = dict(name=name, url=p.url, host=p.host, state=p.state, why=p.why, seen=round(p.seen_at, 1) if p.seen_at else None,
                          rtt_ms=round(p.rtt * 1000, 1) if p.rtt is not None else None, route=dict(interface=p.route[0], port=p.route[1]),

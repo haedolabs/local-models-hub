@@ -186,6 +186,7 @@ class Worker:
         self.role, self.conn, self.ready, self.accepting, self.keys = 'warming', None, False, False, []
         self.started, self.progress_at, self.progress, self.failed = now(), now(), {}, None
         self.go_at, self.drain_at, self.listing, self.internal0 = None, None, None, None
+        self.protocol = None                 # the shared-state protocol it said in its hello (a deploy compares with it)
 
     def view(self):
         return dict(pid=self.pid, gen=self.gen, release=os.path.basename(self.release or '') or None, role=self.role, accepting=self.accepting,
@@ -212,10 +213,7 @@ class Supervisor:
             except (OSError, ValueError): other = '?'
             print(f'gateway supervisor already running (pid {other})', flush=True)
             return 1
-        try: old = json.load(open(os.path.join(RUN, 'supervisor.json')))
-        except (OSError, ValueError): old = {}
-        for k in ('current', 'last_good', 'bad', 'next_gen'):
-            if old.get(k) is not None: self.state[k] = old[k]
+        old = self.restore()
         self.signals()
         self.control()
         live = [r for r in registry() if r.get('role') in ('serving', 'draining', 'warming')]
@@ -224,9 +222,20 @@ class Supervisor:
         if not self.bind_listeners(adopting=any(r.get('role') == 'serving' for r in live)): return 1
         self.starting = False
         self.save()
-        if not self.serving() and not any(w.role == 'warming' for w in self.workers.values()): self.begin(current_release()[0], 'start')
+        if not self.serving() and not any(w.role == 'warming' for w in self.workers.values()): self.begin(self.release_dir(None), 'start')
         log(f"supervisor {self.digest()} on port {PORT}: run {self.run}, listeners {', '.join(sorted(self.listeners)) or 'none'}")
         return self.loop()
+
+    def restore(self):
+        """What the last supervisor knew, from supervisor.json: the release that last served (current), the last good one,
+        the bad ones, the next generation and a probation under way, so a restart (an upgrade, a crash, the next login)
+        neither forgets them nor lets the hub link decide what starts next. -> the file's contents ({} if none)."""
+        try: old = json.load(open(os.path.join(RUN, 'supervisor.json')))
+        except (OSError, ValueError): old = {}
+        if not isinstance(old, dict): old = {}
+        for k in ('current', 'last_good', 'bad', 'next_gen', 'probation'):
+            if old.get(k) is not None: self.state[k] = old[k]
+        return old
 
     def begin(self, release_dir, why, urgent=False):
         """A worker to serve when none does: the deploy steps without a client waiting (ready, go, accepting)."""
@@ -399,17 +408,39 @@ class Supervisor:
         pid = int(m.get('pid') or 0)
         c.kind, c.pid = 'lifeline', pid
         w = self.workers.get(pid)
-        if w is None:                                       # a worker from before this supervisor: adopted
-            w = self.workers[pid] = Worker(pid, gen_of(m.get('gen')), None, None)
+        if w is None:                                       # a worker from before this supervisor: adopted, with the release it runs
+            w = self.workers[pid] = Worker(pid, gen_of(m.get('gen')), self.release_dir(m['release']) if m.get('release') else None, None)
             w.role, w.accepting, w.keys = m.get('role') or 'serving', bool(m.get('accepting')), list(m.get('keys') or [])
-            log(f"gen {w.gen} (pid {pid}) adopted ({w.role})")
+            w.protocol = m.get('state_protocol')
+            log(f"gen {w.gen} (pid {pid}, release {m.get('release') or '?'}) adopted ({w.role})")
             missing = [k for k in w.keys if k not in self.listeners]
             w.conn = c; self.send(w, 'welcome', supervisor=os.getpid(), run=self.run)
             if missing and w.role == 'serving': self.send(w, 'send-listeners', keys=missing)
+            if w.role == 'serving' and not self.deploy: self.reconcile()
             self.save()
             return
         w.conn = c
+        if m.get('state_protocol') is not None: w.protocol = m.get('state_protocol')
         self.send(w, 'welcome', supervisor=os.getpid(), run=self.run)
+
+    def reconcile(self):
+        """Two or more serving workers adopted (a supervisor that crashed during an overlap): the newest gen serves, every
+        older one drains (spec 9.5). Only adopted workers: a deploy's own overlap is the deploy's to end."""
+        adopted = [w for w in self.serving() if w.proc is None]
+        if len(adopted) < 2: return
+        newest = max(adopted, key=lambda w: w.gen)
+        for w in adopted:
+            if w is not newest:
+                self.send(w, 'drain'); w.role, w.drain_at = 'draining', now()
+                log(f"gen {w.gen} (pid {w.pid}) draining: gen {newest.gen} is newer")
+
+    def same_protocol(self, info, cur):
+        """Whether a release (its RELEASE.json) shares the shared-state protocol of the serving worker cur: by what cur said
+        in its hello, else by its release's file. No serving worker, or nothing known: True."""
+        if not info or cur is None: return True
+        theirs = cur.protocol
+        if theirs is None and cur.release: theirs = (release_info(cur.release) or {}).get(STATE_PROTOCOL_KEY)
+        return theirs is None or info.get(STATE_PROTOCOL_KEY) == theirs
 
     def hold(self, c, m):
         """Listener copies sent over this connection: validated, kept, and passed to every later worker."""
@@ -465,9 +496,16 @@ class Supervisor:
         except OSError: pass
 
     def release_dir(self, release):
+        """A release's folder. None: the newest serving worker's; with none serving, the release that last served
+        (state current), else the last good one, skipping any marked bad; the hub link only when neither is known."""
         if not release:
             w = max(self.serving(), key=lambda x: x.gen, default=None)
-            return (w.release if w and w.release else None) or current_release()[0]
+            if w and w.release: return w.release
+            bad = set(self.state.get('bad') or [])
+            for name in (self.state.get('current'), self.state.get('last_good')):
+                if name and name not in bad and release_info(os.path.join(SHARED, 'releases', name)) is not None:
+                    return os.path.realpath(os.path.join(SHARED, 'releases', name))
+            return current_release()[0]
         d = release if os.path.isabs(release) else os.path.join(SHARED, 'releases', release)
         return os.path.realpath(d)
 
@@ -487,8 +525,7 @@ class Supervisor:
         if info and (info.get('supervisor') not in (None, self.digest()) or int(info.get('channel') or CHANNEL) != CHANNEL):
             return self.reply(c, False, why='upgrade-required', supervisor=info.get('supervisor'))
         cur = max(self.serving(), key=lambda x: x.gen, default=None)
-        cur_info = release_info(cur.release) if cur and cur.release else None
-        same_protocol = not (info and cur_info and info.get(STATE_PROTOCOL_KEY) != cur_info.get(STATE_PROTOCOL_KEY))
+        same_protocol = self.same_protocol(info, cur)
         self.deploy = dict(release=d, c=c, overlap=overlap and same_protocol, started=now(), respawns=0, why=why, wait=wait, worker=None, state='start', old=cur)
         self.say(c, f"deploying {name}" + ('' if self.deploy['overlap'] else ' (no overlap: the shared state format changes)'))
         self.advance()

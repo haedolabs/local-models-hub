@@ -571,7 +571,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             except (TypeError, ValueError, OverflowError): asked = 0          # the answer it asked for, in tokens (0: none said)
 
             def waiting(unfit):                            # admission: the copies it waits on for room, not for a slot
-                words = admission.why_waiting(unfit, llmshare.load_here(), need) if unfit else None
+                words = admission.why_waiting(unfit, llmshare.load_here(unfit), need) if unfit else None
                 if words: room[0] = words
                 if rec.get('wait_for') != words:
                     if words: rec['wait_for'] = words
