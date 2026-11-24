@@ -1269,10 +1269,10 @@ def run_tests(quiet=False):
             path = os.path.join(HOME, 'tests', name)
             if not os.path.exists(path): continue
             try: p = subprocess.run([old, path], capture_output=True, text=True, timeout=300)
-            except subprocess.SubprocessError as e: out.append((name + ' (3.9)', False, str(e))); continue
+            except subprocess.SubprocessError as e: out.append((name[:-3] + ' under 3.9.py', False, str(e))); continue
             fails = [l.strip()[5:] for l in p.stdout.split('\n') if l.strip().startswith('FAIL')]
             last = (p.stdout.strip().split('\n') or [''])[-1]
-            out.append((name + ' (3.9)', p.returncode == 0, '; '.join(fails)[:300] if fails else last))
+            out.append((name[:-3] + ' under 3.9.py', p.returncode == 0, '; '.join(fails)[:300] if fails else last))
     if swiftc() and os.path.exists(os.path.join(HOME, 'app', 'tests', 'main.swift')): out.append(app_tests())
     return out
 
