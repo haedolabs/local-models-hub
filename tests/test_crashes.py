@@ -63,12 +63,8 @@ def main():
 
 
 def run(box):
-    for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
-    from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
-    llmshare.MODELS, _names.FILE = os.path.join(box, 'models.json'), os.path.join(box, 'names.json')   # (the repo's defaults apply)
-    _peers.STATE, _peers.TOKEN_FILE = os.path.join(box, 'link.json'), os.path.join(box, 'peer-token')
-    llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
-    crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
+    llmshare.use_state(box)                                   # every shared path, every module's: never this Mac's live state
+    crashes.LOGS = os.path.join(box, 'logs')                  # (the repo's default settings apply: there is no models.json in the box)
     os.makedirs(os.path.join(crashes.LOGS, '2026-11'))
     llmshare.api_models, llmshare.read_ok, llmshare.busy_slots = (lambda timeout=3: None), (lambda: True), (lambda: {})   # no real LM Studio in the sandbox
     llmshare.settings = lambda: dict(families={B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False)}, batch_at_once=8, headroom_gb=8)
@@ -124,7 +120,7 @@ def run(box):
     models.free_gb, models._lms = lambda: free[0], lambda *a, **k: (True, '')
     real = llmshare.loaded, llmshare.parallel_of
     llmshare.loaded = lambda fresh=False, force=False: [row(i) for i, _, _ in done]
-    crashes._ctx.clear()
+    with crashes._state() as st: st['logctx'] = {}
     fresh = lambda rows: crashes.watch(rows, listed_at=time.time() + 3)   # a listing taken after the crash just written
 
     t('a first look starts at the end of the log', crashes.watch([row(B), row(C2)]) == [])
@@ -224,6 +220,17 @@ def run(box):
     open(log, 'a').write(f'[{stamp(1000)}][INFO] Server started.\n')
     jobs = crashes.watch([row(B)])
     t("LM Studio restarted and a copy of a family is not back: loaded again", jobs and jobs[0]['ids'] == [C2], jobs)
+    done.clear(); models._again(jobs[0], 8); crashes.watch([row(B), row(C2)]); hour_passes()
+
+    time.sleep(1.1)                                          # a crash whose lines come in two looks, another process in between
+    open(log, 'a').write(f'RuntimeError: [metal::malloc] Resource limit (499000) exceeded.\n[{stamp()}][ERROR][{C2}] Error: Channel Error\n')
+    first = crashes.watch([row(B), row(C2)])
+    crashes._seen_state.update(at=0.0, st={})                # nothing kept in this process's memory
+    open(log, 'a').write('- Caused By: Error: The model has crashed without additional information. (Exit code: null)\n')
+    jobs = fresh([row(B)])
+    t('a crash split across two looks, with nothing kept in memory between them, is still read whole (keeper.json keeps the context)',
+      first == [] and jobs and jobs[0]['ids'] == [C2], (first, jobs))
+    done.clear(); models._again(jobs[0], 8); crashes.watch([row(B), row(C2)]); hour_passes()
 
     print('the keeper: a family where only one replica fits')
     crashes.swapped(B); hour_passes()
@@ -261,6 +268,18 @@ def run(box):
     with crashes._state() as st: st['down'] = {}
     crashes.watch([row(B), row(C2)]); hour_passes()
     llmshare.loaded, llmshare.parallel_of = real
+
+    print('nudges reach the instance manager in whichever gateway holds it')
+    crashes._seen_state['nudged'] = 0.0; crashes.WAKE.clear()
+    n0 = llmshare.nudged('instance-manager'); crashes.nudge(); n1 = llmshare.nudged('instance-manager'); crashes.WAKE.clear(); crashes.nudge()
+    t('a failed request touches run/nudge-instance-manager, at most every 5 s', n1 > n0 and llmshare.nudged('instance-manager') == n1 and not crashes.WAKE.is_set())
+    got = {}
+    threading.Timer(0.3, lambda: (got.update(touched=time.time()), llmshare.nudge('instance-manager'))).start()
+    woke = crashes.wait_nudge(20); got['woke'] = time.time()
+    t('a touch from any process wakes the wait within 1.5 s', woke and got['woke'] - got['touched'] < 1.5, round(got['woke'] - got['touched'], 2))
+    stop = threading.Event(); stop.set()
+    t('a stop ends the wait at once', crashes.wait_nudge(20, stop) is True)
+    crashes._seen_state['nudged'] = 0.0; crashes.WAKE.clear()       # (the debounce would hold back the next test's nudge)
 
     print('the crash record rolls over, and its readers read both files')
     open(crashes.RECORD + '.1', 'w').write(json.dumps(dict(at=time.time() - 3 * 86400, event='crash', model=B, family=B, cause='rolled')) + '\n')

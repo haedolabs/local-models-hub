@@ -13,10 +13,16 @@ import json, os, sys, threading, time, traceback
 
 from . import llmshare
 
-FILE = os.path.join(llmshare.SHARED, 'errors.jsonl')
+FILE = None                   # errors.jsonl in the shared state (set by _state_paths, and again by llmshare.use_state)
 ROLL_AT = 1_000_000
 QUIET = 60                    # seconds: the same error from the same place is recorded once in this window
 _lock, _last = threading.Lock(), {}
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global FILE
+    FILE = os.path.join(root, 'errors.jsonl')
 
 
 def record(where, exc=None, words=None, trace=None, source='gateway'):
@@ -32,8 +38,8 @@ def record(where, exc=None, words=None, trace=None, source='gateway'):
         _last[key] = [now, 0]
     if trace is None and exc is not None:
         trace = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=8))
-    rec = dict(at=round(now, 1), source=source, where=str(where)[:80], error=what, trace=str(trace or '')[-2000:],
-               **({'repeats': repeats} if repeats else {}))
+    rec = dict(at=round(now, 1), source=source, where=str(where)[:80], error=what, trace=str(trace or '')[-2000:], pid=os.getpid(),
+               **({'gen': os.environ['LOCALMODELS_GEN']} if os.environ.get('LOCALMODELS_GEN') else {}), **({'repeats': repeats} if repeats else {}))
     try: llmshare._append(FILE, rec, roll_at=ROLL_AT)
     except OSError: pass
     try: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} error ({source}, {rec['where']}): {what}", file=sys.stderr, flush=True)   # stdout is a protocol channel (MCP, the hook)

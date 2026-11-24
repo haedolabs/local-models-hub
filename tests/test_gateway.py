@@ -7,7 +7,7 @@ before batches in the queue, a chunked request body, a route with a trailing sla
 LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
 loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_gateway.py
 """
-import http.server, json, os, re, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
+import fcntl, select, http.server, json, os, re, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
@@ -134,6 +134,7 @@ def run(box):
     rows = [row(F), row(F2)]
     llmshare.loaded, llmshare.parallel_of, llmshare.read_ok = (lambda fresh=False, force=False: list(rows)), (lambda m: 1), (lambda: True)
     llmshare.api_models = lambda timeout=3: {r['id']: 4096 for r in rows}
+    llmshare._ps['good_at'] = time.time()                     # this gateway has had a model listing (the stub above is it)
     llmshare.settings = lambda: dict(families={F: dict(key=F, copies=2, context=4096, parallel=1, recycle=False)}, batch_at_once=2, headroom_gb=1)
     up = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Fake); threading.Thread(target=up.serve_forever, daemon=True).start()
     door = gateway.Server(('127.0.0.1', 0), gateway.Door); threading.Thread(target=door.serve_forever, daemon=True).start()
@@ -259,7 +260,13 @@ def run(box):
         code, r, h = ask(tag='z')
         t('a family in the settings with nothing loaded and nothing on the way: 503 within a second, never the bare id',
           code == 503 and time.time() - t0 < 2 and not Fake.seen and 'no copy' in json.loads(urllib.request.urlopen(url + '/hub/health').read() and b'{}') if False else code == 503 and time.time() - t0 < 2 and not Fake.seen, (code, Fake.seen))
-        plan()
+        llmshare._ps['good_at'] = 0.0; plan(); got = {}
+        th = threading.Thread(target=lambda: got.update(r=ask(tag='w'))); th.start(); time.sleep(1.5)
+        held = [m for m in llmshare.inflight() if m.get('state') == 'held: waiting for the first model listing']
+        rows.append(row(F)); llmshare._ps['good_at'] = time.time(); th.join(10)
+        t('a gateway that has never had a model listing holds the request (up to 30 s) instead of answering 503, then answers',
+          held and got.get('r') and got['r'][0] == 200, (held and held[0].get('state'), got.get('r') and got['r'][0]))
+        rows.clear(); plan()
         code, r, h = ask(model='other/unknown', tag='u')
         t('a model the settings do not know is still passed through', code == 200 and Fake.seen[0][0] == 'other/unknown', Fake.seen)
         rows[:] = [row(F), row(F2)]
@@ -620,6 +627,54 @@ def run(box):
         st_ = llmshare.waiting_here()
         t('nobody waits once the queue is empty', st_ == dict(people=0, others=0), st_)
 
+        print('worker rules: the request-line timeout, the connection count, the queued marks')
+        gateway.REQUEST_LINE_TIMEOUT = 1
+        idle = socket.create_connection(('127.0.0.1', gateway.PORT)); idle.settimeout(5); t0 = time.time()
+        try: closed = idle.recv(1) == b''
+        except OSError: closed = True
+        t('a connection that sends no request line is closed after the request-line timeout', closed and 0.8 < time.time() - t0 < 3, round(time.time() - t0, 2))
+        idle.close()
+        late = socket.create_connection(('127.0.0.1', gateway.PORT))
+        body = json.dumps(dict(model=F, messages=[], tag='late')).encode()
+        late.sendall(b'POST /v1/chat/completions HTTP/1.0\r\nHost: localhost:%d\r\nX-Kind: test\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n' % (gateway.PORT, len(body)))
+        time.sleep(2.5); late.sendall(body); late.settimeout(20)
+        got = b''
+        while True:
+            x = late.recv(65536)
+            if not x: break
+            got += x
+        late.close()
+        t('a request whose body comes 2.5 s after its headers is answered (only the request line is timed)', got.startswith(b'HTTP/1.0 200'), got[:40])
+        plan('slow'); Fake.slow = 2.0
+        code, r, h = ask(tag='slowly')
+        t('an answer that takes longer than the timeout is never cut', code == 200, code)
+        gateway.REQUEST_LINE_TIMEOUT = 30
+        raw(F, 'gone', close_after=0.3); time.sleep(1.0)
+        t('the connection count returns to 0 after answers, streams, refusals and a client that left', gateway.conns() == 0, gateway.conns())
+        lis = gateway.Server(('127.0.0.1', 0), gateway.Door); lis.socket.setblocking(False)
+        c = socket.create_connection(lis.server_address); select.select([lis.socket], [], [], 2)
+        conn, _ = lis.get_request(); n1 = gateway.conns()
+        t('get_request: a blocking socket from a non-blocking listener, counted', conn.getblocking() and conn.gettimeout() is None and n1 == 1, (conn.getblocking(), conn.gettimeout(), n1))
+        lis.shutdown_request(conn); c.close()
+        class Refusing(gateway.Server):
+            def verify_request(self, request, client_address): return False
+        rf = Refusing(('127.0.0.1', 0), gateway.Door); threading.Thread(target=rf.serve_forever, daemon=True).start()
+        c = socket.create_connection(rf.server_address); c.settimeout(5)
+        try: c.recv(1)
+        except OSError: pass
+        c.close(); time.sleep(0.3); rf.shutdown(); rf.server_close(); lis.server_close()
+        t('the verify_request-false path is counted out too', gateway.conns() == 0, gateway.conns())
+        held_slot = open(os.path.join(llmshare.SLOTS, llmshare._safe(F), 'slot-0.lock'), 'a+'); fcntl.flock(held_slot, fcntl.LOCK_EX)
+        held2 = open(os.path.join(llmshare.SLOTS, llmshare._safe(F2), 'slot-0.lock'), 'a+'); fcntl.flock(held2, fcntl.LOCK_EX)
+        plan(); got = {}
+        th = threading.Thread(target=lambda: got.update(r=ask(tag='q', kind='batch'))); th.start(); time.sleep(1.0)
+        q = [m for m in llmshare.inflight() if m.get('state') == 'queued']
+        fcntl.flock(held_slot, fcntl.LOCK_UN); held_slot.close(); fcntl.flock(held2, fcntl.LOCK_UN); held2.close(); th.join(10)
+        mk = q[0] if q else {}
+        t('a waiting request is queued in its mark with its place in every gateway\'s queue: kind, since, candidates, deadline',
+          mk.get('prio') == 1 and mk.get('t0') and sorted(mk.get('cands') or []) == sorted([F, F2]) and mk.get('until', 0) > time.time() and mk.get('n'), mk)
+        t('...and then answered', got.get('r') and got['r'][0] == 200, got.get('r') and got['r'][0])
+
         print('admission by context size: an instance takes a request while its context in flight fits its budget')
         real_par, real_set = llmshare.parallel_of, llmshare.settings
         llmshare.parallel_of = lambda m: 2                         # two slots a copy, a budget of 10,000 tokens each
@@ -672,12 +727,17 @@ def run(box):
         print('which code the gateway runs: its digest in /hub/health, compared by every caller')
         from localmodels import dash
         health = json.load(urllib.request.urlopen(url + '/hub/health', timeout=5))
-        t('/hub/health carries the digest of the code the gateway loaded', health.get('code') == dash.digest(gateway.HOME, pages=False), health.get('code'))
-        real_get = llmshare._hub.get('health'); llmshare._hub.update(health=dict(health, code='0' * 12), at=time.time(), up=True)
-        real_up = llmshare.hub_up; llmshare.hub_up = lambda fresh=False: True; dash._cache.pop('stale', None)
-        try: d = dash.door()
-        finally: llmshare.hub_up = real_up; llmshare._hub['health'] = real_get; dash._cache.pop('stale', None)
-        t('a gateway that runs other code than the caller reads as stale, by its own digest', d['stale'] is True, d)
+        t('/hub/health carries the digest of the code the gateway loaded (its release digest)', health.get('code') == dash.deploy_digest(gateway.HOME), health.get('code'))
+        real_h, real_up = dash.health, llmshare.hub_up
+        llmshare.hub_up = lambda fresh=False: True
+        try:
+            got = {}
+            for c in ('0' * 16, '0' * 12):                     # a release's digest, and a gateway from before releases
+                dash.health = lambda fresh=False: dict(health, code=c); dash._cache.pop('stale', None); got[len(c)] = dash.door()['stale']
+            dash.health = lambda fresh=False: health; dash._cache.pop('stale', None); got['same'] = dash.door()['stale']
+        finally: llmshare.hub_up, dash.health = real_up, real_h; dash._cache.pop('stale', None)
+        t('a gateway that runs other code than the caller reads as stale, by its own digest (either form); the same code does not',
+          got == {16: True, 12: True, 'same': False}, got)
         print('a second gateway on the same port: it leaves the running one alone')
         os.makedirs(llmshare.INFLIGHT, exist_ok=True)
         mine = os.path.join(llmshare.INFLIGHT, 'running-gateway-1.json'); llmshare._write(mine, dict(hub_pid=os.getpid(), since=time.time(), state='answering'))

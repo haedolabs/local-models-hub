@@ -77,23 +77,66 @@ FILES = {'/libre-franklin-400.woff2': 'font/woff2', '/libre-franklin-500.woff2':
          '/pcb.svg': 'image/svg+xml'}                                                           # and the circuit board behind it; served beside the page
 ANTHROPIC_ERROR = {400: 'invalid_request_error', 403: 'permission_error', 404: 'not_found_error', 409: 'invalid_request_error', 503: 'overloaded_error'}
 _n, _lock, _live = itertools.count(1), threading.Lock(), {}
+_marks = {}                  # this process's inflight marks: path -> record (beats() touches each, and writes again one an older reader removed)
 _start = {'at': 0.0, 'since': time.time(), 'lock': threading.Lock()}
-CODE = dash.digest(HOME, pages=False)                 # the code this process loaded (the page is read per request)
+_conns = {'n': 0, 'lock': threading.Lock()}   # connections this process accepted and has not finished: a drain ends at 0
+_internal = {'n': 0}         # internal errors (a 500 the gateway gave): a release on probation goes back after three
+GENERATION = os.environ.get('LOCALMODELS_GEN') or None     # this worker's generation under the supervisor (None: a gateway on its own)
+REQUEST_LINE_TIMEOUT = 30    # seconds a connection may take to send its request line (an idle preconnect is closed; a request never)
+SELF = {'role': None, 'release': None, 'listeners': {}}    # what this worker is, for /hub/health (worker.py fills it)
+
+
+_code = {}
+
+
+def code_digest():
+    """The deploy digest of the code this process runs (computed once: a release never changes)."""
+    if 'v' not in _code:
+        from . import HOME, dash
+        _code['v'] = dash.deploy_digest(HOME)
+    return _code['v']
+
+
+def conns():
+    """The connections this process accepted and has not finished."""
+    with _conns['lock']: return _conns['n']
+
+
+def holder_pid(pid):
+    """The pid a hub lease is held under: the client's own; for a peer front or a client whois cannot name, the
+    supervisor's (a worker's own pid ends with the worker), or this gateway's when it runs on its own."""
+    return pid or int(os.environ.get('LOCALMODELS_SUPERVISOR') or 0) or os.getpid()
+
+
+def mark_write(path, rec):
+    """Write one of this process's inflight marks (and keep it, so the beat keeps it alive)."""
+    with _lock: _marks[path] = rec
+    try: llmshare._write(path, rec)
+    except OSError as e: errors.record('inflight mark: write', e)
+
+
+def mark_done(path):
+    """A request is over: its mark leaves the beat first, then the folder, so a beat never writes it back."""
+    with _lock: _marks.pop(path, None)
+    try: os.remove(path)
+    except OSError: pass
 
 
 # ---------------------------------------------------------------- the hub's records
 def log(rec):
-    """One line per request in requests.jsonl (the older half rolls over to requests.jsonl.1 past 20 MB)."""
-    llmshare._append(llmshare.REQUESTS, rec, roll_at=LOG_MAX)
+    """One line per request in requests.jsonl (the older half rolls over to requests.jsonl.1 past 20 MB), with the gateway
+    that answered it (hub: its pid, gen: its generation under the supervisor)."""
+    llmshare._append(llmshare.REQUESTS, dict(rec, hub=os.getpid(), **({'gen': GENERATION} if GENERATION else {})), roll_at=LOG_MAX)
 
 
 def touch(pid, project, kind, model, who, delta, front=None):
     """The hub's lease for a program that sends it requests: written at each request, refreshed while one is in flight,
     and left to age out two minutes after the last. front: the peer Mac that sent it over the link (one lease per front
     and project, so a swap here is refused while a front's batch uses the model)."""
-    path = os.path.join(llmshare.LEASES, f'{llmshare._safe(project)}-{pid}' + (f'-{llmshare._safe(front)}' if front else '') + '-hub.json')
+    path = llmshare.hub_lease_path(project, pid, front)       # this gateway's own file: two gateways never share one
+    if not path: return
     with _lock:
-        e = _live.setdefault(path, dict(n=0, rec=dict(v=llmshare.VERSION, project=project, pid=pid, models=[], kind=kind,
+        e = _live.setdefault(path, dict(n=0, rec=dict(v=llmshare.VERSION, project=project, pid=pid, models=[], kind=kind, hub_pid=os.getpid(),
                                                        since=time.time(), via='hub', app=who.get('app'), **({'from': front} if front else {}))))
         e['n'] = max(0, e['n'] + delta)
         rec = e['rec']
@@ -108,9 +151,18 @@ def touch(pid, project, kind, model, who, delta, front=None):
 
 
 def beats():
+    """Every BEAT: the hub leases of programs with a request in flight are refreshed, and those idle for STALE removed;
+    every inflight mark of this process is touched (a registered gateway's mark lives while touched), and one an older
+    reader removed is written again."""
     while True:
         time.sleep(llmshare.BEAT)
         with _lock:
+            for path, rec in list(_marks.items()):
+                try: os.utime(path, None)
+                except FileNotFoundError:
+                    try: llmshare._write(path, rec)
+                    except OSError: pass
+                except OSError: pass
             for path, e in list(_live.items()):
                 if e['n'] > 0:
                     e['rec']['beat'] = time.time()
@@ -122,26 +174,33 @@ def beats():
                     except OSError: pass
 
 
+def rekey(old, new):
+    """A new supervisor adopted this worker: the hub leases held under the old supervisor's pid move to the new one's
+    (the new file written, the old one removed), so no lease names a process that is gone."""
+    with _lock:
+        for path, e in list(_live.items()):
+            if e['rec'].get('pid') != old: continue
+            npath = llmshare.hub_lease_path(e['rec'].get('project'), new, e['rec'].get('from'))
+            if not npath: continue
+            e['rec'] = dict(e['rec'], pid=new)
+            _live[npath] = _live.pop(path)
+            try: llmshare._write(npath, e['rec'])
+            except OSError as ex: errors.record('hub lease: re-key', ex)
+            try: os.remove(path)
+            except OSError: pass
+
+
 def own_kind(pid):
     """The kind of run a program says it is doing, from its own lease (a batch, a chat...), if it holds one."""
-    for f in glob_leases(pid):
+    for f in llmshare.run_leases(pid):
         try: return json.load(open(f)).get('kind')
         except (OSError, ValueError): pass
     return None
 
 
-def glob_leases(pid):
-    import glob
-    return [f for f in glob.glob(os.path.join(llmshare.LEASES, f'*-{pid}-*.json')) if not f.endswith('-hub.json')]
-
-
 def server_up(timeout=3):
-    """Whether LM Studio's server is up: only a refused connection means down. A slow answer, a reset or a cut answer
-    means it is up and busy, and starting it then would restart it under every request in flight."""
-    try: llmshare.urlopen(UP + '/v1/models', timeout=timeout); return True
-    except urllib.error.URLError as e: return not isinstance(getattr(e, 'reason', None), ConnectionRefusedError)
-    except ConnectionRefusedError: return False
-    except OSError: return True
+    """Whether LM Studio's server is up: only a refused connection means down (llmshare.server_up)."""
+    return llmshare.server_up(timeout, UP)
 
 
 def _switch_on():
@@ -152,21 +211,12 @@ def _switch_on():
 
 
 def start_lmstudio(why='a request could not connect'):
-    if maint.on(): return False                              # maintenance: the person is working on LM Studio
     """LM Studio's server, started only when it is down (starting a running one restarts it and cuts every request in
-    flight). Threads that find it down at the same moment wait for the one start. -> whether it answers now."""
-    if server_up(2): return True
-    with _start['lock']:
-        if server_up(2): return True
-        if time.time() - _start['at'] < 60: return False
-        _start['at'] = time.time()
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} LM Studio's server is down ({why}): lms server start", flush=True)
-        try: subprocess.run([llmshare.LMS, 'server', 'start'], capture_output=True, timeout=30)
-        except (OSError, subprocess.SubprocessError): return False
-        for _ in range(20):
-            if server_up(2): return True
-            time.sleep(0.5)
-        return False
+    flight): one start across every process on this Mac, at most one a minute from the request path, never during
+    maintenance (the person is working on LM Studio). -> whether it answers now."""
+    if maint.on(): return False
+    _start['at'] = time.time()
+    return llmshare.start_server(why, debounce=60, url=UP)
 
 
 def dialect(route):
@@ -283,6 +333,15 @@ class Door(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a): pass
 
+    def setup(self):
+        self.timeout = REQUEST_LINE_TIMEOUT                  # (StreamRequestHandler.setup applies it to the connection)
+        super().setup()
+
+    def parse_request(self):
+        """The request line has arrived: from here on nothing is timed out (a slow body, a long stream)."""
+        self.connection.settimeout(None)
+        return super().parse_request()
+
     def end_headers(self):
         try:                                                 # every answer says when maintenance is announced or on
             h = maint.header(maint.read())
@@ -352,7 +411,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         try: self._any(method)
         except (BrokenPipeError, ConnectionResetError): pass
         except Exception as e:                               # never a bare reset: the client gets an answer, the error record the reason
-            errors.record(f"{method} {self.path.split('?')[0]}", e)
+            errors.record(f"{method} {self.path.split('?')[0]}", e); _internal['n'] += 1
             if not self._sent: self._send(500, dict(error=f'internal gateway error: {type(e).__name__}: {e}'))
 
     def _any(self, method):
@@ -405,7 +464,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         route = path.split('?')[0].rstrip('/').lower()
         if method == 'GET' and route == '/hub/peer': return self._send(200, peers.report(self._link))
         if method == 'GET' and route == '/hub/health':
-            return self._send(200, dict(ok=True, hub='local-models', version=VERSION, name=peers.me(), maintenance=maint.view()))
+            return self._send(200, dict(ok=True, hub='local-models', version=VERSION, name=peers.me(), maintenance=maint.view(), handoff=1, code=code_digest()))
         if method == 'GET' and route in ('/v1/models', '/api/v0/models', '/api/v1/models'): return self.forward('GET', path, b'', False)
         if method == 'POST' and GEN.search(route) and not SWAP.search(route):
             body = self._body()
@@ -460,11 +519,10 @@ class Door(http.server.BaseHTTPRequestHandler):
             if crashes.reloading(model): state = 'held: reloading after a crash'
             elif recycle.draining() & set(llmshare.copies(llmshare.family(model))) or model in recycle.draining(): state = 'held: instance being recycled'
             elif crashes.stalled_copies(model): state = 'held: instance stalled, being reloaded'
+            elif llmshare.listing_age() > 1e8 and time.time() - h0 < 30: state = 'held: waiting for the first model listing'   # a gateway just started
             else: break                                   # nothing loaded and nothing on the way: generate answers at once
             if rec.get('state') != state:
-                rec.update(state=state)
-                try: llmshare._write(mark, rec)
-                except OSError: pass
+                rec.update(state=state); mark_write(mark, rec)
             if client_gone(self.connection): break
             time.sleep(1)
         return time.time() - h0
@@ -486,17 +544,23 @@ class Door(http.server.BaseHTTPRequestHandler):
         try: xt = float(self.headers.get('X-Timeout') or 0)
         except ValueError: xt = 0
         until = t0 + 0.9 * min(86400.0, max(5.0, xt)) if xt > 0 else None     # the program's own budget: never wait past it
-        holder = pid or os.getpid()
         code, usage, waited, chosen, held, note, tries, peer = 0, {}, 0.0, model, 0.0, None, 0, None
-        mark, need, room = None, 0, [None]                 # what the finally reads, whatever fails before the request goes out
+        holder = holder_pid(pid)
+        mark, need, room, prefer = None, 0, [None], None   # what the finally reads, whatever fails before the request goes out
         touch(holder, project, kind, model, who, +1, front)
         try:                                               # from the lease on: the finally always releases it and the marker
-            mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{next(_n)}.json')
+            n = next(_n)
+            mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{n}.json')
             rec = dict(hub_pid=os.getpid(), pid=pid, project=project, session=who.get('session'), host_session=who.get('host_session'),
-                       kind=kind, model=model, app=who.get('app'), since=t0, state='queued', **({'step': step} if step else {}), **run,
+                       kind=kind, model=model, app=who.get('app'), since=t0, t0=round(t0, 3), n=n, prio=0 if kind in llmshare.PEOPLE else 1,
+                       state='queued', cands=[], until=None, **({'gen': GENERATION} if GENERATION else {}), **({'step': step} if step else {}), **run,
                        **({'via': 'link', 'from': front} if front else {}))
-            try: os.makedirs(llmshare.INFLIGHT, exist_ok=True); llmshare._write(mark, rec)
-            except OSError: pass
+            try: os.makedirs(llmshare.INFLIGHT, exist_ok=True)
+            except OSError as e: errors.record('inflight folder', e)
+            mark_write(mark, rec)
+
+            def publish(cands, u):                         # the queued mark: this request's place in every gateway's queue
+                rec.update(state='queued', copy=None, cands=list(cands), until=round(u, 1)); mark_write(mark, rec)
             sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
             sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
             embeds = path.split('?')[0].rstrip('/').endswith('embeddings')
@@ -507,13 +571,12 @@ class Door(http.server.BaseHTTPRequestHandler):
             except (TypeError, ValueError, OverflowError): asked = 0          # the answer it asked for, in tokens (0: none said)
 
             def waiting(unfit):                            # admission: the copies it waits on for room, not for a slot
-                words = admission.why_waiting(unfit, llmshare.load_here(), need) if unfit else None
+                words = admission.why_waiting(unfit, llmshare.load_here(unfit), need) if unfit else None
                 if words: room[0] = words
                 if rec.get('wait_for') != words:
                     if words: rec['wait_for'] = words
                     else: rec.pop('wait_for', None)
-                    try: llmshare._write(mark, rec)
-                    except OSError: pass
+                    mark_write(mark, rec)
             base = llmshare.family(model)
             m = maint.refusing()
             if m:
@@ -536,9 +599,10 @@ class Door(http.server.BaseHTTPRequestHandler):
                                f'{base} is being recycled' if recycle.draining() else
                                f'{base}: its instance stalled and is being reloaded' if crashes.stalled_copies(model) else f'no instance of {base} is loaded (localmodels use {base})')
                         code, _ = self._send(503, dict(error=f'{why}; retry in {RETRY_AFTER} s'), retry_after=RETRY_AFTER); note = why; break
+                    rec.update(state='queued', copy=None); mark_write(mark, rec)     # queued again after a hold or a resend
                     prefer = affinity.preferred(akey)
                     with llmshare.slot_any(lambda: affinity.order(akey, self._candidates(model, skip, kind)), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
-                                           kind=kind, need=need, fits=admission.fits, waiting=waiting) as (chosen, w):
+                                           kind=kind, since=t0, publish=publish, need=need, fits=admission.fits, waiting=waiting) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'client closed the connection while queued'; break
                         m = maint.refusing()
@@ -549,9 +613,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                         rec.pop('wait_for', None)
                         rec.update(state='answering', answering_since=time.time(), copy=chosen, ctx=need,   # ctx: recycle.plan counts it
                                    ep=path.split('?')[0].rstrip('/').rsplit('/', 1)[-1].lower(), answer=asked)   # the watchdog leaves embeddings out,
-                                                                                                    # and gives a long answer longer
-                        try: llmshare._write(mark, rec)
-                        except OSError: pass
+                        mark_write(mark, rec)                                                                       # and gives a long answer longer
                         peer = peers.split(chosen)[1]
                         if peer:                                    # a copy on a peer: it is asked for the family, and names it back
                             sent = json.dumps(dict(j, model=base)).encode()
@@ -566,22 +628,14 @@ class Door(http.server.BaseHTTPRequestHandler):
                         note = getattr(self, '_note', None) or note; break
                     if peer and not self._sent and code != 499 and len(skip) < 16:   # the peer could not take it, and nothing reached
                         skip.add(peer); note = f'requeued locally: {why}'             # the program: back in the queue, here or another peer
-                        rec.update(state='queued', copy=None)
-                        try: llmshare._write(mark, rec)
-                        except OSError: pass
                         continue
                     if stalled and not self._sent and code != 499 and cuts < CUTS:   # the instance stalled (watchdog.py) and nothing reached the
                         cuts += 1; note = f'resent: {why}'                           # program: back in the queue at once; the stalled instance is
-                        rec.update(state='queued', copy=None)                        # out of routing until it is reloaded
-                        try: llmshare._write(mark, rec)
-                        except OSError: pass
-                        continue
+                        continue                                                     # out of routing until it is reloaded (queued again above)
                     note = why; crashes.nudge()
                     if attempt == 2 or code == 499: break
                     attempt += 1
-                    rec.update(state='held: reloading after a crash', copy=None)
-                    try: llmshare._write(mark, rec)
-                    except OSError: pass
+                    rec.update(state='held: reloading after a crash', copy=None); mark_write(mark, rec)
                     for _ in range(RESEND_WAIT):                        # the keeper notices within seconds; _hold waits for the rest
                         if crashes.reloading(model) or not self._candidates(model, skip): break
                         time.sleep(1)
@@ -591,8 +645,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             waited = max(0.0, time.time() - t0 - held)                     # the row says what it waited, not that it answered
             code, _ = self._send(503, dict(error=str(e) + ('; the client X-Timeout budget expired' if until else '')), retry_after=60); note = 'slot wait timed out'
         finally:
-            try: os.remove(mark)
-            except (OSError, TypeError): pass             # TypeError: no marker was made
+            if mark: mark_done(mark)
             touch(holder, project, kind, model, who, -1, front)
             if code >= 400 and code != 499 and note != 'maintenance' and not peers.split(chosen)[1]: crashes.nudge()   # maybe the model crashed: the keeper looks at once
             p, c = _usage(usage)
@@ -746,9 +799,14 @@ class Door(http.server.BaseHTTPRequestHandler):
         route = path.split('?')[0].rstrip('/')
         if route == '/hub/health':
             m = maint.read()
-            return self._send(200, dict(ok=True, hub='local-models', version=VERSION, pid=os.getpid(), port=PORT,
-                                        since=round(_start['since']), lmstudio=UP, write_problem=llmshare.write_problem(), code=CODE,
-                                        maintenance=dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), why=m.get('why'), words=maint.words(m)) if m else None))
+            sup = llmshare.supervisor()
+            return self._send(200, dict(ok=True, hub='local-models', version=VERSION, pid=os.getpid(), port=PORT, since=round(_start['since']), lmstudio=UP,
+                                        write_problem=llmshare.write_problem(),
+                                        maintenance=dict(phase=m['phase'], start=m.get('start'), end=m.get('end'), why=m.get('why'), words=maint.words(m)) if m else None,
+                                        code=code_digest(), release=SELF['release'], gen=GENERATION, role=SELF['role'], handoff=1, state_protocol=llmshare.STATE_PROTOCOL,
+                                        channel=int(os.environ.get('LOCALMODELS_CHANNEL') or 0) or None,
+                                        supervisor={k: sup.get(k) for k in ('pid', 'digest', 'run', 'started')} if sup else None,
+                                        listeners=SELF['listeners'], gateways=llmshare.live_gateways(), roles=llmshare.roles()))
         q = urllib.parse.parse_qs(path.partition('?')[2])
         try:
             if route == '/hub/snapshot': return self._send(200, web.snapshot())
@@ -757,8 +815,13 @@ class Door(http.server.BaseHTTPRequestHandler):
             if route == '/hub/accent': return self._send(200, web.accent())        # the Mac's accent, for the page's color setting
             if route == '/hub/peer': return self._send(200, peers.report())          # what this Mac would tell a front
             if route == '/hub/link':                                                # this Mac's look at its peers (POST: look now)
-                if method == 'POST': peers.LINK.poll(force=True)
-                return self._send(200, dict(me=peers.me(), peers=peers.LINK.view(), serving=peers.serving(), listening=peers.LISTEN.get('words'),
+                if peers.LINK.leader:
+                    if method == 'POST': peers.LINK.poll(force=True)
+                    seen = peers.LINK.view()
+                else:                                                               # the poller is another gateway: ask it, then read its look
+                    if method == 'POST': peers.ask_poll(3)
+                    seen = peers.view()
+                return self._send(200, dict(me=peers.me(), peers=seen, serving=peers.serving(), listening=peers.listen_words(),
                                             problems=peers.problems()))
             if route == '/hub/recycle' and method == 'POST':
                 body = self._body()
@@ -814,16 +877,31 @@ class Door(http.server.BaseHTTPRequestHandler):
                               trace=str(j.get('stack') or '')[:800], source='dashboard')
                 return self._send(200, dict(ok=True))
         except Exception as e:
-            errors.record(f'{method} {route}', e)
+            errors.record(f'{method} {route}', e); _internal['n'] += 1
             return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
         if route == '/hub/status':
             return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
-                                        last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting_here()))
+                                        last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting()))
         return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, /hub/extensions, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/link/off, POST /hub/link/on, POST /hub/extensions/run, POST /hub/client-error'))
 
 
 class Server(http.server.ThreadingHTTPServer):
+    """One listener of this gateway. Every connection it accepts is counted until socketserver's shutdown_request (which
+    every accepted connection passes exactly once: after its handler, on an error, or refused by verify_request), so a
+    draining worker knows when it is done."""
     daemon_threads, request_queue_size, link = True, 128, False
+
+    def get_request(self):
+        conn, addr = self.socket.accept()         # BlockingIOError when another gateway took it first: socketserver lets it go
+        try: conn.setblocking(True)               # macOS hands out the listener's O_NONBLOCK on the accepted socket
+        except OSError: conn.close(); raise
+        with _conns['lock']: _conns['n'] += 1
+        return conn, addr
+
+    def shutdown_request(self, request):
+        try: super().shutdown_request(request)
+        finally:
+            with _conns['lock']: _conns['n'] -= 1
 
 
 class Server6(Server):
@@ -841,57 +919,108 @@ class LinkServer6(LinkServer):
 
 def link_server(address, port):
     """A listener on this address only, bound to the interface that holds it (IP_BOUND_IF), so a packet for it that
-    arrives on another interface is not answered. -> the server, not yet serving."""
+    arrives on another interface is not answered: bind and listen back to back (HTTPServer.server_bind would look up the
+    host's name in between), non-blocking like every listener the gateways share. -> the server, not yet serving."""
     six = ':' in address
     srv = (LinkServer6 if six else LinkServer)((address, port), Door, bind_and_activate=False)
-    srv.iface = peers.interface_of(address)
-    if srv.iface:
-        try:
-            idx = socket.if_nametoindex(srv.iface)
-            if six: srv.socket.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
-            else: srv.socket.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
-        except OSError: pass
-    try: srv.server_bind(); srv.server_activate()
+    try:
+        srv.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.iface = peers.interface_of(address)
+        if srv.iface:
+            try:
+                idx = socket.if_nametoindex(srv.iface)
+                if six: srv.socket.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
+                else: srv.socket.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+            except OSError as e: errors.record('link listener: bind to its interface', e)
+        srv.socket.bind((address, port))
+        srv.socket.listen(srv.request_queue_size)
+        srv.socket.setblocking(False)
     except OSError: srv.server_close(); raise
+    srv.server_address = srv.socket.getsockname()
+    srv.server_name, srv.server_port = address, port
     host = f'[{address}]' if six else address
     srv.hosts = frozenset({f'{host}:{port}'.lower()})
     return srv
 
 
-def listen_link():
-    """While the settings say this Mac serves as a peer ("serve": {"address": ...}), the door also listens there (checked
-    every 5 s, so a change needs no restart; an address not on this Mac yet, the Thunderbolt Bridge still coming up, is
-    tried again). The words say what it does, for the status line."""
-    cur, srv, said = None, None, None
+def link_words(e, address, port):
+    """Why a link listener could not be bound, by errno."""
+    import errno as _errno
+    if e.errno == _errno.EADDRINUSE: why = 'address in use by another process'
+    elif e.errno == _errno.EADDRNOTAVAIL: why = 'address not configured on any interface (assign the Thunderbolt Bridge static address)'
+    else: why = e.strerror or str(e)
+    return f'link listener not bound to {address}:{port}: {why}'
+
+
+def retire(srv):
+    """Stop serving a link listener that is no longer wanted without resetting what waits in its backlog: stop its serve
+    loop, answer every connection already queued, then close this process's copy."""
+    srv.shutdown()
     while True:
+        try: conn, addr = srv.socket.accept()
+        except OSError: break                                # BlockingIOError: the backlog is empty
+        try: conn.setblocking(True)
+        except OSError: conn.close(); continue
+        with _conns['lock']: _conns['n'] += 1
+        srv.process_request(conn, addr)
+    srv.server_close()
+
+
+def listen_link(stop=None, adopted=None, hold=None, drop=None):
+    """The link-listener role's loop, in one gateway on this Mac: while the settings say this Mac serves as a peer
+    ("serve": {"address": ...}), it listens there (checked every 5 s, so a change needs no restart; an address not on this
+    Mac yet, the Thunderbolt Bridge still coming up, is tried again). adopted: {key: server} the supervisor passed down
+    (served as they are); hold(key, srv) and drop(key) tell the supervisor of a listener bound or retired here. The words
+    go to run/link-listener.json, which every gateway reads. stop: it returns, closing nothing (the next holder adopts)."""
+    cur, said, owned = None, None, dict(adopted or {})     # key -> server: 'link:<address>:<port>'
+    served = set()
+    while stop is None or not stop.is_set():
         try:
             want = peers.serving()
-            key = (want['address'], want['port']) if want else None
-            if key != cur:
-                if srv:
-                    srv.shutdown(); srv.server_close(); srv = None
-                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {cur[0]}:{cur[1]} stopped", flush=True)
-                cur, peers.LISTEN['words'] = None, None
-                if want:
-                    problem = peers.serve_problem(want['address']) or peers.token_problem()
-                    if problem: words = f'link listener not started: {problem}'
-                    else:
-                        try:
-                            srv = link_server(want['address'], want['port'])
-                            threading.Thread(target=srv.serve_forever, daemon=True).start()
-                            cur = key
-                            port_name = peers.ports().get(srv.iface) if srv.iface else None
-                            words = (f"listening on {want['address']}:{want['port']} for peers (token required)"
-                                     + (f", interface {srv.iface}" + (f' ({port_name})' if port_name else '') if srv.iface else '')
-                                     + ('' if not srv.iface or peers.bridge(srv.iface, {srv.iface: port_name}) or peers.loopback(want['address'])
-                                        else '; warning: not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
-                        except OSError as e:
-                            words = f"link listener not bound to {want['address']}:{want['port']} ({e.strerror or e}): address not configured on any interface (assign the Thunderbolt Bridge static address)"
-                    peers.LISTEN['words'] = words
-                    if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
-                else: said = None
+            key = f"link:{want['address']}:{want['port']}" if want else None
+            for k in [k for k in owned if k != key]:           # no longer wanted: retired, its backlog answered
+                if drop: drop(k)
+                srv = owned.pop(k)
+                if k in served: retire(srv); served.discard(k)
+                else: srv.server_close()
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {k[5:]} stopped", flush=True)
+            if key and key != cur:
+                problem = peers.serve_problem(want['address']) or peers.token_problem()
+                if problem: words = f'link listener not started: {problem}'
+                else:
+                    try:
+                        srv = owned.get(key)
+                        if srv is None:
+                            srv = owned[key] = link_server(want['address'], want['port'])
+                            if hold: hold(key, srv)
+                        if key not in served:
+                            threading.Thread(target=srv.serve_forever, kwargs=dict(poll_interval=0.5), daemon=True, name=f'serve {key}').start(); served.add(key)
+                        cur = key
+                        port_name = peers.ports().get(srv.iface) if srv.iface else None
+                        words = (f"listening on {want['address']}:{want['port']} for peers (token required)"
+                                 + (f", interface {srv.iface}" + (f' ({port_name})' if port_name else '') if srv.iface else '')
+                                 + ('' if not srv.iface or peers.bridge(srv.iface, {srv.iface: port_name}) or peers.loopback(want['address'])
+                                    else '; warning: not the Thunderbolt Bridge') + (f'; {peers.address_words(want["address"])}' if peers.address_words(want['address']) else ''))
+                    except OSError as e: words = link_words(e, want['address'], want['port'])
+                _listen_words(key, words)
+                if words != said: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: {words}", flush=True); said = words
+            elif not key and cur is not None or not key and said:
+                cur, said = None, None; _listen_words(None, None)
         except Exception as e: errors.record('link listener', e)
-        time.sleep(5)
+        if stop is None: time.sleep(5)
+        elif stop.wait(5): break
+    peers.LISTEN['words'] = None
+    for k in served:                                        # stop serving here; the copies stay with the supervisor
+        try: owned[k].shutdown(); owned[k].server_close()
+        except Exception as e: errors.record('link listener: hand over', e)
+
+
+def _listen_words(key, words):
+    peers.LISTEN['words'] = words
+    try:
+        os.makedirs(llmshare.RUN, mode=0o700, exist_ok=True)
+        llmshare._write(os.path.join(llmshare.RUN, 'link-listener.json'), dict(key=key, words=words, pid=os.getpid(), at=round(time.time(), 1)))
+    except OSError as e: errors.record('link listener: words', e)
 
 
 def awake(caf, idle_since):
@@ -910,12 +1039,17 @@ def awake(caf, idle_since):
     return caf, idle_since
 
 
-def keeper():
-    """Keep a family's copies loaded whenever its first copy is, load a crashed model again and recycle copies due
-    (models.keep): at the start, every 20 s, and at once when a request through the door fails (crashes.nudge)."""
+def keeper(stop=None):
+    """The instance-manager role's loop, in one gateway on this Mac: keep a family's copies loaded whenever its first copy
+    is, load a crashed model again and recycle copies due (models.keep), at once, every 20 s, and when a request through
+    any gateway fails (crashes.nudge). Keep-awake is make-before-break: this holder starts its own caffeinate first, and
+    never ends one when it gives the role up (that one ends with its process). stop: it returns between two passes, never
+    inside one (a pass may hold the swap lock through a load)."""
     from . import models
     last, caf, idle_since = None, None, time.time()
-    while True:
+    try: caf, idle_since = awake(caf, idle_since)
+    except Exception as e: errors.record('keep-awake (caffeinate)', e)
+    while stop is None or not stop.is_set():
         try:
             did = models.keep()
             if did and did != last: print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {'; '.join(did)}", flush=True)
@@ -923,8 +1057,8 @@ def keeper():
         except Exception as e: errors.record('instance manager', e)
         try: caf, idle_since = awake(caf, idle_since)
         except Exception as e: errors.record('keep-awake (caffeinate)', e)
-        if crashes.WAKE.wait(20):
-            crashes.WAKE.clear(); time.sleep(1)            # a request just failed: give LM Studio a moment to log why
+        if crashes.wait_nudge(20, stop) and not (stop is not None and stop.is_set()):
+            time.sleep(1)                                # a request just failed: give LM Studio a moment to log why
 
 
 def main(argv=()):

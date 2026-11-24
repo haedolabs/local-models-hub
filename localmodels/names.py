@@ -25,7 +25,15 @@ import json, os, time
 
 from . import llmshare, runs
 
-FILE = os.path.join(llmshare.SHARED, 'names.json')
+FILE = None                                              # names.json in the shared state (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global FILE
+    FILE = os.path.join(root, 'names.json')
+
+
 _cache = {'mtime': None, 'data': {}}
 _present = {'checked': 0.0, 'mtime': None, 'data': None}
 OTHER = 'other'                                          # what a project not kept is called in screenshot mode

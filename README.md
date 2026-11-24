@@ -176,14 +176,15 @@ git clone https://github.com/haedolabs/local-models-hub.git ~/local-models
 ```
 
 `install` does the following:
-- copies the code to `~/Library/Application Support/LocalModels/hub/` and starts the gateway from there as a LaunchAgent (`KeepAlive`, started at login);
+- builds an immutable release of the code, `~/Library/Application Support/LocalModels/releases/<digest>/`, points `hub` there and starts the gateway's supervisor from it as a LaunchAgent (`KeepAlive`, `AbandonProcessGroup`, started at login);
 - writes the settings file if there is none, sized to this Mac: the measured default when its model is downloaded and two instances fit, else the largest downloaded model that fits, as two instances when two fit;
 - registers the MCP server at user scope (when `claude` is on `PATH`), adds the maintenance hook to `~/.claude/settings.json`, and adds one signpost line to `~/.claude/CLAUDE.md` (`--plugin` leaves all three to the plugin; `--no-claude` skips them);
 - links `localmodels` onto `PATH`.
 
 Options and related commands:
 - `--dry` prints the plan and writes nothing.
-- Rerun `install` after changing the code: it restarts the gateway only once no request has been in flight for 3 s (up to `--wait` minutes).
+- Rerun `install` after changing the code: a new gateway worker starts from the new release beside the serving one, tests itself, takes over, and the old one finishes every connection it accepted: nothing is refused or cut (GUIDE.md, *Deploys*). `--dry` names the path it would take.
+- `localmodels restart` is the same handoff for the same release, `rollback` hands back to the last good release, and `restart --cold` and `stop` wait for no request in flight (`--now` does not).
 - `localmodels uninstall` reverses all of it. `localmodels check` runs the self-test: sandbox tests plus live checks of the installed gateway.
 
 Then point clients at `http://localhost:1235/v1` (any API key), or `http://localhost:1235` as the `base_url` of an Anthropic SDK client.
@@ -277,6 +278,9 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/crashes.py` | LM Studio log tailing and crash classification; the instance manager's state and crash record |
 | `localmodels/recycle.py` | recycle policy: tokens since load (and in flight) against the recycle threshold, draining, fresh starts; the reload of a stalled instance |
 | `localmodels/watchdog.py` | the stall watchdog: each instance's engine activity in LM Studio's log against the requests in flight on it (a first-token limit and a silence limit) |
+| `localmodels/supervisor.py` | the launchd job: holds the listening sockets, runs gateway workers from immutable releases, hands off between them, adopts them after its own restart; standard library only |
+| `localmodels/worker.py` | one gateway worker under the supervisor: warm-up and self-test before it accepts, the singleton roles, the drain |
+| `localmodels/deploy.py` | `install`'s paths: a fresh start, the one-time migration, a LaunchAgent change, a supervisor upgrade, a deploy |
 | `localmodels/affinity.py` | prefix affinity: a digest of each request's opening, the instance that last answered that conversation, which goes first among the candidates |
 | `localmodels/admission.py` | admission by context size: each request's estimated context, each instance's budget from its model's cost per token and the Mac's memory, the engines' footprints |
 | `localmodels/runs.py` | run and phase progress, run plans (`/hub/runs`), and each phase's estimate in tokens per item at the run's throughput, from the request log |

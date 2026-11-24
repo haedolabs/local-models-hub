@@ -39,9 +39,16 @@ import contextlib, fcntl, glob, json, os, re, threading, time
 from . import llmshare
 
 LOGS = os.path.expanduser(os.environ.get('LMSTUDIO_LOGS') or '~/.lmstudio/server-logs')
-RECORD = os.path.join(llmshare.SHARED, 'crashes.jsonl')
-STATE = os.path.join(llmshare.SHARED, 'keeper.json')
+RECORD = STATE = None                                    # crashes.jsonl and keeper.json in the shared state (_state_paths)
 ROLL_AT = 2_000_000                # crashes.jsonl becomes crashes.jsonl.1 past this size; both are read
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global RECORD, STATE
+    RECORD, STATE = os.path.join(root, 'crashes.jsonl'), os.path.join(root, 'keeper.json')
+
+
 CAP, WINDOW = 3, 3600            # reloads of one model within an hour; a crash after the third leaves it down
 GIVE_UP = 3600                   # a crashed model not loaded again within an hour (no room, a load that fails) is left down
 RETRY_LEFT = 3600                # a model left down is tried once more this often
@@ -69,7 +76,7 @@ ENGINE_WORDS = (r'insufficient memory', r'out of memory', r'kIOGPUCommandBufferC
                 r'fatal exception', r'generation thread', r'channel error', r'exit code')
 ENGINE = re.compile('|'.join(ENGINE_WORDS), re.I)
 _ENGINE_EACH = [re.compile(w, re.I) for w in ENGINE_WORDS]
-_ctx, _seen_state = {}, {'at': 0.0, 'st': {}}
+_seen_state = {'at': 0.0, 'st': {}}
 
 
 def engine_failure(text):
@@ -90,10 +97,12 @@ def parse(lines, ctx=None):
     """Lines of LM Studio's server log -> (crashes [{at, model, cause, error}], events [(at, 'loadModel' | 'unloadModel' |
     'serverStart', key or id)], the engine's last fatal error (at, words) or None). Keeps only LM Studio's and the engine's
     own error words, never a request's content: an exception's message is kept only when it is about the engine (Metal,
-    memory, a signal), else just its name. For the watchdog it also notes, in ctx, when each tag (an instance's
-    identifier) last had an engine line ('engine': {tag: at}: an INFO or DEBUG line tagged with it, other than the
-    server's ACCEPTED), the last engine step ('step') and the last line of any kind ('line'): times only."""
-    ctx = _ctx if ctx is None else ctx
+    memory, a signal), else just its name. ctx: what the lines before said (the stamp, the model, the last error), kept
+    in keeper.json beside the log position, so a crash split across two looks, or two gateways, is still read whole.
+    For the watchdog it also notes, in ctx, when each tag (an instance's identifier) last had an engine line ('engine':
+    {tag: at}: an INFO or DEBUG line tagged with it, other than the server's ACCEPTED), the last engine step ('step') and
+    the last line of any kind ('line'): times only."""
+    ctx = {} if ctx is None else ctx
     crashes, events, fatal = [], [], None
     for line in lines:
         if line.startswith('['):
@@ -249,15 +258,16 @@ def watch(rows, listed_at=None, busy=None, now=None):
     api = llmshare.api_models()
     fams = llmshare.settings().get('families') or {}
     with _state() as st:
-        found, events, fatal = parse(_new_lines(st))
+        ctx = st.setdefault('logctx', {})                                  # kept across looks and gateways (see parse)
+        found, events, fatal = parse(_new_lines(st), ctx)
         seen, down, last = st.setdefault('seen', {}), st.setdefault('down', {}), st.setdefault('last', {})
         if fatal: st['fatal'] = dict(at=fatal[0], words=fatal[1])
         eng = st.setdefault('engine', {})                                 # each instance's last engine line (watchdog.py)
-        for i, at in (_ctx.pop('engine', None) or {}).items():
+        for i, at in (ctx.pop('engine', None) or {}).items():
             if i in seen or i in have: eng[i] = max(at, eng.get(i, 0))
         for i in [i for i in eng if i not in seen and i not in have]: del eng[i]
         for k, src in (('log_line', 'line'), ('log_step', 'step')):
-            if _ctx.get(src): st[k] = max(_ctx[src], st.get(k) or 0)
+            if ctx.get(src): st[k] = max(ctx[src], st.get(k) or 0)
         for c in [c for c in (st.get('stalled') or {}) if c not in have and (api is None or c not in api)]:
             del st['stalled'][c]                                          # a stalled instance gone: the crash path or its reload has it
         unloaded = {m for _, verb, m in events if verb == 'unloadModel'}
@@ -487,7 +497,7 @@ def after_maintenance(rows):
     now = time.time()
     have = {r['id'] for r in rows}
     with _state() as st:
-        st['log'] = {}                                       # the next look starts at the end of the log
+        st['log'], st['logctx'] = {}, {}                     # the next look starts at the end of the log
         seen = {i: dict(s, loaded=True) for i, s in (st.get('seen') or {}).items() if i in have}
         for i in have: seen.setdefault(i, dict(loaded=True, since=now))
         st['seen'], st['down'], st['missing'] = seen, {}, {}
@@ -495,9 +505,22 @@ def after_maintenance(rows):
 
 
 def nudge():
-    """A request through the door failed: maybe a crash. The keeper looks at once (at most every 5 s)."""
+    """A request through the gateway failed: maybe a crash. The instance manager looks at once, in whichever gateway holds
+    that role (WAKE in this process, run/nudge-instance-manager for the others); at most every 5 s from one process."""
     if time.time() - _seen_state.get('nudged', 0) > 5:
         _seen_state['nudged'] = time.time(); WAKE.set()
+        llmshare.nudge('instance-manager')
+
+
+def wait_nudge(timeout=20, stop=None):
+    """The instance manager's pause between passes: up to `timeout` seconds in 1-s steps, ended early by a failed request
+    in this process (WAKE), a touch of run/nudge-instance-manager from any process, or stop. -> True when woken."""
+    seen, end = llmshare.nudged('instance-manager'), time.time() + timeout
+    while time.time() < end:
+        if stop is not None and stop.is_set(): return True
+        if WAKE.wait(min(1.0, max(0.0, end - time.time()))): WAKE.clear(); return True
+        if llmshare.nudged('instance-manager') > seen: return True
+    return False
 
 
 def down_copies(model):

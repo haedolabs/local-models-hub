@@ -29,10 +29,16 @@ import json, os, re, time
 
 from . import llmshare
 
-FILE = os.path.join(llmshare.SHARED, 'maintenance.json')
-OFF = os.path.join(llmshare.SHARED, 'off.json')
-SWITCHING = os.path.join(llmshare.SHARED, 'switching.json')   # a switch-on under way, then its outcome for SHOWN_FOR seconds
-SHOWN_FOR = 120
+FILE = OFF = SWITCHING = None                            # maintenance.json, off.json, switching.json in the shared state (_state_paths)
+SHOWN_FOR = 120                                          # seconds switching.json shows a switch-on's outcome after it ends
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global FILE, OFF, SWITCHING
+    FILE, OFF, SWITCHING = (os.path.join(root, f) for f in ('maintenance.json', 'off.json', 'switching.json'))
+
+
 QUIET_FOR = 120          # "after the batches": no batch request for this long, then it starts
 OFF_RETRY = 300          # Retry-After while switched off: there is no scheduled end
 _cache = {'mtime': None, 'rec': None}

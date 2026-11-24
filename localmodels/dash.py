@@ -31,7 +31,15 @@ def _fg(rgb, n):
 # The letters keep their old roles: g good, y warning, r critical (off-white: no red), c the accent, m Claude, b rules.
 C = dict(g=_fg((135, 172, 232), 110), y=_fg((188, 164, 150), 181), r=_fg((236, 231, 223), 255), c=_fg((69, 120, 206), 68),
          m=_fg((169, 198, 244), 153), b=_fg((94, 90, 84), 240), w=_fg((236, 231, 223), 255), B='1', d='2', R='7')
-INSTALLED = os.path.join(llmshare.SHARED, 'hub')          # the copy launchd runs the door from (localmodels install)
+INSTALLED = None                                         # SHARED/hub: the copy launchd runs the gateway from (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global INSTALLED
+    INSTALLED = os.path.join(root, 'hub')
+
+
 PROVIDERS = []                                            # (title, fn): a project's own rows, added to its own view
 _cache, _files = {}, {}
 ENV = dict(os.environ, LC_ALL='C')                        # ps and vm_stat print numbers the same way whatever the Mac's language
@@ -94,12 +102,56 @@ def digest(folder, pages=True):
     return h.hexdigest()[:12]
 
 
+DEPLOYED = ('localmodels', os.path.join('bin', 'localmodels'), 'LICENSE', os.path.join('.claude-plugin', 'plugin.json'))
+
+
+def deploy_files(root):
+    """The files a release holds, relative to root: localmodels/ (no __pycache__, .pyc or dotfiles), bin/localmodels,
+    LICENSE and the plugin manifest (the dashboard's corner reads the last two)."""
+    out = []
+    for top in DEPLOYED:
+        p = os.path.join(root, top)
+        if os.path.isdir(p):
+            for d, dirs, files in os.walk(p):
+                dirs[:] = sorted(x for x in dirs if x != '__pycache__' and not x.startswith('.'))
+                out += [os.path.relpath(os.path.join(d, f), root) for f in files if not f.endswith('.pyc') and not f.startswith('.')]
+        elif os.path.isfile(p): out.append(top)
+    return sorted(out)
+
+
+def deploy_digest(root):
+    """What a release is: sha256 over its files' relative paths and bytes, 16 hex characters (a release folder's name, and
+    the code a gateway says it runs in /hub/health)."""
+    h = hashlib.sha256()
+    for rel in deploy_files(root):
+        try: data = open(os.path.join(root, rel), 'rb').read()
+        except OSError: continue
+        h.update(rel.encode() + b'\0'); h.update(len(data).to_bytes(8, 'big')); h.update(data)
+    return h.hexdigest()[:16]
+
+
+def health(fresh=False):
+    """The serving gateway's /hub/health, or None when none answers (cached 2 s)."""
+    def get():
+        try: return json.load(llmshare.urlopen(llmshare.HUB + '/hub/health', timeout=1))
+        except (OSError, ValueError): return None
+    if fresh: _cache.pop('health', None)
+    return every('health', 2, get)
+
+
 def door():
-    """The hub's door: up or not, and whether launchd runs the code that is in this repo now."""
+    """The gateway: up or not; whether it runs the code in this checkout now (the serving gateway's code digest, from
+    /hub/health; for a gateway older than that, the installed copy's files); and the generations still draining."""
     up = llmshare.hub_up(fresh=True)
-    runs = (llmshare._hub.get('health') or {}).get('code') if up else None      # the code the gateway loaded, by its own digest
-    stale = every('stale', 10, lambda: bool(runs and runs != digest(HOME, pages=False)) or (os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME)))
-    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(stale), write_problem=(llmshare._hub.get('health') or {}).get('write_problem') if up else None)
+
+    def stale():
+        h = health()
+        code = (h or {}).get('code')
+        if code: return code != (deploy_digest(HOME) if len(code) == 16 else digest(HOME, pages=False))   # 12 hex: a gateway from before releases
+        return os.path.isdir(INSTALLED) and digest(INSTALLED) != digest(HOME)
+    draining = [dict(gen=r.get('gen'), pid=r['pid'], open=r.get('open')) for r in llmshare.live_gateways() if r.get('role') == 'draining']
+    return dict(up=up, port=llmshare.HUB_PORT, stale=bool(every('stale', 10, stale)), draining=draining,
+                write_problem=(health() or {}).get('write_problem') if up else None)
 
 
 def lmstudio():
@@ -231,7 +283,7 @@ def users(shown=True):
         for x in ('session', 'host_session', 'app', 'project', 'step'): r[x] = r[x] or f.get(x)
         r['since'] = min(r['since'], f.get('since') or time.time())
     lm = every('lmpid', 30, lambda: {p for p, (_, c) in _procs().items() if 'LM Studio' in c or '.lmstudio' in c})
-    hubs = {f.get('hub_pid') for f in llmshare.inflight()} | {_hub_pid()}
+    hubs = gateway_pids()
     for pid, n in every('direct', 3, lambda: whois.clients_of(1234, skip=lm | hubs)).items():
         who = whois.identity(pid)
         r = row(pid, who.get('project'))
@@ -264,9 +316,36 @@ def _procs():
     return out
 
 
+def gateway_words():
+    """The gateway's workers in one line, from the registry: 'gateway: gen 8 (pid 4123) serving 3f9a12c0 since 10:42;
+    draining: gen 7 (pid 3988): 5 connections, 2 queued, oldest 14 min'. None when no gateway is registered."""
+    rows = llmshare.live_gateways()
+    if not rows: return None
+    clock = lambda t: time.strftime('%H:%M', time.localtime(float(t or 0)))
+    parts = [f"gen {r.get('gen')} (pid {r['pid']}) {r.get('role') or '?'} {str(r.get('code') or '')[:8]} since {clock(r.get('started'))}"
+             for r in rows if r.get('role') in ('serving', 'warming')]
+    draining = [r for r in rows if r.get('role') == 'draining']
+    if draining:
+        parts.append('draining: ' + ', '.join(f"gen {r.get('gen')} (pid {r['pid']}): {r.get('open') or 0} connections, {r.get('queued') or 0} queued"
+                                               + (f", oldest {int(float(r['oldest']) // 60)} min" if r.get('oldest') else '') for r in draining))
+    return 'gateway: ' + '; '.join(parts)
+
+
+def gateway_pids():
+    """The gateway processes on this Mac (never counted as clients that bypass the gateway): the registry's live gateways,
+    draining ones included, and the supervisor; a gateway older than the registry by its marks, or by /hub/health when no
+    gateway is registered (a worker never asks its own port)."""
+    pids = {r['pid'] for r in llmshare.live_gateways()}
+    sup = llmshare.supervisor()
+    if sup: pids.add(sup.get('pid'))
+    pids |= {f.get('hub_pid') for f in llmshare.inflight() if llmshare.gateway_live(f.get('hub_pid')) is None}
+    if not pids and not os.environ.get('LOCALMODELS_LISTEN'): pids.add(_hub_pid())
+    return {p for p in pids if p}
+
+
 def _hub_pid():
-    try: return json.load(llmshare.urlopen(llmshare.HUB + '/hub/health', timeout=1)).get('pid')
-    except (OSError, ValueError): return None
+    h = health()
+    return h.get('pid') if isinstance(h, dict) else None
 
 
 def claude(hours=3):

@@ -54,12 +54,11 @@ DRAIN_MAX, RETRY, GAP, FRESH_FOR = 600, 600, 120, 1800   # seconds: a drain give
 GAP_HARD = 30             # seconds after a family's last recycle before a copy past its threshold drains (GAP holds the rest)
 STALL_GRACE = 30          # seconds a stall job waits for the slots of its cut requests to be let go before it reloads anyway
 _counts = {'at': 0.0, 'by': {}}                           # the request log is read at most every 20 s, for every copy at once
-_held = {}                                                # family -> why its lone copy is not recycled (plan's last look)
 
 
 def held_back():
     """The families whose recycle waits because a lone copy might not load again, with why: {family: words}."""
-    return dict(_held)
+    return dict(((crashes._read().get('recycle') or {}).get('held')) or {})
 
 
 def guardrail_off():
@@ -142,7 +141,7 @@ def drift(row, f):
 
 def _r(st):
     r = st.setdefault('recycle', {})
-    for k, v in (('job', None), ('last', {}), ('fresh', {}), ('retry_after', 0), ('retry', {})):
+    for k, v in (('job', None), ('last', {}), ('fresh', {}), ('retry_after', 0), ('held', {}), ('retry', {})):
         r.setdefault(k, v)
     return r
 
@@ -189,9 +188,10 @@ def plan(rows, busy=None, flying=None):
         return None
     now, retry = time.time(), _retry(r)
     seen, down, have = st.get('seen') or {}, st.get('down') or {}, {x['id']: x for x in rows}
-    _held.clear()
-    w = _stall_job(rows, stalled, seen, down, have, retry, now)
-    if w: return w
+    held = {}                                                  # family -> why it is held back; kept in keeper.json, so whichever gateway answers shows it
+    w = _stall_job(rows, stalled, seen, down, have, retry, now, held)
+    if w:
+        _keep_held(r, held); return w
     flying = admission.in_flight() if flying is None else flying
     best = None
     for base, f in (llmshare.settings().get('families') or {}).items():
@@ -217,11 +217,12 @@ def plan(rows, busy=None, flying=None):
             elif idle and s >= th['soft'] / max(1, th['tokens']): why, rank = f"idle at {int(s * 100)}% of its recycle threshold, past the soft threshold ({int(100 * th['soft'] / max(1, th['tokens']))}%): {_work(c, th)}", 1 + s
             else: continue
             if len(ids) < 2 and not crashes.reload_proven(base) and not guardrail_off():   # make before break: no unload the hub might not undo
-                _held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
+                held[base] = (f'recycle deferred ({why}): single instance on this host and reload not yet proven (no successful load by '
                                "the instance manager here, guardrail not Off); set LM Studio's model-loading guardrail to Off, or load it once "
                                'through the instance manager (crash recovery, or `localmodels use` after an unload)')
                 continue
             if best is None or rank > best[0]: best = (rank, i, base, c, round(s, 2), why)
+    _keep_held(r, held)
     if not best: return None
     _, copy, base, c, s, why = best
     older = oldest_first(rows, copy)
@@ -237,7 +238,13 @@ def plan(rows, busy=None, flying=None):
     return f'{copy}: draining for recycle ({why})'
 
 
-def _stall_job(rows, stalled, seen, down, have, retry, now):
+def _keep_held(r, held):
+    """Write what is held back to keeper.json when it changed (held_back() reads it in every gateway)."""
+    if held != (r.get('held') or {}):
+        with crashes._state() as st: _r(st)['held'] = held
+
+
+def _stall_job(rows, stalled, seen, down, have, retry, now, held):
     """The job for the copy that stalled first, if one may start now: -> words or None (plan's first look)."""
     from . import watchdog
     for copy, s in sorted(stalled.items(), key=lambda kv: (kv[1] or {}).get('at') or 0):
@@ -247,7 +254,7 @@ def _stall_job(rows, stalled, seen, down, have, retry, now):
         if d and d.get('state') in ('loading again', 'waiting for room'): continue   # a crash reload in the family first
         n = len(watchdog.recent(base, now))
         if n > watchdog.CAP:
-            _held[base] = (f'{copy} stalled {n} times within {watchdog.WINDOW // 60} min: left out of routing, not reloaded again '
+            held[base] = (f'{copy} stalled {n} times within {watchdog.WINDOW // 60} min: left out of routing, not reloaded again '
                            f'until the hour has passed; reload by hand: localmodels use {base}')
             continue
         why, target, stall = (s or {}).get('why') or 'stalled', copy, True

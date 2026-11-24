@@ -65,15 +65,20 @@
   localmodels jobs               recent local-agent jobs started through the gateway
   localmodels prune [--days 30]  remove local-agent job folders and logs older than N days (they hold prompts and answers)
   localmodels check              self-test: sandbox suites, then live checks against the installed gateway
-  localmodels install [--wait MINUTES] [--plugin] [--dry] [--no-claude]
-                                 set the hub up on this Mac; run it again after changing the hub's code (it waits for a
-                                 moment with no request in flight: 1.5 minutes unless --wait says longer; a change to the
-                                 dashboard page alone is replaced in place at once, with no restart).
-                                 --plugin: installed as a Claude Code plugin, which brings the tools. --dry: say what
-                                 would be done, write nothing. --no-claude: no MCP registration, no signpost line
+  localmodels install [--wait MINUTES] [--force] [--plugin] [--dry] [--no-claude]
+                                 set the hub up on this Mac; run it again after changing the hub's code: it builds a
+                                 release (releases/<digest>) and hands off to a new gateway worker, nothing refused or
+                                 cut. A gateway from before releases is migrated once, at a moment with no request in
+                                 flight (1.5 minutes unless --wait says longer). --force: a release marked bad.
+                                 --plugin: installed as a Claude Code plugin, which brings the tools. --dry: the path it
+                                 would take, nothing written. --no-claude: no MCP registration, no signpost line
   localmodels uninstall          undo install
-  localmodels start | stop | restart     the gateway (start is a no-op when running; restart waits for no requests in flight)
-  localmodels gateway            run the gateway in the foreground (what launchd runs)
+  localmodels start               the gateway (a no-op when it runs)
+  localmodels restart [--cold]   a handoff to a new worker of the same release (--cold: waits for no request in flight,
+                                 then stops and starts the supervisor: a new run, so load_at_start applies)
+  localmodels rollback           a handoff back to the last good release
+  localmodels stop [--now]       the supervisor and every worker, once no request is in flight (--now: at once)
+  localmodels gateway            the supervisor, in the foreground (what launchd runs); --check validates a release's
   localmodels mcp                the MCP server (Claude Code starts it)
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check, the privacy and secrets
                                  checks, then the version stamped, committed, tagged and pushed (--dry: the checks only)
@@ -89,7 +94,16 @@ from . import HOME, NAME, VERSION, llmshare
 LABEL = os.environ.get('LOCALMODELS_LABEL') or 'com.local-models.hub'
 OLD_LABELS = ()                                          # earlier LaunchAgent labels an install retires
 PLIST = os.path.expanduser(f'~/Library/LaunchAgents/{LABEL}.plist')
-INSTALLED = os.path.join(llmshare.SHARED, 'hub')
+INSTALLED = None                                         # SHARED/hub (_state_paths)
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global INSTALLED, PRIVATE_WORDS
+    INSTALLED = os.path.join(root, 'hub')
+    PRIVATE_WORDS = os.environ.get('LOCALMODELS_PRIVATE_WORDS') or os.path.join(root, 'private-words.txt')
+
+
 LOGS = os.path.expanduser('~/Library/Logs/LocalModels')
 PY = shutil.which('python3') or sys.executable or '/usr/bin/python3'   # the PATH's python3 (a stable link, e.g. /opt/homebrew/bin/python3), not a versioned Cellar path
 BINS = ('/opt/homebrew/bin', '/usr/local/bin', os.path.expanduser('~/.local/bin'))
@@ -98,7 +112,7 @@ _HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.pa
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_extensions.py', 'test_code.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_extensions.py', 'test_code.py', 'test_handoff.py', 'test_supervisor.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -169,6 +183,8 @@ def status():
     if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + ('' if mt.get('off') else ' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
     print(f"gateway: {'listening on ' + llmshare.HUB if d['up'] else 'down (localmodels start)'}"
           + (' · stale code: localmodels install' if d['up'] and d['stale'] else ''))
+    gw = dash.gateway_words()
+    if gw: print('  ' + gw[len('gateway: '):])                          # the workers: serving, and draining with what they finish
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
     if mt and mt.get('off'):
@@ -668,52 +684,12 @@ def _loaded(label=LABEL):
     return _launchctl('print', f'gui/{os.getuid()}/{label}').returncode == 0
 
 
-HOT = (os.path.join('localmodels', 'dash.html'),)     # read from disk on every request (web.page): changed alone, replaced in place
-
-
-def code_changes():
-    """The files that differ between this repo's code and the installed copy, repo-relative."""
-    def files(root):
-        return {os.path.relpath(f, root) for f in glob.glob(os.path.join(root, 'localmodels', '*')) if os.path.isfile(f) and not f.endswith('.pyc')}
-    rels = sorted(files(HOME) | files(INSTALLED) | {os.path.join('bin', 'localmodels'), 'LICENSE', os.path.join('.claude-plugin', 'plugin.json')})
-    def same(rel):
-        a, b = os.path.join(HOME, rel), os.path.join(INSTALLED, rel)
-        if not os.path.exists(a) and not os.path.exists(b): return True
-        try: return open(a, 'rb').read() == open(b, 'rb').read()
-        except OSError: return False
-    return [r for r in rels if not same(r)]
-
-
-def hot_swap(changes):
-    """Replace files the gateway reads per request in the installed copy, each atomically: no restart, nothing in flight touched."""
-    for rel in changes:
-        dst = os.path.join(INSTALLED, rel); tmp = dst + '.new'
-        shutil.copy2(os.path.join(HOME, rel), tmp); os.replace(tmp, dst)
-
-
-def deploy():
-    """Copy the hub's code to where launchd runs the door from (macOS keeps background programs out of ~/Documents)."""
-    tmp = INSTALLED + '.new'
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(os.path.join(tmp, 'bin'))
-    shutil.copytree(os.path.join(HOME, 'localmodels'), os.path.join(tmp, 'localmodels'), ignore=shutil.ignore_patterns('__pycache__'))
-    shutil.copy2(os.path.join(HOME, 'bin', 'localmodels'), os.path.join(tmp, 'bin', 'localmodels'))
-    for rel in ('LICENSE', os.path.join('.claude-plugin', 'plugin.json')):    # the dashboard's corner reads them
-        if os.path.exists(os.path.join(HOME, rel)):
-            os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True); shutil.copy2(os.path.join(HOME, rel), os.path.join(tmp, rel))
-    old = INSTALLED + '.old'
-    shutil.rmtree(old, ignore_errors=True)
-    if os.path.exists(INSTALLED): os.replace(INSTALLED, old)
-    os.replace(tmp, INSTALLED)
-    shutil.rmtree(old, ignore_errors=True)
-
-
-def quiet(wait=90, still=3):
+def quiet(wait=90, still=3, slots=False):
     """Wait for a moment with no request passing through the door (for `still` seconds in a row), so a restart cuts
-    nobody off. -> whether it came within `wait` seconds."""
+    nobody off; slots: no slot held by any process either (the migration). -> whether it came within `wait` seconds."""
     t0, calm = time.time(), None
     while True:
-        if llmshare.inflight(): calm = None
+        if llmshare.inflight() or (slots and llmshare.busy_slots()): calm = None
         else:
             calm = calm or time.time()
             if time.time() - calm >= still: return True
@@ -725,8 +701,9 @@ def _plist():
     env = dict(PATH='/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
     for k in ('LOCALMODELS_PORT', 'LMSTUDIO_URL', 'LMSTUDIO_LOGS', 'LOCALMODELS_STATE', 'LMS'):
         if os.environ.get(k): env[k] = os.environ[k]
+    env['LOCALMODELS_PY'] = PY                               # the stable interpreter path a worker is started with
     return dict(Label=LABEL, ProgramArguments=[PY, os.path.join(INSTALLED, 'bin', 'localmodels'), 'gateway'], RunAtLoad=True,
-                KeepAlive=True, ThrottleInterval=10, StandardOutPath=os.path.join(LOGS, 'gateway.log'),
+                KeepAlive=True, ThrottleInterval=10, AbandonProcessGroup=True, StandardOutPath=os.path.join(LOGS, 'gateway.log'),
                 StandardErrorPath=os.path.join(LOGS, 'gateway.log'), EnvironmentVariables=env, SoftResourceLimits=dict(NumberOfFiles=8192))
 
 
@@ -805,13 +782,15 @@ def sandboxed():
     return None
 
 
-def install(wait=90, plugin=False, dry=False, no_claude=False):
+def install(wait=90, plugin=False, dry=False, no_claude=False, force=False):
     uid = f'gui/{os.getuid()}'
     if not dry and sandboxed(): print(f'nothing installed: {sandboxed()}'); return 2
     if dry:
         if os.path.exists(llmshare.MODELS): print(f'would keep the settings: {llmshare.MODELS}')
         else: print(f'would write the settings file {llmshare.MODELS}, fitted to this Mac: {_fitted_words(_fitted())}')
-        print(f"would copy the gateway's code to {INSTALLED} and start it at login as {LABEL} ({PLIST}) with {PY}, after a moment with no request passing through")
+        from . import deploy
+        code, words = deploy.install_gateway(sys.modules[__name__], wait=wait, dry=True, say=lambda w: print('would build ' + w))
+        print(f"{words}; the gateway runs at login as {LABEL} ({PLIST}) with {PY}, from {INSTALLED} -> releases/<digest>")
         if plugin: print("would leave the hub's MCP tools and the rules to the Claude Code plugin (no registration, no signpost line)")
         elif no_claude: print('would register nothing with Claude Code and add no signpost line (--no-claude)')
         else: print(f"would register the hub's MCP tools for every Claude Code session (claude mcp add --scope user local-models), add one signpost line to {SIGNPOST_FILE}, "
@@ -827,43 +806,25 @@ def install(wait=90, plugin=False, dry=False, no_claude=False):
         with open(llmshare.MODELS, 'w') as f: json.dump(fitted, f, indent=1); f.write('\n')
         print(f'0. the settings file {llmshare.MODELS} written, fitted to this Mac: {_fitted_words(fitted)} (edit it; the gateway reloads it on change)')
     else: print(f'0. the settings: {llmshare.MODELS}')
-    running = _loaded() or any(_loaded(o) for o in OLD_LABELS)
-    changes = code_changes() if running and os.path.isdir(INSTALLED) else None
-    hot = bool(changes) and all(c in HOT for c in changes)
-    if hot:                                                 # the page alone: in place, while batches run (a restart waits for quiet)
-        hot_swap(changes)
-        print(f"1. {', '.join(changes)} replaced in place in {INSTALLED} (read per request): no gateway restart, nothing in flight touched; reload the page")
-        r = None
-    elif running and not quiet(wait):
-        print(f'the gateway stayed busy for {wait / 60:.1f} minutes ({len(llmshare.inflight())} requests in flight): nothing changed; '
-              'try again when it is quiet, or: localmodels install --wait 480')
-        return 3
-    if not hot:
-        with llmshare.swapping(wait=120) as got:                    # no load or recycle half done when the door restarts
-            if not got: print('a swap or a reload is under way: try again in a moment'); return 3
-            for o in OLD_LABELS:
-                if _loaded(o):
-                    _launchctl('bootout', f'{uid}/{o}')
-                    try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{o}.plist'))
-                    except OSError: pass
-                    print(f'   (the gateway under its old label {o} is stopped; it restarts as {LABEL})')
-            deploy()
-            print(f'1. gateway code copied to {INSTALLED} ({digest(INSTALLED)})')
-            plist = _plist()
-            try: was = plistlib.load(open(PLIST, 'rb'))
-            except (OSError, ValueError): was = {}
-            changed = was != plist
-            env, before = plist.get('EnvironmentVariables') or {}, was.get('EnvironmentVariables') or {}
-            print('   the LaunchAgent environment: ' + ', '.join(f'{k}={v}' for k, v in env.items() if k != 'PATH') if len(env) > 1 else
-                  '   the LaunchAgent environment: the defaults (PATH only)')
-            for k in sorted(set(before) - set(env)): print(f'   note: {k}={before[k]} was in the LaunchAgent and is not any more (it is not set in this shell)')
-            os.makedirs(os.path.dirname(PLIST), exist_ok=True)
-            with open(PLIST, 'wb') as f: plistlib.dump(plist, f)
-            if _loaded() and changed: _launchctl('bootout', f'{uid}/{LABEL}'); time.sleep(1); r = _launchctl('bootstrap', uid, PLIST)
-            elif _loaded(): r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}')
-            else: r = _launchctl('bootstrap', uid, PLIST)
-    up = any(llmshare.hub_up(fresh=True) or time.sleep(0.5) for _ in range(30))
-    print(f"2. gateway starts at login ({PLIST}): {'listening on ' + llmshare.HUB if up else 'NOT responding: ' + ((r.stderr.strip() if r else '') or 'see ' + os.path.join(LOGS, 'gateway.log'))}")
+    for o in OLD_LABELS:
+        if _loaded(o):
+            _launchctl('bootout', f'{uid}/{o}')
+            try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{o}.plist'))
+            except OSError: pass
+            print(f'   (the gateway under its old label {o} is stopped; it restarts as {LABEL})')
+    from . import deploy
+    plist = _plist()
+    try: was = plistlib.load(open(PLIST, 'rb'))
+    except (OSError, ValueError): was = {}
+    env, before = plist.get('EnvironmentVariables') or {}, was.get('EnvironmentVariables') or {}
+    shown = {k: v for k, v in env.items() if k not in ('PATH', 'LOCALMODELS_PY')}
+    print('   the LaunchAgent environment: ' + (', '.join(f'{k}={v}' for k, v in shown.items()) if shown else 'the defaults (PATH only)'))
+    for k in sorted(set(before) - set(env)): print(f'   note: {k}={before[k]} was in the LaunchAgent and is not any more (it is not set in this shell)')
+    code, words = deploy.install_gateway(sys.modules[__name__], wait=wait, force=force, say=lambda w: print('   ' + w))
+    up = code == 0
+    print(f"1. {words}")
+    if code == 3: return 3
+    print(f"2. gateway starts at login ({PLIST}): {'listening on ' + llmshare.HUB if up else 'NOT serving the new release: see ' + os.path.join(LOGS, 'gateway.log')}")
     if up and retire_loader(dry=True): print('   ' + retire_loader())
     if plugin:
         print("3. the hub's MCP tools come with the Claude Code plugin (its .mcp.json): nothing registered here")
@@ -919,8 +880,13 @@ def uninstall():
         if _loaded(label): _launchctl('bootout', f'{uid}/{label}')
         try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{label}.plist'))
         except OSError: pass
-    shutil.rmtree(INSTALLED, ignore_errors=True)
-    print('1. gateway stopped; it no longer starts at login')
+    n = sweep_workers()                                    # adopted workers are not launchd's children
+    if os.path.islink(INSTALLED): os.remove(INSTALLED)
+    else: shutil.rmtree(INSTALLED, ignore_errors=True)
+    for d in ('releases', 'run', 'peer-slots'): shutil.rmtree(os.path.join(llmshare.SHARED, d), ignore_errors=True)
+    try: os.remove(llmshare.LISTING)
+    except OSError: pass
+    print('1. gateway stopped; it no longer starts at login' + (f' ({n} workers ended)' if n else '') + '; its releases and run state removed')
     _claude('mcp', 'remove', '--scope', 'user', 'local-models')
     print('2. the hub\'s MCP tools are no longer registered')
     if os.path.exists(SIGNPOST_FILE):
@@ -1139,6 +1105,82 @@ def maintenance_cmd(a):
     return 0
 
 
+# ---------------------------------------------------------------- releases and the supervisor
+def build_release(root=None, shared=None):
+    """releases/<D>: an immutable copy of the files a gateway runs (dash.deploy_files) and its RELEASE.json {digest,
+    version, state_protocol, channel, supervisor, built}, built in releases/.tmp-<D>-<pid>/ and renamed into place; an
+    existing D is reused. -> its folder."""
+    from . import dash, supervisor
+    root, shared = root or HOME, shared or llmshare.SHARED
+    d = dash.deploy_digest(root)
+    dest = os.path.join(shared, 'releases', d)
+    if os.path.isfile(os.path.join(dest, 'RELEASE.json')): return dest
+    tmp = os.path.join(shared, 'releases', f'.tmp-{d}-{os.getpid()}')
+    shutil.rmtree(tmp, ignore_errors=True)
+    for rel in dash.deploy_files(root):
+        os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
+        shutil.copy2(os.path.join(root, rel), os.path.join(tmp, rel))
+    if dash.deploy_digest(tmp) != d:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError(f'the copy differs from {root} (a file changed while it was copied): run install again')
+    def stated(rel, name, default):                          # the release's own value, read from its files (not this process's)
+        m = re.search(rf'^{name}\s*=\s*(\d+)', open(os.path.join(tmp, rel)).read(), re.M) if os.path.exists(os.path.join(tmp, rel)) else None
+        return int(m.group(1)) if m else default
+    version = re.search(r"^VERSION\s*=\s*['\"]([^'\"]+)", open(os.path.join(tmp, 'localmodels', '__init__.py')).read(), re.M)
+    with open(os.path.join(tmp, 'RELEASE.json'), 'w') as f:
+        json.dump(dict(digest=d, version=version.group(1) if version else VERSION, state_protocol=stated('localmodels/llmshare.py', 'STATE_PROTOCOL', llmshare.STATE_PROTOCOL),
+                       channel=stated('localmodels/supervisor.py', 'CHANNEL', supervisor.CHANNEL), supervisor=supervisor.supervisor_digest(tmp),
+                       built=round(time.time(), 1)), f)
+    try: os.rename(tmp, dest)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        if not os.path.isfile(os.path.join(dest, 'RELEASE.json')): raise          # else another install built it meanwhile
+    return dest
+
+
+def supervisor_call(op, timeout=300, say=None, **fields):
+    """One operation on the running supervisor's control socket (status, deploy, restart, rollback, upgrade). Its progress
+    lines go to say(words). -> its final reply {done, ok, ...}, or None when no supervisor answers."""
+    import socket
+    path = (llmshare.supervisor() or {}).get('sock')
+    if not path: return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(timeout)
+    try:
+        s.connect(path)
+        s.sendall((json.dumps(dict(op=op, **fields)) + '\n').encode())
+        buf = b''
+        while True:
+            x = s.recv(65536)
+            if not x: return None
+            buf += x
+            while b'\n' in buf:
+                line, buf = buf.split(b'\n', 1)
+                try: m = json.loads(line)
+                except ValueError: continue
+                if m.get('done'): return m
+                if say and m.get('progress'): say(m['progress'])
+    except OSError: return None
+    finally: s.close()
+
+
+def sweep_workers(grace=5.0):
+    """After a bootout: SIGTERM every registered gateway whose lock is still held (an adopted worker is not launchd's
+    child), SIGKILL what is left after `grace` seconds. -> how many were signalled."""
+    import signal as _signal
+    pids = [r['pid'] for r in llmshare.live_gateways() if r['pid'] != os.getpid()]
+    for pid in pids:
+        try: os.kill(pid, _signal.SIGTERM)
+        except OSError: pass
+    end = time.time() + grace
+    while time.time() < end and [r for r in llmshare.live_gateways() if r['pid'] in pids]:
+        time.sleep(0.2); llmshare._live.clear(); llmshare._gw['at'] = 0.0
+    for r in llmshare.live_gateways():
+        if r['pid'] in pids:
+            try: os.kill(r['pid'], _signal.SIGKILL)
+            except OSError: pass
+    return len(pids)
+
+
 def off_cmd(a):
     """localmodels off [--peers] [--force] [reason ...]: switch off (to peers only), then wait (up to 10 min) for the
     instance manager's unload."""
@@ -1171,20 +1213,30 @@ def on_cmd():
     return 0
 
 
-def door(verb):
+def door(verb, a=()):
     uid = f'gui/{os.getuid()}'
     if sandboxed(): print(f'nothing done: {sandboxed()}'); return 2
     if verb == 'start' and _loaded() and llmshare.hub_up(fresh=True): print(f'gateway already listening on {llmshare.HUB}'); return 0
-    if verb in ('stop', 'restart') and _loaded() and not quiet():
-        print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle')
+    sup = llmshare.supervisor()
+    if verb in ('restart', 'rollback') and sup and '--cold' not in a:   # a handoff: no quiet gate, nothing refused or cut
+        r = supervisor_call(verb, say=lambda w: print('  ' + w))
+        print((r or {}).get('words') or (r or {}).get('why') or 'no answer from the supervisor')
+        return 0 if r and r.get('ok') else 1
+    if verb == 'rollback': print('rollback needs the supervisor (an install with releases)'); return 1
+    if verb in ('stop', 'restart') and _loaded() and '--now' not in a and not quiet():
+        print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): left running; retry when idle, or --now')
         return 3
-    if verb in ('stop', 'restart') and _loaded():          # never under a load or a recycle half done (install does the same)
+    if verb in ('stop', 'restart') and (_loaded() or sup):   # never under a load or a recycle half done (install does the same)
         with llmshare.swapping(wait=120) as got:
             if not got: print('a swap or a reload is under way: gateway left running; retry in a moment'); return 3
-            if verb == 'stop':
-                r = _launchctl('bootout', f'{uid}/{LABEL}'); print('gateway stopped until the next login (localmodels start)' if r.returncode == 0 else r.stderr.strip()); return r.returncode
+            if verb == 'stop' or sup:                        # restart --cold: a new run (load_at_start applies)
+                r = _launchctl('bootout', f'{uid}/{LABEL}') if _loaded() else None
+                n = sweep_workers()                          # an adopted worker is not launchd's child
+                if verb == 'stop':
+                    print(('gateway stopped until the next login (localmodels start)' if r is None or r.returncode == 0 else r.stderr.strip()) + (f'; {n} workers ended' if n else ''))
+                    return r.returncode if r is not None else 0
             if not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
-            r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}')
+            r = _launchctl('kickstart', '-k', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)
     elif verb == 'stop': print('gateway not running'); return 0
     elif not os.path.exists(PLIST): print('not installed: localmodels install'); return 1
     elif verb == 'start': r = _launchctl('kickstart', f'{uid}/{LABEL}') if _loaded() else _launchctl('bootstrap', uid, PLIST)   # never -k: a running door is left alone
@@ -1209,6 +1261,18 @@ def run_tests(quiet=False):
         last = (p.stdout.strip().split('\n') or [''])[-1]
         out.append((name, p.returncode == 0, last if not fails else '; '.join(fails)[:300] if p.returncode else last))
         if p.returncode and not fails: out[-1] = (name, False, (p.stderr.strip().split('\n') or ['?'])[-1][:300])
+    old = '/usr/bin/python3'                                  # the handoff suites again under the system's Python 3.9, when it is another
+    if os.path.exists(old) and os.path.realpath(old) != os.path.realpath(PY):
+        try: ok39 = subprocess.run([old, '-c', 'import sys; sys.exit(sys.version_info < (3, 9))'], capture_output=True, timeout=30).returncode == 0
+        except (OSError, subprocess.SubprocessError): ok39 = False
+        for name in (n for n in TESTS if n in ('test_handoff.py', 'test_supervisor.py')) if ok39 else ():
+            path = os.path.join(HOME, 'tests', name)
+            if not os.path.exists(path): continue
+            try: p = subprocess.run([old, path], capture_output=True, text=True, timeout=300)
+            except subprocess.SubprocessError as e: out.append((name[:-3] + ' under 3.9.py', False, str(e))); continue
+            fails = [l.strip()[5:] for l in p.stdout.split('\n') if l.strip().startswith('FAIL')]
+            last = (p.stdout.strip().split('\n') or [''])[-1]
+            out.append((name[:-3] + ' under 3.9.py', p.returncode == 0, '; '.join(fails)[:300] if fails else last))
     if swiftc() and os.path.exists(os.path.join(HOME, 'app', 'tests', 'main.swift')): out.append(app_tests())
     return out
 
@@ -1412,6 +1476,7 @@ def check():
         except (ValueError, AttributeError): pass
     t('the tools answer (MCP)', set(names) == {x['name'] for x in mcp_server.TOOLS}, ', '.join(names))
     t('gateway runs this code', not dash.door()['stale'], 'localmodels install refreshes it' if dash.door()['stale'] else digest(HOME))
+    for name, good, note in supervisor_checks(dash.health(fresh=True)): t(name, good, note)
     av = app_installed()
     if av:                                                 # the menu-bar app, when installed: running, and built from this release
         running = not subprocess.run(['pgrep', '-x', APP_EXE], capture_output=True).returncode
@@ -1421,6 +1486,30 @@ def check():
     return 0 if all(ok) else 1
 
 
+def supervisor_checks(h, sup=None):
+    """The supervisor's items for `localmodels check`, from the serving worker's /hub/health h (and supervisor.json sup):
+    -> [(name, ok, note)]; none for a gateway from before releases."""
+    if not h or 'handoff' not in h: return []
+    from . import deploy, supervisor
+    sup = sup if sup is not None else deploy.supervisor_state()
+    rows = h.get('gateways') or []
+    srv = [r for r in rows if r.get('role') == 'serving']
+    drain = [r for r in rows if r.get('role') == 'draining']
+    out = [('exactly one serving worker', len(srv) == 1, ', '.join(f"gen {r.get('gen')} (pid {r['pid']})" for r in srv) or 'none')]
+    roles, pids = h.get('roles') or {}, {r['pid'] for r in srv}
+    out.append(('each role held by the serving worker', bool(roles) and all(p in pids for p in roles.values()),
+                ', '.join(f'{k}: {v}' for k, v in sorted(roles.items())) or 'no role held'))
+    rel = os.path.join(llmshare.SHARED, 'releases', str(h.get('release') or ''))
+    want = (supervisor.release_info(rel) or {}).get('supervisor')
+    out.append(('the supervisor is alive, with its release\'s digest', bool(sup) and (want is None or sup.get('digest') == want),
+                f"pid {sup.get('pid')}, {sup.get('digest')}" if sup else 'no supervisor holds run/supervisor.lock: workers serve unsupervised'))
+    lst = h.get('listeners') or {}
+    out.append(('both main listeners bound (127.0.0.1 and [::1])', 'v4' in lst and 'v6' in lst,
+                ', '.join(sorted(lst)) + ('' if 'v6' in lst else f"; [::1]: {(sup or {}).get('v6_error') or 'not bound'}")))
+    if drain: out.append(('workers draining', True, '; '.join(f"gen {r.get('gen')} (pid {r['pid']}): {r.get('open', '?')} connections" for r in drain)))
+    return out
+
+
 # ---------------------------------------------------------------- publishing
 def _git(*args, check=True):
     r = subprocess.run(['git', '-C', HOME, *args], capture_output=True, text=True)
@@ -1428,7 +1517,6 @@ def _git(*args, check=True):
     return r.stdout.strip()
 
 
-PRIVATE_WORDS = os.environ.get('LOCALMODELS_PRIVATE_WORDS') or os.path.join(llmshare.SHARED, 'private-words.txt')
 STAMPED = ('localmodels/__init__.py', '.claude-plugin/plugin.json')   # the files a release commit changes, and nothing else
 
 
@@ -1758,8 +1846,8 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'pictures': (('--out',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
-    'install': (('--wait',), ('--plugin', '--dry', '--no-claude')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
-    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'install': (('--wait',), ('--plugin', '--dry', '--no-claude', '--force')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ('--now',)),
+    'restart': ((), ('--cold', '--now')), 'rollback': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 
@@ -1846,10 +1934,13 @@ def main(argv):
         return batch(dict(jobs=a[0], dir=opt(a, '--dir'), parallel=int(par) or None))
     if verb == 'check': return check()
     if verb == 'install':
-        w = num(a, '--wait', 1.5); return install(w * 60, plugin='--plugin' in a, dry='--dry' in a, no_claude='--no-claude' in a) if w is not None else 2
+        w = num(a, '--wait', 1.5); return install(w * 60, plugin='--plugin' in a, dry='--dry' in a, no_claude='--no-claude' in a, force='--force' in a) if w is not None else 2
     if verb == 'uninstall': return uninstall()
-    if verb in ('start', 'stop', 'restart'): return door(verb)
+    if verb in ('start', 'stop', 'restart', 'rollback'): return door(verb, a)
     if verb == 'gateway':
+        if '--worker' in a:                                  # a worker, started by the supervisor (worker.py)
+            from . import worker
+            return worker.main(a)
         from . import gateway
         return gateway.main(a)
     if verb == 'mcp':
