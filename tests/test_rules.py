@@ -571,7 +571,7 @@ def test_cli_args():
         for argv in (('publish', '--help'), ('uninstall', '--help'), ('install', '-h'), ('--help',), ('-h',)):
             code, did, out = run(*argv)
             t(f'{" ".join(argv)}: the help, nothing run', code == 0 and not did and 'localmodels publish' in out, (argv, code, did))
-        for argv in (('install', '--bogus'), ('publish', '--version'), ('prune', '--days', '-1'), ('uninstall', '--force'), ('stop', '--now')):
+        for argv in (('install', '--bogus'), ('publish', '--version'), ('prune', '--days', '-1'), ('uninstall', '--force'), ('start', '--now')):
             code, did, out = run(*argv)
             t(f'{" ".join(argv)}: refused with exit 2, nothing run', code == 2 and not did, (argv, code, did, out[-120:]))
         code, did, out = run('install', '--wait=480')

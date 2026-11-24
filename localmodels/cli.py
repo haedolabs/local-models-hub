@@ -65,15 +65,20 @@
   localmodels jobs               recent local-agent jobs started through the gateway
   localmodels prune [--days 30]  remove local-agent job folders and logs older than N days (they hold prompts and answers)
   localmodels check              self-test: sandbox suites, then live checks against the installed gateway
-  localmodels install [--wait MINUTES] [--plugin] [--dry] [--no-claude]
-                                 set the hub up on this Mac; run it again after changing the hub's code (it waits for a
-                                 moment with no request in flight: 1.5 minutes unless --wait says longer; a change to the
-                                 dashboard page alone is replaced in place at once, with no restart).
-                                 --plugin: installed as a Claude Code plugin, which brings the tools. --dry: say what
-                                 would be done, write nothing. --no-claude: no MCP registration, no signpost line
+  localmodels install [--wait MINUTES] [--force] [--plugin] [--dry] [--no-claude]
+                                 set the hub up on this Mac; run it again after changing the hub's code: it builds a
+                                 release (releases/<digest>) and hands off to a new gateway worker, nothing refused or
+                                 cut. A gateway from before releases is migrated once, at a moment with no request in
+                                 flight (1.5 minutes unless --wait says longer). --force: a release marked bad.
+                                 --plugin: installed as a Claude Code plugin, which brings the tools. --dry: the path it
+                                 would take, nothing written. --no-claude: no MCP registration, no signpost line
   localmodels uninstall          undo install
-  localmodels start | stop | restart     the gateway (start is a no-op when running; restart waits for no requests in flight)
-  localmodels gateway            run the gateway in the foreground (what launchd runs)
+  localmodels start               the gateway (a no-op when it runs)
+  localmodels restart [--cold]   a handoff to a new worker of the same release (--cold: waits for no request in flight,
+                                 then stops and starts the supervisor: a new run, so load_at_start applies)
+  localmodels rollback           a handoff back to the last good release
+  localmodels stop [--now]       the supervisor and every worker, once no request is in flight (--now: at once)
+  localmodels gateway            the supervisor, in the foreground (what launchd runs); --check validates a release's
   localmodels mcp                the MCP server (Claude Code starts it)
   localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check, the privacy and secrets
                                  checks, then the version stamped, committed, tagged and pushed (--dry: the checks only)
@@ -1841,8 +1846,8 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'pictures': (('--out',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
-    'install': (('--wait',), ('--plugin', '--dry', '--no-claude', '--force')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ()),
-    'restart': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'install': (('--wait',), ('--plugin', '--dry', '--no-claude', '--force')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ('--now',)),
+    'restart': ((), ('--cold', '--now')), 'rollback': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 
