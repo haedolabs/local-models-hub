@@ -202,6 +202,8 @@ class Supervisor:
         self.run, self.started, self.sel = None, now(), selectors.DefaultSelector()
         self.wake_r, self.wake_w = os.pipe()
         self.sock, self.path, self.replace_at, self.no_worker_since, self.starting = None, None, 0.0, None, True
+        self.replace_fails = 0               # replacements in a row that failed while nothing served
+        self.stopping = False
 
     # ---- start
     def start(self):
@@ -216,6 +218,7 @@ class Supervisor:
         old = self.restore()
         self.signals()
         self.control()
+        self.save()                                          # the control socket is known before the bind: install's 'hold' finds it
         live = [r for r in registry() if r.get('role') in ('serving', 'draining', 'warming')]
         self.run = (max(live, key=lambda r: float(r.get('started') or 0)).get('run') if live else None) or (old.get('run') if live else None) \
             or f'{os.getpid()}-{int(self.started)}'
@@ -592,8 +595,11 @@ class Supervisor:
 
     def failed(self, b, why, abort=False):
         if abort: self.abort(b)
-        name = os.path.basename(self.deploy['release'])
-        if not abort and name not in (self.state.get('bad') or []) and self.deploy['why'] != 'replace':
+        name, why_ = os.path.basename(self.deploy['release']), self.deploy['why']
+        if why_ in ('replace', 'start', 'fail-open retry') and not self.serving():   # nothing serves: the next try waits (BACKOFF)
+            self.replace_fails += 1
+            self.replace_at = now() + BACKOFF[min(self.replace_fails, len(BACKOFF) - 1)]
+        if not abort and name not in (self.state.get('bad') or []) and (why_ != 'replace' or self.replace_fails >= 3):
             self.state.setdefault('bad', []).append(name)
         tail = ''
         if b and b.proc is not None and b.proc.poll() is not None: tail = f' (exit status {b.proc.returncode})'
@@ -644,6 +650,7 @@ class Supervisor:
     def stop(self):
         """SIGTERM with no detach marker (bootout, logout): every worker stops within the deadline, then this one exits."""
         log('stopping: the workers stop within 3 s')
+        self.stopping = True                                 # their exits are expected: no probation failure, no replacement
         try: self.sock.close(); os.remove(self.path)
         except OSError: pass
         for s in self.listeners.values():
@@ -675,7 +682,7 @@ class Supervisor:
         if w.pid not in self.workers: return
         del self.workers[w.pid]
         w.exited = True
-        expected = w.role in ('draining', 'gone', 'aborted', 'warming')    # a warming worker's end is the deploy's to judge
+        expected = w.role in ('draining', 'gone', 'aborted', 'warming') or self.stopping   # a warming worker's end is the deploy's to judge
         log(f"gen {w.gen} (pid {w.pid}) exited" + (f' with status {status}' if status is not None else '') + ('' if expected else ' unexpectedly'))
         if self.deploy and self.deploy.get('worker') is w: self.advance()
         if not expected and w.role == 'serving':
@@ -726,7 +733,10 @@ class Supervisor:
         if not self.serving() and not self.deploy and t >= self.replace_at and not self.state.get('failopen'):
             exits = [x for x in self.exits if t - x < 600]
             d = os.path.join(SHARED, 'releases', self.state['last_good']) if len(exits) >= 3 and self.state.get('last_good') else None
-            if not [w for w in self.workers.values() if w.role == 'warming']: self.begin(d or self.release_dir(None), 'replace', urgent=True)
+            target = d or self.release_dir(None)
+            if os.path.basename(target) in (self.state.get('bad') or []): pass   # no release left to try: fail-open comes
+            elif not [w for w in self.workers.values() if w.role == 'warming']: self.begin(target, 'replace', urgent=True)
+        if self.serving(): self.replace_fails = 0
         if live: self.no_worker_since = None
         elif self.no_worker_since is None: self.no_worker_since = t
         elif t - self.no_worker_since > FAILOPEN_AFTER and not self.state.get('failopen'): self.failopen()

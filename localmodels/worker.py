@@ -398,7 +398,21 @@ class Worker:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
 
+def check():
+    """`gateway --worker --check`: every module of this release imports, and the gateway answers its own endpoints on a
+    private port (the warm-up's self-test). Registers nothing, sweeps nothing, binds no shared port. -> 0 or 1."""
+    try:
+        for name in LAZY: importlib.import_module(f'localmodels.{name}')
+        Worker.self_test(None)
+        print(f'worker check ok: {gateway.code_digest()}', flush=True)
+        return 0
+    except Exception as e:                                   # not recorded: the check's answer is its output and exit code
+        print(f'worker check failed: {type(e).__name__}: {e}', flush=True)
+        return 1
+
+
 def main(argv=()):
+    if '--check' in argv: return check()
     if not os.environ.get('LOCALMODELS_LISTEN'):
         print('gateway --worker runs only under the supervisor: localmodels gateway', flush=True)
         return 2
