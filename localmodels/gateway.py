@@ -42,7 +42,7 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import HOME, VERSION, admission, crashes, dash, errors, icon, llmshare, maint, names, peers, recycle, runs, web, whois
+from . import HOME, VERSION, admission, affinity, crashes, dash, errors, icon, llmshare, maint, names, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
@@ -499,7 +499,10 @@ class Door(http.server.BaseHTTPRequestHandler):
             except OSError: pass
             sent_along = {k: llmshare.clean(v, 120) for k, v in ((k, self.headers.get(k)) for k in LINK_PASS) if v}
             sent_along.update({'X-Project': project, 'X-Kind': kind, **({'X-Session': who['session']} if who.get('session') else {})})
-            need = admission.estimate(body, j, admission.window(model), not path.split('?')[0].rstrip('/').endswith('embeddings'))   # its context; room[0]: why it last waited for room
+            embeds = path.split('?')[0].rstrip('/').endswith('embeddings')
+            need = admission.estimate(body, j, admission.window(model), not embeds)   # its context; room[0]: why it last waited for room
+            akey = None if embeds else affinity.key(j, model)                       # its conversation: back to the copy that served it
+            prefer = None                                                           # (affinity.py; a digest, in memory only)
             try: asked = max(0, int(next((j[k] for k in ('max_tokens', 'max_completion_tokens', 'max_output_tokens') if j.get(k) is not None), 0)))
             except (TypeError, ValueError, OverflowError): asked = 0          # the answer it asked for, in tokens (0: none said)
 
@@ -533,7 +536,8 @@ class Door(http.server.BaseHTTPRequestHandler):
                                f'{base} is being recycled' if recycle.draining() else
                                f'{base}: its instance stalled and is being reloaded' if crashes.stalled_copies(model) else f'no instance of {base} is loaded (localmodels use {base})')
                         code, _ = self._send(503, dict(error=f'{why}; retry in {RETRY_AFTER} s'), retry_after=RETRY_AFTER); note = why; break
-                    with llmshare.slot_any(lambda: self._candidates(model, skip, kind), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
+                    prefer = affinity.preferred(akey)
+                    with llmshare.slot_any(lambda: affinity.order(akey, self._candidates(model, skip, kind)), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
                                            kind=kind, need=need, fits=admission.fits, waiting=waiting) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'client closed the connection while queued'; break
@@ -558,6 +562,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                     stalled, self._stall = self._stall, None
                     if not why:                                         # answered, or a genuine error passed through
                         if peer: peers.LINK.answered(chosen)
+                        if code == 200: affinity.remember(akey, chosen)
                         note = getattr(self, '_note', None) or note; break
                     if peer and not self._sent and code != 499 and len(skip) < 16:   # the peer could not take it, and nothing reached
                         skip.add(peer); note = f'requeued locally: {why}'             # the program: back in the queue, here or another peer
@@ -596,7 +601,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                      seconds=round(time.time() - t0, 2), waited=round(held + (waited or 0), 2), prompt_tokens=p, completion_tokens=c,
                      bytes=admission.prompt_bytes(body), ctx=need, **({'wait_for': room[0]} if room[0] else {}),   # sizes only, never content
                      **({'held': round(held, 2)} if held else {}), **({'note': note} if note else {}), **({'step': step} if step else {}),
-                     **({'tries': tries} if tries > 1 else {}), **run, **({'peer': peers.split(chosen)[1]} if peers.split(chosen)[1] else {}),
+                     **({'tries': tries} if tries > 1 else {}), **({'affinity': 'same' if chosen == prefer else 'moved'} if prefer and code == 200 else {}), **run, **({'peer': peers.split(chosen)[1]} if peers.split(chosen)[1] else {}),
                      **({'from': front} if front else {})))
 
     def forward(self, method, path, body, stream, rename=None, model=None, peer=None, along=None, copy=None):

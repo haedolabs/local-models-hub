@@ -140,8 +140,9 @@ def run(box):
     gateway.UP, gateway.PORT = f'http://127.0.0.1:{up.server_address[1]}', door.server_address[1]
     url = f'http://localhost:{gateway.PORT}'
 
-    def ask(model=F, tag=None, kind='test', timeout=60, path='/v1/chat/completions', headers=None, pad=0, max_tokens=None):
-        body = dict(model=model, messages=[{'role': 'user', 'content': 'x' * pad}] if pad else [], tag=tag, **({'max_tokens': max_tokens} if max_tokens else {}))
+    def ask(model=F, tag=None, kind='test', timeout=60, path='/v1/chat/completions', headers=None, pad=0, max_tokens=None, messages=None):
+        body = dict(model=model, messages=messages if messages is not None else [{'role': 'user', 'content': 'x' * pad}] if pad else [], tag=tag,
+                    **({'max_tokens': max_tokens} if max_tokens else {}))
         req = urllib.request.Request(url + path, data=json.dumps(body).encode(),
                                      headers={'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': kind, **(headers or {})})
         try: r = urllib.request.urlopen(req, timeout=timeout); return r.status, json.load(r), dict(r.headers)
@@ -685,6 +686,44 @@ def run(box):
         finally: gateway.PORT = port_was
         t("a start that finds the port taken returns 1 and leaves the running gateway's in-flight markers", code2 == 1 and os.path.exists(mine), (code2, os.path.exists(mine)))
         os.remove(mine)
+        print("prefix affinity (affinity.py): a conversation's follow-ups go back to the copy that served it, while it has a free slot")
+        from localmodels import affinity
+        affinity._seen.clear(); plan()
+        conv = lambda claim, *more: [{'role': 'system', 'content': 'You check claims.'}, {'role': 'user', 'content': claim}] + list(more)
+        turn = ({'role': 'assistant', 'content': 'reading'}, {'role': 'user', 'content': 'tool result'})
+        on = lambda tag: next((s[0] for s in Fake.seen if s[1] == tag), None)
+
+        def busy(tag, messages):                           # one slow request holds a copy's only slot
+            th = threading.Thread(target=ask, kwargs=dict(tag=tag, messages=messages)); th.start()
+            until(lambda: any(s[1] == tag for s in Fake.seen), 10)
+            return th
+        plan('slow')
+        th = busy('hold-1', conv('another conversation'))
+        code1, _, _ = ask(tag='a1', messages=conv('claim 1')); th.join()
+        code2, _, _ = ask(tag='a2', messages=conv('claim 1', *turn))
+        row2 = rows_logged()[0]
+        code3, _, _ = ask(tag='b1', messages=conv('claim 2'))
+        row3 = rows_logged()[0]
+        t('copy 1 busy: the first turn goes to copy 2', code1 == 200 and on('hold-1') == F and on('a1') == F2, Fake.seen)
+        t('its follow-up goes back to copy 2 with both copies free (without the rule, copy 1)', code2 == 200 and on('a2') == F2
+          and row2.get('affinity') == 'same', (on('a2'), row2.get('affinity')))
+        t('a new conversation with the same system prompt is not tied to it: copy 1, nothing preferred', code3 == 200 and on('b1') == F
+          and 'affinity' not in row3, (on('b1'), row3.get('affinity')))
+        plan('slow')
+        th = busy('hold-2', conv('claim 1', *turn, *turn))
+        t0_ = time.time(); code4, _, _ = ask(tag='a3', messages=conv('claim 1', *turn, *turn, *turn)); took = time.time() - t0_; th.join()
+        row4 = rows_logged(2)
+        row4 = next((r_ for r_ in row4 if r_.get('seconds', 9) < 2), row4[-1])
+        t('its copy busy: the follow-up takes the other copy at once and never waits for it', code4 == 200 and on('hold-2') == F2 and on('a3') == F
+          and took < 2 and row4.get('affinity') == 'moved', (on('hold-2'), on('a3'), round(took, 2), row4.get('affinity')))
+        plan()
+        n_ = len(affinity._seen)
+        ask(tag='e1', path='/v1/embeddings', messages=conv('claim 3'))
+        t('embeddings are never keyed', 'affinity' not in rows_logged()[0] and len(affinity._seen) == n_ == 3, (rows_logged()[0].get('affinity'), n_, len(affinity._seen)))
+        t('only digests and copy names are kept: no prompt text in memory or in the row', all(len(k) == 24 and isinstance(v[0], str) for k, v in affinity._seen.items())
+          and 'claim' not in json.dumps(rows_logged(6)) and 'claim' not in repr(affinity._seen), list(affinity._seen.items())[:1])
+        affinity._seen.clear()
+
         print('the icon: a PNG at the standard paths, drawn from the theme tokens')
         import struct, zlib
         from localmodels import icon

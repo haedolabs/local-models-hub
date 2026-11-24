@@ -1587,11 +1587,46 @@ def test_pictures(box):
     finally: names.presenting = real
 
 
+def test_affinity():
+    print("prefix affinity: a conversation's key from its opening, in every API's shape; the copy that served it first, if it is a candidate")
+    from localmodels import affinity
+    affinity._seen.clear()
+    sys_, u1, u2 = {'role': 'system', 'content': 'S'}, {'role': 'user', 'content': 'task 1'}, {'role': 'user', 'content': 'task 2'}
+    more = [{'role': 'assistant', 'content': 'a'}, {'role': 'user', 'content': 'b'}]
+    k = affinity.key(dict(model=B, messages=[sys_, u1]))
+    t('chat: every turn of one conversation has its key', k and affinity.key(dict(model=B, messages=[sys_, u1] + more)) == k)
+    t('chat: another task under the same system prompt, or another model, has another key',
+      affinity.key(dict(model=B, messages=[sys_, u2])) != k and affinity.key(dict(model='other/model', messages=[sys_, u1])) != k)
+    t('chat: leading system and developer messages are all part of the opening',
+      affinity.key(dict(model=B, messages=[sys_, {'role': 'developer', 'content': 'D'}, u1])) != k)
+    a = affinity.key(dict(model=B, system='S', messages=[u1])); a2 = affinity.key(dict(model=B, system='S', messages=[u1] + more))
+    t('Anthropic messages: the system field and the first message', a and a == a2 and affinity.key(dict(model=B, system='T', messages=[u1])) != a)
+    r = affinity.key(dict(model=B, instructions='S', input=[u1])); r2 = affinity.key(dict(model=B, instructions='S', input=[u1] + more))
+    t('Responses: instructions and the first input item', r and r == r2)
+    long_ = 'x' * affinity.PREFIX_CHARS
+    t('a prompt as one string: its first PREFIX_CHARS characters', affinity.key(dict(model=B, prompt=long_ + 'tail one')) == affinity.key(dict(model=B, prompt=long_ + 'tail two'))
+      and affinity.key(dict(model=B, input='hello')) != affinity.key(dict(model=B, input='hullo')))
+    t('nothing to key on: None', affinity.key(dict(model=B, messages=[])) is None and affinity.key(dict(model=B)) is None and affinity.key('x') is None
+      and affinity.key(dict(model=B, messages=[{'role': 'user', 'content': ''}])) is None)
+    t('the key is a digest: no prompt text in it', len(k) == 24 and 'task' not in k)
+    t('nothing remembered: the order is kept', affinity.order(k, [B, C2]) == [B, C2])
+    affinity.remember(k, C2)
+    t('remembered: its copy first, the rest in their order', affinity.order(k, [B, C2, 'm on peer']) == [C2, B, 'm on peer'])
+    t('its copy not a candidate (down, draining, stalled, skipped): the order is kept', affinity.order(k, [B, 'm on peer']) == [B, 'm on peer'])
+    affinity._seen[k] = (C2, time.time() - affinity.TTL - 1)
+    t('after TTL it is forgotten', affinity.preferred(k) is None and k not in affinity._seen)
+    size = affinity.SIZE; affinity.SIZE = 3
+    for i in range(5): affinity.remember(f'k{i}', B)
+    t('at most SIZE conversations, the least recently used dropped first', list(affinity._seen) == ['k2', 'k3', 'k4'])
+    affinity.SIZE = size; affinity._seen.clear()
+
+
 def main():
     box = tempfile.mkdtemp(prefix='localmodels-rulestest-')
     try:
         sandbox(box)
         test_recycle()
+        test_affinity()
         test_admission(box)
         test_listing(box)
         test_server_probe(box)
