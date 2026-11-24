@@ -29,7 +29,8 @@ it once nothing of it is loaded, after LM Studio is up (its daemon started if it
 it: at most 3 tries, 30 s apart, then it says how to load it by hand. Once loaded (or unloaded later by a person), it
 is not loaded at start again until the door starts again. While the login loader from before the hub is installed
 (com.local-models.load-at-login), the keeper leaves loading to it; `localmodels install` retires that loader once a
-family is loaded at start, so one loader runs, never two.
+family is loaded at start, so one loader runs, never two. On a dedicated Mac no load waits for free memory (room_for):
+at start, after a crash, or a missing replica, it waits only for the GPU's wired limit.
 """
 import json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
@@ -39,6 +40,7 @@ GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resourc
 GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # sets the GPU's limit at every boot (a person installs it)
 LOADER = os.path.expanduser('~/Library/LaunchAgents/com.local-models.load-at-login.plist')   # a dedicated Mac's loader from before the hub
 START_TRIES, START_GAP = 3, 30                            # loads tried at start, and seconds between them
+KV_ROOM = 1.5                                             # GiB an instance needs within the GPU's limit beside its weights, at least
 _gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
 _start, _woke, _sizes = {}, {'at': 0.0}, {}              # this door run: each family's load at start; LM Studio started; sizes on disk
 
@@ -125,12 +127,12 @@ def gpu_words(g, size_gb):
     if not g or not size_gb or not g.get('limit_gb'): return None
     total = g.get('total_gb', 0)
     room = int(total) - 8                                    # what the GPU may hold with 8 GB left to macOS and the apps
-    if size_gb + 1.5 > g['limit_gb']:
-        if size_gb + 1.5 > room:
+    if size_gb + KV_ROOM > g['limit_gb']:
+        if size_gb + KV_ROOM > room:
             return f"model needs {size_gb:.1f} GiB + KV cache, above the maximum GPU wired limit for this host ({room} GiB): use a smaller quantization"
         return (f"GPU wired limit {g['limit_gb']:.0f} GiB < model {size_gb:.1f} GiB + KV cache: run `sudo sysctl iogpu.wired_limit_mb={room * 1024}`, "
                 "then restart LM Studio; the value resets on reboot (`localmodels peer gpu-limit` writes the boot LaunchDaemon)")
-    if g.get('set') and not g.get('boot') and size_gb + 1.5 > total * (0.75 if total >= 36 else 2 / 3):
+    if g.get('set') and not g.get('boot') and size_gb + KV_ROOM > total * (0.75 if total >= 36 else 2 / 3):
         return (f"GPU wired limit {g['limit_gb']:.0f} GiB is set at runtime only and resets on reboot: "
                 "`localmodels peer gpu-limit` writes the boot LaunchDaemon")
     return None
@@ -160,6 +162,26 @@ def free_gb():
     get = lambda k: int((re.search(rf'{k}:\s+(\d+)', vm) or [0, 0])[1])
     held = get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')
     return (total - held * page) / 2**30                   # what programs hold (models included), not the file cache
+
+
+def room_for(f, size, room, rows=None):
+    """Why an instance of `size` GiB of family settings `f` cannot be loaded on this Mac now, in words, or None when it
+    can: the test before every load the keeper makes (load_at_start, crash recovery, a missing replica; a recycle reloads
+    what it has just unloaded and asks nothing). A family with "load_at_start" marks a dedicated Mac: it waits only until
+    the GPU's wired limit holds its weights and KV cache beside what is loaded (rows: the listing, the last in hand by
+    default). What other programs hold there is for macOS to compress or swap, as it does at every recycle, and waiting
+    for it to be free never ends: macOS fills freed memory with caches and decompressed pages (on the 48 GiB M4 Pro, 9.0
+    GiB in use a second after a crash and 13.2 GiB an hour later, while the reload waited for 39.2 GiB free). Any other
+    family waits until its weights and `room` (headroom_gb) are free."""
+    if not size: return None
+    if isinstance(f, dict) and f.get('load_at_start'):
+        g, listed = gpu(), (llmshare.loaded() if rows is None else rows)
+        weights = sum(gb(r.get('size')) for r in listed)
+        if g.get('limit_gb') and weights + size + KV_ROOM * (len(listed) + 1) > g['limit_gb']:
+            return f"GPU wired limit {g['limit_gb']:.0f} GiB < {size:.1f} GiB + KV cache" + (f' beside {weights:.1f} GiB loaded' if listed else '')
+        return None
+    free = free_gb()
+    return f'{free:.0f} GiB free, an instance needs {size + room:.0f} GiB incl. headroom' if free < size + room else None
 
 
 def downloaded():
@@ -343,9 +365,9 @@ def keep():
             if base not in ids or c in ids: continue        # it changed meanwhile
             blocked = crashes.load_blocked(base, conditions())
             if blocked: did.append(f'{c}: load skipped: {blocked}'); break
-            first, free = ids[base], free_gb()
-            if free < gb(first['size']) + room:
-                did.append(f"{c}: load deferred: {free:.0f} GB free, an instance needs {gb(first['size']) + room:.0f} GB incl. headroom"); break
+            why = room_for(f, gb(ids[base]['size']), room, list(ids.values()))
+            if why: did.append(f"{c}: load deferred: {why}"); break
+            first = ids[base]
             ok, out = load(f.get('key') or first['key'], c, f.get('context') or first['context'], f.get('parallel') or first['parallel'])
             did.append(f'{c} loaded' if ok else f'{c}: load failed: {refused(out) or out[-200:]}')
         if job and ready: did += _recycle(job, fams)
@@ -377,19 +399,16 @@ def _size_of(key):
 def at_start(b, f, have, room):
     """Whether to load a family marked load_at_start now: -> (load now, words or None). Not when any copy of it is loaded
     (then this start is done), when it was loaded or given up on in this door run, while the login loader from before the
-    hub is installed (it loads it), when LM Studio refused it and nothing has changed, when the GPU may not hold it yet,
-    when there is not room, or during the pause after a failed try."""
+    hub is installed (it loads it), when LM Studio refused it and nothing has changed, while the GPU's wired limit does not
+    hold it yet (room_for: a dedicated Mac waits for no free memory), or during the pause after a failed try."""
     s = _start.setdefault(b, dict(tries=0, next=0.0, done=False))
     if any(llmshare.family(i) == b for i in have): s['done'] = True; return False, None
     if s['done']: return False, None
     if os.path.exists(LOADER): return False, f'{b}: load_at_start deferred to LaunchAgent com.local-models.load-at-login (`localmodels install` retires it)'
     blocked = crashes.load_blocked(b, conditions())
     if blocked: return False, f'{b}: load_at_start blocked: {blocked}'
-    size, g = _size_of(f.get('key') or b), gpu()
-    if size and g.get('limit_gb') and size + 1.5 > g['limit_gb']:
-        return False, f"{b}: load_at_start waiting for GPU wired limit ({g['limit_gb']:.0f} GiB < {size:.1f} GiB + KV cache)"
-    free = free_gb()
-    if size and free < size + room: return False, f'{b}: load_at_start waiting for memory: {free:.0f} GiB free, {size + room:.0f} GiB required (incl. headroom_gb)'
+    why = room_for(f, _size_of(f.get('key') or b), room)  # a dedicated Mac's: the GPU's wired limit, never free memory
+    if why: return False, f'{b}: load_at_start waiting: {why}'
     if time.time() < s['next']: return False, None
     return True, None
 
@@ -534,11 +553,12 @@ def _again(job, room):
     base, did, t0, tried = job['base'], [], time.time(), False
     blocked = crashes.load_blocked(base, conditions())
     if blocked: return [f'{base}: crash recovery reload skipped: {blocked}']     # it would be refused again: nothing has changed
+    f = (llmshare.settings().get('families') or {}).get(base)
     for c in job['ids']:
-        if c in {r['id'] for r in llmshare.loaded(fresh=True)}: continue
-        need, free = (gb(job['size']) + room if job['size'] else 0), free_gb()
-        if free < need:
-            why = f'{free:.0f} GB free, an instance needs {need:.0f} GB incl. headroom'
+        rows = llmshare.loaded(fresh=True)
+        if c in {r['id'] for r in rows}: continue
+        why = room_for(f, gb(job['size']), room, rows)     # a dedicated Mac's reload waits only for the GPU's wired limit
+        if why:
             crashes.waiting(base, why); did.append(f'{c} crashed; reload deferred: {why}'); return did
         if not tried: crashes.trying(base); tried = True
         t1 = time.time()

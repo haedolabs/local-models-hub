@@ -175,6 +175,36 @@ def run(box):
       jobs == [] and crashes._read(fresh=True)['down'][B]['state'] == 'left down' and 'one instance' in crashes._read(fresh=True)['down'][B]['why'], crashes._read(fresh=True)['down'].get(B, {}).get('why'))
     crashes.swapped(B); crashes.watch([row(B), row(C2)]); hour_passes()
 
+    print('the keeper on a dedicated Mac (a family with load_at_start): a load waits for the GPU wired limit, not for free memory')
+    shared, real_gpu = llmshare.settings, models.gpu
+    dedicated = lambda: dict(families={B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False, load_at_start=True)}, batch_at_once=8, headroom_gb=4)
+    gpu = {'v': dict(limit_gb=96.0, set=True, total_gb=128.0, boot=True)}
+    models.gpu = lambda: gpu['v']
+    free[0] = 35.0
+    t('a family on a shared Mac waits until its weights and headroom_gb are free',
+      models.room_for(shared()['families'][B], 35.16, 4, rows=[]) == '35 GiB free, an instance needs 39 GiB incl. headroom', models.room_for(shared()['families'][B], 35.16, 4, rows=[]))
+    t('...a dedicated one only until the GPU wired limit holds its weights and KV cache beside what is loaded',
+      models.room_for(dedicated()['families'][B], 35.16, 4, rows=[]) is None
+      and models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]) is None, models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]))
+    gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
+    t('...and says so when it does not (a second replica beside the first on a 40 GiB limit)',
+      models.room_for(dedicated()['families'][B], 35.16, 4, rows=[]) is None
+      and models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]) == 'GPU wired limit 40 GiB < 35.2 GiB + KV cache beside 37.8 GiB loaded',
+      models.room_for(dedicated()['families'][B], 35.16, 4, rows=[row(B)]))
+    llmshare.settings, free[0] = dedicated, 20.0                     # measured on the 48 GiB M4 Pro: 35 to 39 GiB free a second after a crash
+    gpu['v'] = dict(limit_gb=96.0, set=True, total_gb=128.0, boot=True)
+    crash([B, C2], 0); jobs = fresh([]); done.clear(); models._again(jobs[0], 4)
+    t('a crash: both copies reloaded at once, with 20 GiB free (macOS compresses or swaps the rest, as at every recycle)',
+      done == [(B, 65536, 4), (C2, 65536, 4)] and not crashes.reloading(B), (done, crashes._read(fresh=True).get('down')))
+    crashes.watch([row(B), row(C2)]); hour_passes()
+    gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
+    crash([B, C2], 0); jobs = fresh([]); done.clear(); models._again(jobs[0], 4)
+    d = crashes._read(fresh=True).get('down', {}).get(B, {})
+    t('a GPU limit that holds one: the first copy serves at once, the second waits for the limit, and the words say why',
+      done == [(B, 65536, 4)] and d.get('state') == 'waiting for room' and 'GPU wired limit 40 GiB' in (d.get('why') or '') and crashes.down_copies(B) == {C2}, (done, d))
+    llmshare.settings, models.gpu, free[0] = shared, real_gpu, 100.0
+    crashes.swapped(B); crashes.watch([row(B), row(C2)]); hour_passes()
+
     open(log, 'a').write(UNLOAD.replace('2026-11-06 00:27:57', stamp(700)).replace(f'model: {B}', f'model: {C2}').replace(f'[{B}]', f'[{C2}]'))
     t('copy 2 unloaded by hand: left alone', crashes.watch([row(B)]) == [] and not crashes._read(fresh=True).get('down'))
     open(log, 'a').write(f'[{stamp(800)}][DEBUG] Fatal Python error: Segmentation fault\n')

@@ -246,7 +246,7 @@ def test_keeper(box):
     L.settings = lambda: dict(families=fams, batch_at_once=4, headroom_gb=4)
     L.read_ok, L.busy_slots, L.api_models = (lambda: True), (lambda: {}), (lambda timeout=3: {})
     L.loaded = lambda fresh=False, force=False: list(state['rows'])
-    models.free_gb, models.ensure_server, models.conditions = (lambda: 45.0), (lambda *a, **k: True), (lambda: (1.0, 40960))
+    models.free_gb, models.ensure_server, models.conditions = (lambda: 30.0), (lambda *a, **k: True), (lambda: (1.0, 40960))   # less than its weights and headroom_gb
     models.downloaded = lambda: [dict(modelKey=F, sizeBytes=int(37.75 * 2**30), type='llm')]
     models.LOADER = os.path.join(box, 'no-such-agent.plist')
     L.SWAP_LOCK = os.path.join(box, 'swap.lock')
@@ -258,7 +258,7 @@ def test_keeper(box):
     t('the GPU may not hold it yet: no load, and the words say it waits for the limit', not [c for c in calls if c[0] == 'load'] and any('GPU' in x for x in w), w)
     gpu['v'] = dict(limit_gb=40.0, set=True, total_gb=48.0, boot=True)
     w = models.keep()
-    t('the limit is up: the first copy is loaded, as the family says (identifier, context, slots)',
+    t('the limit is up: the first copy is loaded, as the family says (identifier, context, slots), with 30 GiB free (a dedicated Mac waits for no free memory)',
       [c for c in calls if c[0] == 'load'] == [('load', F, '--identifier', F, '-c', '65536', '--parallel', '4', '-y')], calls)
     calls.clear(); models.keep()
     t('a load that failed is tried again only after 30 s', not [c for c in calls if c[0] == 'load'], calls)
