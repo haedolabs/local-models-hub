@@ -1133,8 +1133,8 @@ def test_privacy_check(box):
     from localmodels import cli
     repo, origin = os.path.join(box, 'repo'), os.path.join(box, 'origin.git'); os.makedirs(repo)
     g = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout
-    subprocess.run(['git', 'init', '-q', '--bare', origin], check=True)
-    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T'); g('config', 'commit.gpgsign', 'false'); g('config', 'tag.gpgsign', 'false')
+    subprocess.run(['git', 'init', '-q', '--template=', '--bare', origin], check=True)
+    g('init', '-q', '--template=', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T'); g('config', 'commit.gpgsign', 'false'); g('config', 'tag.gpgsign', 'false')
     open(os.path.join(repo, 'a.txt'), 'w').write('old line written by Pat Sample\n')
     g('add', '.'); g('commit', '-q', '-m', 'first')
     words = os.path.join(box, 'words.txt')
@@ -1242,8 +1242,8 @@ def test_secret_check(box):
     box = os.path.join(box, 'secrets'); os.makedirs(box)
     repo, origin = os.path.join(box, 'repo'), os.path.join(box, 'origin.git'); os.makedirs(repo)
     g = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, check=True).stdout
-    subprocess.run(['git', 'init', '-q', '--bare', origin], check=True)
-    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T')
+    subprocess.run(['git', 'init', '-q', '--template=', '--bare', origin], check=True)
+    g('init', '-q', '--template=', '-b', 'main'); g('config', 'user.email', 't@example.org'); g('config', 'user.name', 'T')
     g('config', 'commit.gpgsign', 'false'); g('config', 'tag.gpgsign', 'false')
     def commit(files, msg='c'):
         for name, text in files.items():
