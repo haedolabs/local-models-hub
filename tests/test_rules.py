@@ -1316,8 +1316,26 @@ def test_secret_check(box):
         g('reset', '-q', '--hard', pushed); commit({'i.txt': 'ok\n'})
         r = subprocess.run(['git', '-C', repo, 'push', '-q', 'origin', 'main'], capture_output=True, text=True, env=env)
         t('a clean plain git push goes through the hook', r.returncode == 0, r.stderr[-300:])
+        ours, chained = open(hook).read(), hook + '.chained'
+        os.rename(hook, chained)
+        other = '#!/bin/sh\n# another tool: runs the hook it replaced first\n"$(dirname "$0")/pre-push.chained" "$@" || exit 1\nexit 0\n'
+        open(hook, 'w').write(other); os.chmod(hook, 0o755)
+        words2 = cli.set_prepush_hook(repo)
+        t("another tool's hook that runs this one first, from pre-push.chained: named as in place, both left as they are",
+          'in place, run first' in words2 and open(hook).read() == other and open(chained).read() == ours, words2)
+        open(chained, 'w').write(ours.replace('prepush', 'prepush --old'))
+        words3 = cli.set_prepush_hook(repo)
+        t('...an older copy of this hook there is brought up to date, and the other hook is left as it is',
+          'updated, run first' in words3 and open(chained).read() == ours and open(hook).read() == other, words3)
+        clean = g('rev-parse', 'HEAD').strip()
+        commit({'j.txt': f'{token}\n'})
+        r = subprocess.run(['git', '-C', repo, 'push', '-q', 'origin', 'main'], capture_output=True, text=True, env=env)
+        t('...and a push with a credential is still stopped, by this hook run first', r.returncode != 0 and 'push stopped' in r.stderr, (r.returncode, r.stderr[-300:]))
+        g('reset', '-q', '--hard', clean); os.remove(chained)
         open(hook, 'w').write('#!/bin/sh\nexit 0\n')
         t('a hook of another tool is left in place and named', 'left as it is' in cli.set_prepush_hook(repo) and 'exit 0' in open(hook).read())
+        open(hook, 'w').write(other); open(chained, 'w').write('#!/bin/sh\nexit 0\n')
+        t('...and so is one that runs a hook not this one first: pushes are not checked, said so', 'not checked' in cli.set_prepush_hook(repo) and open(chained).read() == '#!/bin/sh\nexit 0\n')
     finally:
         cli.PRIVATE_WORDS = real; os.chdir(here)
 

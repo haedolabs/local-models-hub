@@ -1716,6 +1716,15 @@ def set_prepush_hook(repo=None):
     try: cur = open(path).read()
     except OSError: cur = None
     if cur == body: return f'the pre-push hook is in place ({path})'
+    chained = path + '.chained'                         # another tool's hook that runs the one it replaced first, from beside it
+    if cur is not None and HOOK_MARK not in cur and os.path.basename(chained) in cur and os.path.isfile(chained):
+        try: was = open(chained).read()
+        except OSError: was = ''
+        if was == body: return f'the pre-push hook is in place, run first by the hook at {path} ({chained})'
+        if HOOK_MARK in was:
+            with open(chained, 'w') as f: f.write(body)
+            os.chmod(chained, 0o755)
+            return f'the pre-push hook updated, run first by the hook at {path} ({chained})'
     if cur is not None and HOOK_MARK not in cur: return f'a pre-push hook of its own is at {path}: left as it is, so pushes are not checked'
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w') as f: f.write(body)
