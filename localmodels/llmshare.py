@@ -334,6 +334,7 @@ def validate(d):
             if k in f and not (isinstance(v, bool) or isinstance(v, dict) and all(_number(x) for x in v.values())):
                 raise ValueError(f'{name}: "{k}" must be true, false or an object of numbers, not {v!r}')
         if 'key' in f and not isinstance(f['key'], str): raise ValueError(f'{name}: "key" must be a model key')
+        if 'kind' in f and f['kind'] not in KINDS_OF_MODEL: raise ValueError(f'{name}: "kind" must be one of {", ".join(KINDS_OF_MODEL)}, not {f["kind"]!r}')
     for k, positive in (('headroom_gb', False), ('batch_at_once', True)):
         if k in d and not _number(d[k], positive=positive): raise ValueError(f'"{k}" must be a number, not {d[k]!r}')
     for k in ('peers', 'serve'):
@@ -387,6 +388,24 @@ def family(model):
     return m.group(1) if m else (s if on else model)
 
 
+KINDS_OF_MODEL = ('llm', 'embedding')                   # a family's "kind": a chat model (the default) or an embedding model
+
+
+def embedding(model, fams=None):
+    """Whether this model's family is an embedding family ("kind": "embedding" in models.json): kept loaded beside the
+    chat families (models.keep), never unloaded by a swap to another model, and out of the slot counts, the admission
+    budgets, the recycles and the watchdog. fams: the settings' families (read now by default)."""
+    f = ((settings().get('families') or {}) if fams is None else fams).get(family(model))
+    return isinstance(f, dict) and f.get('kind') == 'embedding'
+
+
+def chat_rows(rows, fams=None):
+    """The listing less its embedding models (a row LM Studio types "embedding", or of an embedding family): the
+    instances that share the Mac's memory for context, and whose slots a batch counts."""
+    fams = (settings().get('families') or {}) if fams is None else fams
+    return [r for r in rows if r.get('type') != 'embedding' and not embedding(r.get('id'), fams)]
+
+
 def copy_ids(base, n):
     """The ids of n copies: the model's own, then <id>:2, <id>:3 ..."""
     return [base] + [f'{base}:{i}' for i in range(2, int(n) + 1)]
@@ -417,11 +436,11 @@ def at_once(model=None):
         here_too = not maint.peers_only()
     except Exception as e: here_too = True; _error('at_once: maintenance', e)
     rows = loaded() if here_too else []
-    if model is None:
-        fams = {family(r['id']) for r in rows}
+    if model is None:                                    # chat families only: an embedding model's slots are not a batch's
+        fams = {family(r['id']) for r in chat_rows(rows)}
         try:
             from . import peers                              # the families this Mac's peers serve for it count too
-            fams |= {f for p in peers.view() for f in (p.get('families') or {})}
+            fams |= {f for p in peers.view() for f in (p.get('families') or {}) if not embedding(f)}
         except Exception as e: _error('at_once: peer families', e)
         return max([at_once(f) for f in fams] or [1 if here_too else 0])
     ids = {r['id'] for r in rows}

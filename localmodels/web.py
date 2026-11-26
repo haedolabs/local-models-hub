@@ -124,6 +124,13 @@ def snapshot():
     return _cached('snapshot', 2, _snapshot)
 
 
+def _embeddings(rows):
+    """The embedding families in the settings, loaded or not (models.embeddings_view); [] when it cannot be read."""
+    from . import models
+    try: return models.embeddings_view(rows)
+    except Exception as e: errors.record('snapshot: embedding families', e); return []
+
+
 def _snapshot():
     lm, users, cs = dash.lmstudio(), dash.users(), dash.claude()
     holders = collections.defaultdict(collections.Counter)          # copy -> {project: answering}
@@ -146,12 +153,13 @@ def _snapshot():
                             size=c.get('size'), holders=hold, served=view['copies'].get(c['id']),
                             recycling=job['state'] if job and job.get('copy') == c['id'] else None, down=c['id'] in downs, stalled=c['id'] in stalls,
                             ctx=dict(load=loads.get(c['id'], 0), budget=admission.budget(c['id']))))
-        fams.append(dict(id=f['id'], at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps,
+        fams.append(dict(id=f['id'], kind=f.get('kind', 'llm'), at_once=f['at_once'], busy=f['busy'], size=round(f['size'], 1), copies=cps,
                          waiting_room=sum(n for m, n in room.items() if llmshare.family(m) == f['id'])))
     n, secs, refused = _cached('waits7', 30, lambda: llmshare.waits(7))
     out = dict(time=time.time(), clock=time.strftime('%H:%M:%S'),
                door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting()),       # every live gateway's queue
-               lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age())),
+               lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age()),
+                             embeddings=_embeddings(lm['models'])),
                settings_error=llmshare.settings_error(), write_problem=llmshare.write_problem(),
                crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7)), stalled=crashes.stalled()),
                recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10]), held=recycle.held_back()),

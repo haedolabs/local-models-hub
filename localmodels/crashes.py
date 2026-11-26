@@ -485,6 +485,7 @@ def swapped(to):
     """A swap (localmodels use) ends any wait to load a crashed model again: the person chose."""
     with _state() as st:
         for base in list((st.get('down') or {})):
+            if base != llmshare.family(to) and llmshare.embedding(base): continue   # kept loaded through a swap: its reload goes on
             if base == llmshare.family(to): _record(dict(event='back', family=base, by='localmodels use'))
             else: _record(dict(event='cancelled', family=base, why=f'superseded by a swap to {to}'))
             del st['down'][base]

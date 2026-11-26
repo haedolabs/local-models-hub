@@ -53,7 +53,7 @@ SKIP = ('embeddings',)           # endpoints left out: an embedding writes no en
 def thresholds(f):
     """A family's watchdog settings (models.json "watchdog"), or None when it is turned off."""
     w = f.get('watchdog', True) if isinstance(f, dict) else True
-    if w is False or w is None: return None
+    if w is False or w is None or isinstance(f, dict) and f.get('kind') == 'embedding': return None   # it writes no engine steps
     out = dict(DEFAULT)
     if isinstance(w, dict): out.update({k: v for k, v in w.items() if k in out and isinstance(v, (int, float)) and v > 0})
     return out

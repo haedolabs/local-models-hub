@@ -683,7 +683,8 @@ function renderNow() {
   // stat tiles
   const fams = S.lmstudio.families;                     // the pool: this Mac's slots and its peers' replicas of the same models
   const offHere = !!(mt && mt.off), refused = !!(mt && mt.phase === 'on' && !mt.peers);   // switched off: this Mac's slots take nothing; refusing: nothing does
-  let busy = offHere ? 0 : fams.reduce((s, f) => s + f.busy, 0), cap = offHere ? 0 : fams.reduce((s, f) => s + f.at_once, 0);
+  const chat = fams.filter(f => f.kind !== 'embedding');   // an embedding model's slots are no batch's
+  let busy = offHere ? 0 : chat.reduce((s, f) => s + f.busy, 0), cap = offHere ? 0 : chat.reduce((s, f) => s + f.at_once, 0);
   const hosts = [offHere ? 'this Mac off' : `this Mac ${busy}/${cap}`];
   for (const p of (S.peers || []).filter(p => p.state === 'up')) {
     let b = 0, c = 0;
@@ -823,6 +824,9 @@ function renderModels() {
   const box = $('models-body'), fams = S.lmstudio.families;
   const down = ((S.crashes && S.crashes.down) || []).filter(d => !fams.some(f => f.id === d.family)).map(d => el('div', {class: 'fam'},
     el('span', {class: 'fam-name'}, d.family), el('div', {}, el('span', {class: 'badge down'}, `crashed at ${clock(d.crashed)} · ${d.label || d.state}`))));
+  if (!(S.maintenance && S.maintenance.off)) for (const e of (S.lmstudio.embeddings || []).filter(e => !e.loaded && !fams.some(f => f.id === e.id))) down.push(el('div', {class: 'fam'},
+    el('span', {class: 'fam-name'}, e.id), el('div', {}, el('span', {class: 'badge down', title: e.words || ''}, 'embedding model not loaded')),
+    el('div', {class: 'fam-meta'}, e.down ? `reloading after a crash: ${e.words || e.down}` : e.words || '')));
   const seen = new Set(), there = peerBlocks(seen, new Set(fams.map(f => f.id))), mt = S.maintenance;
   const why = mt && mt.off ? `This Mac: local models switched off since ${clock(mt.start)}` + (mt.unloaded ? ', no instance loaded' : mt.peers ? ', unloading once the requests in flight here finish' : ', unloading once the requests in flight finish')
       + (mt.peers ? '; requests go to peers only' : '; requests get 503')
@@ -831,6 +835,12 @@ function renderModels() {
   if (!fams.length) { box.replaceChildren(...down, why || down.length || there.length ? '' : el('div', {class: 'empty'}, 'No model is loaded in LM Studio.'), ...there);
     legend($('models-legend'), [...seen].map(p => ({name: p, color: color(p)}))); return; }
   box.replaceChildren(...down, ...fams.map(f => {
+    if (f.kind === 'embedding') {                     // kept loaded beside the chat families: no slots or recycle band to show
+      const kept = (S.lmstudio.embeddings || []).some(e => e.id === f.id);
+      const meta = `embedding model · ${kept ? 'kept loaded' : 'loaded by hand'} · ${f.copies[0].size || f.size + ' GB'} · ${full(f.copies[0].context)} context`;
+      return el('div', {class: 'fam'}, el('div', {class: 'fam-head', title: kept ? 'the instance manager reloads it whenever it is missing (models.json "kind": "embedding")' : meta},
+        el('span', {class: 'fam-name'}, f.id), el('div', {class: 'fam-meta'}, meta)));
+    }
     const away = peersOf(f.id), more = away.reduce((n, p) => n + (p.families[f.id].slots || 0), 0);
     const meta = `${f.copies.length > 1 ? f.copies.length + ' replicas · ' : ''}${f.at_once} slots · ${f.busy} active` + (f.waiting_room ? ` · ${f.waiting_room} waiting for context budget` : '')
       + ` · ${f.size} GB · ${full(f.copies[0].context)} context`

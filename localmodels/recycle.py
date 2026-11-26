@@ -71,7 +71,7 @@ def guardrail_off():
 def thresholds(f):
     """A family's recycle settings (models.json), or None when it is turned off."""
     r = f.get('recycle', True) if isinstance(f, dict) else True
-    if r is False or r is None: return None
+    if r is False or r is None or isinstance(f, dict) and f.get('kind') == 'embedding': return None   # an embedding engine writes nothing
     out = dict(DEFAULT)
     if isinstance(r, dict): out.update({k: v for k, v in r.items() if k in out and isinstance(v, (int, float))})
     return out

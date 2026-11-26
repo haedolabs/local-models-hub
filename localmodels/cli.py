@@ -187,6 +187,8 @@ def status():
     if gw: print('  ' + gw[len('gateway: '):])                          # the workers: serving, and draining with what they finish
     print(f"LM Studio: server {'up' if lm['server'] == 'on' else 'down'} · " + ('; '.join(dash.family_words(f) for f in lm['families']) or 'no model loaded')
           + ('' if llmshare.read_ok() else ' · (lms ps failed: showing the previous listing)'))
+    if not (mt and mt.get('off')):
+        for w in dash.embedding_words(lm['models']): print('  ' + w)
     if mt and mt.get('off'):
         n = llmshare.at_once()
         print(f"  requests: sent to peers only, {n} slot{'s' if n != 1 else ''} free for this gateway (at_once)" if mt.get('peers') else

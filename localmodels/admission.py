@@ -23,7 +23,8 @@ text-generation-inference bounds the tokens a batch may hold (max_batch_total_to
                        measured now, and headroom_gb; or the GPU's limit, whichever is less), less its weights and, when
                        several instances are loaded, the KEPT cache, at per_token() bytes a token (with the cache share
                        beside a sibling): never below LEAST, never above all its slots' context windows. "admit": false
-                       turns it off.
+                       turns it off. An embedding model's instance ("kind": "embedding", or LM Studio's type) has no budget
+                       and takes no share: the chat instances divide the room among themselves.
   fits(copy, load, need)   an instance with nothing in flight takes any request, so every request the context window
                        allows can run; a busy one takes it while its load plus this request stays within its budget and,
                        beside a sibling, while the Mac's free memory, less what this one will take (its tokens at
@@ -217,7 +218,9 @@ def default_budget(copy, rows=None, memory=None):
         g = models.gpu()
         memory = (g.get('total_gb') or models.mem_gb(), others_gib(), g.get('limit_gb') or 0)
     total, others, limit = memory
-    n = max(1, len(rows))
+    chat = llmshare.chat_rows(rows)                         # an embedding model takes no share (its engine, under 2 GiB, is in others)
+    if row not in chat: return win * slots
+    n = max(1, len(chat))
     shares = [(total - others - headroom()) / n] if total else []
     if limit: shares.append((limit - OTHER_GPU) / n)
     if not shares: return win * slots
@@ -231,7 +234,7 @@ def budget(copy, rows=None):
     if ' on ' in str(copy): return 0                       # a peer's instance: that Mac's gateway admits it by its own budget
     f = (llmshare.settings().get('families') or {}).get(llmshare.family(copy))
     a = f.get('admit', True) if isinstance(f, dict) else True
-    if a is False or a is None: return 0
+    if a is False or a is None or isinstance(f, dict) and f.get('kind') == 'embedding': return 0   # an embedding: no context to budget
     if isinstance(a, dict) and isinstance(a.get('tokens'), (int, float)) and a['tokens'] > 0: return int(a['tokens'])
     if rows is not None: return default_budget(copy, rows)
     hit = _budgets.get(copy)
@@ -248,7 +251,7 @@ def row_of(copy):
 
 def need_gib(copy, need):
     """The memory, in GiB, a request of `need` tokens takes on this instance (per_token of its model)."""
-    return need * per_token(row_of(copy), len(llmshare.listed()) > 1) / 2**30
+    return need * per_token(row_of(copy), len(llmshare.chat_rows(llmshare.listed())) > 1) / 2**30
 
 
 def fits(copy, load, need):
@@ -259,7 +262,7 @@ def fits(copy, load, need):
     if load <= 0: return True                              # nothing in flight: it takes it, whatever its size
     b = budget(copy)
     if b and load + need > b: return False
-    if len(llmshare.listed()) < 2: return True               # an engine alone reclaims its own cache within the GPU limit
+    if len(llmshare.chat_rows(llmshare.listed())) < 2: return True               # an engine alone reclaims its own cache within the GPU limit
     free = free_gib()
     return free is None or free - need_gib(copy, need) >= headroom()
 
@@ -274,7 +277,7 @@ def why_waiting(copies, loads, need):
         b = budget(c)
         if b and load + need > b: return f'context budget: ~{need:,} tokens + {load:,} in flight > {b:,} on {c}'
         free, mine = free_gib(), need_gib(c, need)
-        if len(llmshare.listed()) > 1 and free is not None and free - mine < headroom():
+        if len(llmshare.chat_rows(llmshare.listed())) > 1 and free is not None and free - mine < headroom():
             return f'memory headroom: {free:.1f} GiB free; ~{mine:.1f} GiB for this request would leave less than headroom_gb {headroom():g}'
     return None
 

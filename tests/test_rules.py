@@ -436,6 +436,110 @@ def test_keep(box):
     with crashes._state() as st: st['down'] = {}
 
 
+def test_embedding(box):
+    print('an embedding family: kept loaded from nothing, beside the chat family, through a swap; out of slots, budgets and recycles')
+    from localmodels import admission, llmshare as L, maint, models, watchdog
+    E = 'text-embedding-made-up-v1'
+    real = (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
+            crashes.MISS, L.SWAP_LOCK, L.read_ok, models._size_of, maint.switched_off, L.swap_blockers)
+    fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False), E: dict(key=E, kind='embedding', context=2048)}
+    L.read_ok, L.settings = (lambda: True), (lambda: dict(families=fam, batch_at_once=8, headroom_gb=8))
+    L.SWAP_LOCK = os.path.join(box, 'swap-embed.lock'); crashes.MISS = 0.3
+    erow = lambda: dict(id=E, key=E, state='IDLE', size='0.08 GB', context=2048, parallel=None, type='embedding')
+    api, loads, unloads, fail = {'ids': {B: 65536, C2: 65536}}, [], [], {'n': 0}
+    L.loaded = lambda fresh=False, force=False: [erow() if i == E else row(i) for i in api['ids']]
+    L.api_models = lambda timeout=3: dict(api['ids'])
+    L.busy_slots, L.swap_blockers = (lambda: {}), (lambda ids: [])
+    def fake_load(key, ident, context, parallel):
+        if fail['n']: fail['n'] -= 1; return False, 'model not found'
+        loads.append(ident); crashes.loaded_now([ident]); api['ids'] = dict(api['ids'], **{ident: context or 2048}); return True, 'ok'
+    def fake_unload(ident): unloads.append(ident); api['ids'].pop(ident, None); return True, ''
+    models.load, models.unload, models._size_of = fake_load, fake_unload, (lambda key: 0.08)
+    models._lms, models.free_gb, models.ensure_server = (lambda *a, **k: (True, '')), (lambda: 100.0), (lambda *a, **k: True)
+    ps_ok, L._ps['ok'] = L._ps['ok'], True
+    try:
+        reset(time.time() - 600)
+        with crashes._state() as st: st.pop('embed', None)
+        w1 = models.keep(); time.sleep(0.4); w2 = models.keep()
+        t('missing beside the chat family: loaded once it is missing for sure (two looks), and nothing else', loads == [E] and any('kept loaded' in w for w in w2), (loads, w1, w2))
+        t('the screens: loaded', models.embeddings_view(L.loaded()) == [dict(id=E, key=E, loaded=True, down=None, words=None)], models.embeddings_view(L.loaded()))
+
+        api['ids'] = {}; loads.clear(); reset(time.time() - 600)          # a Mac with nothing loaded at all (a gateway start after a reboot)
+        with crashes._state() as st: st['seen'] = {}                        # (nothing was seen loaded: no crash to reload)
+        models.keep(); time.sleep(0.4); models.keep()
+        t('nothing loaded at all: the embedding family is loaded from nothing, the chat family is not', loads == [E], loads)
+
+        api['ids'] = {B: 65536, C2: 65536}; loads.clear(); reset(time.time() - 600); fail['n'] = 1
+        models.keep(); time.sleep(0.4); words = models.keep()
+        t('a failed load says so, and waits a minute before the next try', not loads and any('next try in 1 min' in w for w in words)
+          and 'load failed' in (models.embeddings_view()[0]['words'] or ''), (words, models.embeddings_view()))
+        words = models.keep(); time.sleep(0.4); words += models.keep()
+        t('...so the next passes do not try again yet', not loads, (loads, words))
+        with crashes._state() as st: st['embed'][E]['next'] = 0.0
+        models.keep(); time.sleep(0.4); models.keep()
+        t('...then it is tried again and loaded, and the failure is cleared', loads == [E] and not models.embed_state(E).get('words'), (loads, models.embed_state(E)))
+
+        api['ids'] = {B: 65536, E: 2048}; loads.clear(); unloads.clear()
+        L._ps['ok'] = True
+        want, drop = models.plan(B)
+        code, words = models.use(B)
+        t('`localmodels use` of the chat family leaves the embedding model loaded', E not in drop and E not in unloads and E in api['ids'] and code == 0, (drop, unloads, words))
+        api['ids'] = {B: 65536, C2: 65536}; loads.clear(); unloads.clear()
+        code, words = models.use(E)
+        t('`localmodels use` of the embedding family loads it and unloads nothing', code == 0 and loads == [E] and not unloads, (code, words, loads, unloads))
+        O = 'other/model'; api['ids'] = {B: 65536, C2: 65536, E: 2048}; unloads.clear(); loads.clear()
+        code, words = models.use(O, context=8192)
+        t('a swap to another model unloads the chat family, never the embedding family', code == 0 and set(unloads) == {B, C2} and E in api['ids'], (unloads, api['ids']))
+
+        api['ids'] = {B: 65536, C2: 65536, E: 2048}; loads.clear(); reset(time.time() - 600); models.keep()   # seen loaded
+        n0 = len([r for r in crashes.records(1) if r.get('event') == 'crash' and r.get('family') == E])
+        api['ids'].pop(E)                                       # ejected in LM Studio's window, or its engine died: no unload line
+        models.keep(); time.sleep(0.4); words = models.keep(); time.sleep(0.4); words += models.keep()
+        t('ejected or crashed: recorded as a crash of its family and loaded again', loads == [E] and E in api['ids']
+          and len([r for r in crashes.records(1) if r.get('event') == 'crash' and r.get('family') == E]) == n0 + 1, (loads, words))
+        with crashes._state() as st: st['down'] = {E: dict(crashed=time.time() - 10, models=[E], state='loading again')}
+        crashes.swapped(B)
+        t('a swap does not cancel the embedding family\'s crash reload', E in (crashes._read(fresh=True).get('down') or {}))
+        with crashes._state() as st: st['down'] = {}
+
+        maint.switched_off = lambda: dict(at=time.time(), unloaded=True)
+        api['ids'] = {}; loads.clear(); models.keep(); time.sleep(0.4); models.keep()
+        t('switched off: it is not loaded', not loads, loads)
+        maint.switched_off = real[13]
+
+        api['ids'] = {B: 65536, C2: 65536, E: 2048}
+        rows = L.loaded()
+        t('at_once counts the chat family only', L.chat_rows(rows) == [row(B), row(C2)] and L.at_once() == 8, (L.chat_rows(rows), L.at_once()))
+        mem = (128.0, 22.0, 107.5)
+        t('the chat instances\' admission budgets do not shrink beside an embedding model, which has none',
+          admission.default_budget(B, rows, mem) == admission.default_budget(B, [row(B), row(C2)], mem) and admission.budget(E) == 0,
+          (admission.default_budget(B, rows, mem), admission.default_budget(B, [row(B), row(C2)], mem)))
+        t('no recycle and no watchdog for it', recycle.thresholds(fam[E]) is None and watchdog.thresholds(fam[E]) is None)
+        models.free_gb = lambda: 0.5
+        low = models.room_for(fam[E], 0.08, 8)
+        models.free_gb = lambda: 2.0
+        t('its load waits for its weights and 1 GiB free, never for headroom_gb', low and 'embedding model needs 1.1 GiB' in low and models.room_for(fam[E], 0.08, 8) is None, low)
+        g = models.gpu
+        models.gpu = lambda: dict(limit_gb=39.0, total_gb=48.0)
+        dedicated = dict(fam[B], load_at_start=True)
+        t('on a dedicated Mac the embedding model costs the chat family its weights only, not another KV_ROOM',
+          models.room_for(dedicated, 35.2, 4, [dict(row(B), size='0 GB'), erow()]) is None
+          and models.room_for(dedicated, 35.2, 4, [dict(row(B), size='0 GB'), dict(row(C2), size='0.08 GB')]) is not None)
+        models.gpu = g
+
+        args = []
+        models._lms = lambda *a, **k: (args.append(a), (True, 'ok'))[1]
+        models.load = real[4]
+        models.load(E, E, 32768, 4)
+        t('its load passes its own context and no --parallel (not a chat model\'s 32,768 and 4)', args and '-c' in args[0] and args[0][args[0].index('-c') + 1] == '2048'
+          and '--parallel' not in args[0], args)
+    finally:
+        (L.loaded, L.api_models, L.busy_slots, L.settings, models.load, models.unload, models._lms, models.free_gb, models.ensure_server,
+         crashes.MISS, L.SWAP_LOCK, L.read_ok, models._size_of, maint.switched_off, L.swap_blockers) = real
+        L._ps['ok'] = ps_ok
+        with crashes._state() as st: st['down'] = {}; st.pop('embed', None)
+
+
 def test_recycle_resumed(box):
     print('a recycle cut between its unload and its load (the gateway stopped): resumed with the load, not another unload')
     from localmodels import llmshare as L, models
@@ -526,7 +630,8 @@ def test_settings(box):
         return L.settings().get('batch_at_once') == 4 and key in (L.settings_error() or ''), L.settings_error()
     for d, key in ((dict(families={}, batch_at_once=5, headroom_gb='8GB'), 'headroom_gb'), (dict(families=[], batch_at_once=5), 'families'),
                    (dict(families={B: dict(key=B, copies='2')}, batch_at_once=5), 'copies'), (dict(families={B: dict(key=B, copies=0)}, batch_at_once=5), 'copies'),
-                   (dict(families={B: dict(key=B, recycle='off')}, batch_at_once=5), 'recycle'), (dict(families={B: 'qwen'}, batch_at_once=5), B)):
+                   (dict(families={B: dict(key=B, recycle='off')}, batch_at_once=5), 'recycle'), (dict(families={B: 'qwen'}, batch_at_once=5), B),
+                   (dict(families={B: dict(key=B, kind='vector')}, batch_at_once=5), 'kind')):
         good, words = bad(d, key)
         t(f'a file of the wrong shape ({key}) is not taken: the last good settings stand, and the error names the key', good, words)
     print('the settings file: the last good copy carries a restart over a file that does not parse')
@@ -645,7 +750,11 @@ def test_first_settings():
     s = models.first_settings(have, 128)
     f = s['families'].get(B, {})
     t('128 GB with the measured model: the measured default stands (2 copies, 65,536, recycling)',
-      list(s['families']) == [B] and (f.get('copies'), f.get('context'), f.get('parallel')) == (2, 65536, 4) and f.get('recycle'), f)
+      list(s['families']) == [B, 'embed'] and (f.get('copies'), f.get('context'), f.get('parallel')) == (2, 65536, 4) and f.get('recycle'), f)
+    e = s['families'].get('embed', {})
+    t('an embedding model downloaded: an embedding family beside it, with its own context', (e.get('kind'), e.get('key'), e.get('context')) == ('embedding', 'embed', 2048), e)
+    s = models.first_settings(have + [dict(type='embedding', modelKey='text-embedding-nomic-embed-text-v1.5', sizeBytes=int(0.08 * G), maxContextLength=2048)], 128)
+    t('nomic-embed-text is preferred among several', [k for k, f in s['families'].items() if f.get('kind') == 'embedding'] == ['text-embedding-nomic-embed-text-v1.5'], list(s['families']))
     s = models.first_settings(have, 64)
     f = s['families'].get(B, {})
     t('64 GB: one copy of it, since two do not fit', f.get('copies') == 1 and s['batch_at_once'] == f.get('parallel'), f)
@@ -1909,6 +2018,7 @@ def main():
         test_unload(box)
         test_keep(box)
         test_swap_away(box)
+        test_embedding(box)
         test_recycle_resumed(box)
         test_prune(box)
         test_settings(box)

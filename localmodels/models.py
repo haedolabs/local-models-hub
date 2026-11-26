@@ -9,6 +9,11 @@ all than one copy of eight (GUIDE.md, "Where to send requests"). So:
            (crashes.py: at most 3 times an hour). A copy whose engine stalled is taken out of routing and reloaded
            (watchdog.py). A copy is recycled before the work at which the engine has crashed (recycle.py). Nothing is
            unloaded for being idle.
+  keep()   an embedding family ("kind": "embedding", keep_embedding) is the exception to "nothing from nothing": it is small
+           (an 84 MB model) and clients search by meaning with it, so whenever it is missing for sure it is loaded, at
+           gateway start, after a crash, an eject or an `lms unload`, and never unloaded for being idle. Its load waits only
+           for its own weights and EMBED_ROOM free, never for headroom_gb, and it is left out of the chat families' room
+           (room_for), slots (llmshare.at_once) and admission budgets. A failed load is tried again after 1, 2, then 5 min.
   use()    a swap: refused while another run is using anything it would unload; then the rest is unloaded and the model
            loaded, with all its copies when it is a family. Swapping away drops the second copy with the first, so the
            other model has the room; swapping back brings both.
@@ -40,6 +45,8 @@ GUARDRAIL = re.compile(r'insufficient system resources|loading guardrail|resourc
 GPU_DAEMON = '/Library/LaunchDaemons/com.local-models.gpu-limit.plist'       # sets the GPU's limit at every boot (a person installs it)
 LOADER = os.path.expanduser('~/Library/LaunchAgents/com.local-models.load-at-login.plist')   # a dedicated Mac's loader from before the hub
 START_TRIES, START_GAP = 3, 30                            # loads tried at start, and seconds between them
+EMBED_ROOM = 1.0                                          # GiB free an embedding model's load needs beside its weights
+EMBED_PAUSES = (60, 120, 300)                             # seconds before an embedding family's next try after 1, 2, 3+ failed loads
 KV_ROOM = 1.5                                             # GiB an instance needs within the GPU's limit beside its weights, at least
 _gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
 _sizes, _BORN = {}, time.time()                          # sizes on disk (read once a process); when this process started
@@ -174,10 +181,13 @@ def room_for(f, size, room, rows=None):
     GiB in use a second after a crash and 13.2 GiB an hour later, while the reload waited for 39.2 GiB free). Any other
     family waits until its weights and `room` (headroom_gb) are free."""
     if not size: return None
+    if isinstance(f, dict) and f.get('kind') == 'embedding':  # a small model: its weights and EMBED_ROOM, never headroom_gb
+        free = free_gb()
+        return f'{free:.1f} GiB free, the embedding model needs {size + EMBED_ROOM:.1f} GiB' if free < size + EMBED_ROOM else None
     if isinstance(f, dict) and f.get('load_at_start'):
         g, listed = gpu(), (llmshare.loaded() if rows is None else rows)
-        weights = sum(gb(r.get('size')) for r in listed)
-        if g.get('limit_gb') and weights + size + KV_ROOM * (len(listed) + 1) > g['limit_gb']:
+        weights = sum(gb(r.get('size')) for r in listed)       # an embedding model's weights count, its context is the chat rows' not
+        if g.get('limit_gb') and weights + size + KV_ROOM * (len(llmshare.chat_rows(listed)) + 1) > g['limit_gb']:
             return f"GPU wired limit {g['limit_gb']:.0f} GiB < {size:.1f} GiB + KV cache" + (f' beside {weights:.1f} GiB loaded' if listed else '')
         return None
     free = free_gb()
@@ -207,13 +217,14 @@ def first_settings(listing, mem):
     if listing is None:
         return dict(families={}, **base, why="lms could not list the downloaded models: the instance manager manages no family until one is added here")
     llms = [m for m in listing if m.get('type') == 'llm' and m.get('modelKey') and m.get('sizeBytes')]
+    embed = embedding_family(listing)                       # an embedding model downloaded: kept loaded beside the chat family
     room, need = mem * 0.75, lambda m: m['sizeBytes'] / 2**30 * 1.2
     for key, fam in default.get('families', {}).items():
         m = next((m for m in llms if m['modelKey'] == fam.get('key', key)), None)
-        if m and 2 * need(m) <= room: return dict(default, headroom_gb=base['headroom_gb'])
+        if m and 2 * need(m) <= room: return dict(default, families=dict(default.get('families') or {}, **embed), headroom_gb=base['headroom_gb'])
     fits = sorted((m for m in llms if need(m) <= room), key=lambda m: -m['sizeBytes'])
     if not fits:
-        return dict(families={}, **base, why=f'no downloaded model fits in {mem:.0f} GB of memory: download a smaller one and add it here (GUIDE.md, settings)')
+        return dict(families=embed, **base, why=f'no downloaded model fits in {mem:.0f} GB of memory: download a smaller one and add it here (GUIDE.md, settings)')
     m = fits[0]
     copies, parallel = (2 if 2 * need(m) <= room else 1), (4 if mem >= 32 else 2)
     recycle_band = next(iter(default.get('families', {}).values()), {}).get('recycle', False)
@@ -223,7 +234,22 @@ def first_settings(listing, mem):
                why=f'Fitted at install to {mem:.0f} GB and the models downloaded'
                    + ('; 1 replica, since 2 do not fit in memory.' if measured else '; the recycle thresholds were measured on another model: '
                       'read `localmodels crashes` after a few long runs and adjust them.'))
-    return dict(families={m['modelKey']: fam}, batch_at_once=copies * parallel, headroom_gb=base['headroom_gb'])
+    return dict(families=dict({m['modelKey']: fam}, **embed), batch_at_once=copies * parallel, headroom_gb=base['headroom_gb'])
+
+
+EMBED_PREFERRED = 'nomic-embed-text'                       # the embedding model the hub's clients were measured with
+
+
+def embedding_family(listing):
+    """The embedding family a fresh install writes when an embedding model is downloaded (`lms ls --json` rows): nomic-embed-text
+    when it is there, else the smallest. -> {id: family} or {}."""
+    ms = [m for m in listing or [] if isinstance(m, dict) and m.get('type') == 'embedding' and _ok_id(m.get('modelKey'))]
+    if not ms: return {}
+    m = sorted(ms, key=lambda m: (EMBED_PREFERRED not in m['modelKey'], m.get('sizeBytes') or 0, m['modelKey']))[0]
+    fam = dict(key=m['modelKey'], kind='embedding', why='Kept loaded beside the chat family, for clients that search by meaning '
+               '(GUIDE.md, Embedding models). Fitted at install to the embedding models downloaded.')
+    if m.get('maxContextLength'): fam['context'] = int(m['maxContextLength'])
+    return {m['modelKey']: fam}
 
 
 def _ok_id(s):
@@ -282,7 +308,11 @@ def reset_start():
 def load(key, ident, context, parallel):
     """Load one copy with lms; -> (ok, LM Studio's words). What came of it is kept (crashes.load_ok, load_refused)."""
     if not (_ok_id(key) and _ok_id(ident)): return False, f'refused: {key!r} / {ident!r} is not a model id'
-    ok, out = _lms('load', key, '--identifier', ident, '-c', str(int(context)), '--parallel', str(int(parallel)), '-y')
+    f = (llmshare.settings().get('families') or {}).get(llmshare.family(ident))
+    if isinstance(f, dict) and f.get('kind') == 'embedding':   # its own settings or LM Studio's defaults, never a chat model's 32,768 and 4
+        context, parallel = f.get('context'), f.get('parallel')
+    args = ['load', key, '--identifier', ident] + (['-c', str(int(context))] if context else []) + (['--parallel', str(int(parallel))] if parallel else [])
+    ok, out = _lms(*args, '-y')
     if ok: crashes.loaded_now([ident]); crashes.load_ok(llmshare.family(ident))
     elif refused(out): crashes.load_refused(llmshare.family(ident), refused(out), conditions())
     return ok, out
@@ -365,7 +395,8 @@ def keep():
     reloading = {b for b, d in downs.items() if d.get('state') in ('loading again', 'waiting for room')}
     todo = []
     for b, f in fams.items():
-        if b not in have or b in down: continue             # the first copy is not loaded, or the crash machinery has the family
+        if b not in have or b in down or llmshare.embedding(b, fams): continue   # the first copy is not loaded, the crash machinery
+                                                             # has the family, or it is an embedding family (loaded below, every copy)
         want = [c for c in llmshare.copy_ids(b, f.get('copies', 1)) if c not in have]
         if want:
             gone = crashes.confirm_missing(want, rows, busy)
@@ -376,6 +407,16 @@ def keep():
         go, w = at_start(b, f, have, room)
         if go: boot.append((b, f))
         if w: did.append(w)
+    embeds = []                                              # embedding families: loaded whenever missing for sure, from nothing too
+    for b, f in fams.items():
+        if not isinstance(f, dict) or f.get('kind') != 'embedding' or b in down: continue   # down: the crash machinery has it
+        want = [c for c in llmshare.copy_ids(b, f.get('copies', 1)) if c not in have]
+        if not want:
+            if embed_state(b).get('fails') or embed_state(b).get('words'): _embed_update(b, fails=0, next=0.0, words=None)
+            continue
+        if time.time() < embed_state(b).get('next', 0): continue          # the pause after a failed load
+        gone = crashes.confirm_missing(want, rows, busy)
+        embeds += [(b, f, c) for c in want if c in gone]
     try:
         w = recycle.give_up_if_stuck() or recycle.plan(rows, busy)
         if w: did.append(w)
@@ -383,11 +424,12 @@ def keep():
     job, ready = recycle.ready(rows, busy)
     if job and (job['family'] in reloading if job.get('stall') else down): job, ready = None, False   # a crash reload first, no recycle in the
     # same pass; a stalled copy waits only for a reload under way in its family, not for a sibling left down (it serves nothing as it is)
-    if not todo and not back and not boot and not (job and ready): return did
+    if not todo and not back and not boot and not embeds and not (job and ready): return did
     with llmshare.swapping(wait=0) as got:
         if not got: return did                              # a swap is under way: the next pass looks again
         for j in back: did += _again(j, room)
         for b, f in boot: did += _load_at_start(b, f)
+        for b, f, c in embeds: did += _load_embedding(b, f, c)
         for base, f, c in todo:
             ids = {r['id']: r for r in llmshare.loaded(fresh=True)}
             if base not in ids or c in ids: continue        # it changed meanwhile
@@ -401,6 +443,51 @@ def keep():
         if job and ready: did += _recycle(job, fams)
     llmshare.loaded(fresh=True)
     return did
+
+
+def embed_state(b):
+    """An embedding family's load record (keeper.json 'embed'): {fails, next, words, at}; {} when nothing failed."""
+    return dict((crashes._read(fresh=True).get('embed') or {}).get(b) or {})
+
+
+def _embed_update(b, **fields):
+    with crashes._state() as st: st.setdefault('embed', {}).setdefault(b, {}).update(fields)
+
+
+def _load_embedding(b, f, c):
+    """Load a missing instance of an embedding family (under the swap lock): its own settings, or LM Studio's defaults. A
+    failed load pauses 1, 2, then 5 minutes before the next. -> words."""
+    if c in {r['id'] for r in llmshare.loaded(fresh=True)}: return []   # it changed meanwhile
+    blocked = crashes.load_blocked(b, conditions())
+    if blocked: return [f'{c}: embedding model load skipped: {blocked}']
+    why = room_for(f, _size_of(f.get('key') or b), 0)
+    if why:
+        _embed_update(b, words=f'load deferred: {why}'); return [f'{c}: embedding model load deferred: {why}']
+    ok, out = load(f.get('key') or b, c, None, None)
+    if ok:
+        ensure_server()                                    # LM Studio may turn its server off when a model changes
+        _embed_update(b, fails=0, next=0.0, words=None, at=time.time())
+        return [f'{c} loaded (embedding model, kept loaded)']
+    fails = int(embed_state(b).get('fails') or 0) + 1
+    pause, words = EMBED_PAUSES[min(fails, len(EMBED_PAUSES)) - 1], refused(out) or out[-200:]
+    _embed_update(b, fails=fails, next=time.time() + pause, words=f'load failed: {words}')
+    return [f'{c}: embedding model load failed ({words}); next try in {pause // 60} min']
+
+
+def embeddings_view(rows=None):
+    """For the screens: each embedding family in the settings, loaded or not: [{id, key, loaded, down, words}]. down: the
+    crash machinery's state for it, if any; words: why it is not loaded, when that is known."""
+    fams = llmshare.settings().get('families') or {}
+    rows = llmshare.listed() if rows is None else rows
+    have, downs = {r['id'] for r in rows}, crashes._read(fresh=True).get('down') or {}
+    out = []
+    for b, f in fams.items():
+        if not isinstance(f, dict) or f.get('kind') != 'embedding': continue
+        loaded = all(c in have for c in llmshare.copy_ids(b, f.get('copies', 1)))
+        d, e = downs.get(b) or {}, embed_state(b)
+        words = None if loaded else (d.get('why') or d.get('state')) if d else e.get('words') or 'not loaded: the instance manager loads it within a minute'
+        out.append(dict(id=b, key=f.get('key') or b, loaded=loaded, down=d.get('state') if d else None, words=words))
+    return out
 
 
 def wake(fams):
@@ -634,10 +721,17 @@ def _recycle(job, fams):
 
 def plan(ident, context=None):
     """What a swap to this model would do: -> (copies wanted, models to unload), from what LM Studio holds now."""
-    f = (llmshare.settings().get('families') or {}).get(llmshare.family(ident)) or {}
-    context = int(context or f.get('context') or 32768)
+    fams = llmshare.settings().get('families') or {}
+    f = fams.get(llmshare.family(ident)) or {}
     want = llmshare.copy_ids(ident, f.get('copies', 1)) if f and llmshare.family(ident) == ident else [ident]
-    drop = [r['id'] for r in llmshare.loaded(fresh=True) if r['id'] not in want or (r['context'] and r['context'] != context)]
+    rows = llmshare.loaded(fresh=True)
+    if f.get('kind') == 'embedding':                        # loading the embedding model unloads nothing else
+        context = context or f.get('context')
+        return want, [r['id'] for r in rows if llmshare.family(r['id']) == llmshare.family(ident)
+                      and (r['id'] not in want or (context and r['context'] and r['context'] != int(context)))]
+    context = int(context or f.get('context') or 32768)
+    drop = [r['id'] for r in rows if not llmshare.embedding(r['id'], fams)   # an embedding family stays loaded through a swap
+            and (r['id'] not in want or (r['context'] and r['context'] != context))]
     return want, drop
 
 
@@ -646,7 +740,8 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
     ident = ident or key
     if not (_ok_id(key) and _ok_id(ident)): return 1, f'{key!r} is not a model key'
     f = (llmshare.settings().get('families') or {}).get(llmshare.family(ident)) or {}
-    context, parallel = int(context or f.get('context') or 32768), int(parallel or f.get('parallel') or 4)
+    if f.get('kind') == 'embedding': context, parallel = f.get('context'), f.get('parallel')   # its family's settings (load() uses them)
+    else: context, parallel = int(context or f.get('context') or 32768), int(parallel or f.get('parallel') or 4)
     with llmshare.swapping(wait=120) as got:
         if not got: return 3, 'another swap is under way: try again in a moment'
         want, drop = plan(ident, context)
@@ -674,4 +769,4 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         llmshare.loaded(fresh=True)
         crashes.swapped(ident)                                 # a person chose: no crashed model is waiting to come back
     n = len(want)
-    return 0, f"{ident} loaded" + (f" as {n} replicas, {n * parallel} slots" if n > 1 else '')
+    return 0, f"{ident} loaded" + (f" as {n} replicas" + (f", {n * parallel} slots" if parallel else '') if n > 1 else '')

@@ -171,6 +171,8 @@ def lmstudio():
 def family_words(f):
     """A loaded model in a few plain words: 'qwen/qwen3.6-35b-a3b as 2 copies, 8 at once (3 busy, 75.5 GB)'."""
     m = f['copies'][0]
+    if f.get('kind') == 'embedding':
+        return f"{f['id']}: embedding model, {'kept loaded' if llmshare.embedding(f['id']) else 'loaded'} ({m['state'].lower()}, {m.get('size')})"
     state = 'generating' if f['busy'] or any(c['state'] in ('GENERATING', 'PROCESSING') for c in f['copies']) else m['state'].lower()
     if len(f['copies']) > 1: return f"{f['id']}: {len(f['copies'])} replicas, {f['at_once']} slots ({state}, {f['busy']} active, {f['size']:.1f} GB)"
     return f"{f['id']}: 1 instance, {f['at_once']} slots ({state}, {f['busy']} active, {m.get('size')})"
@@ -178,12 +180,21 @@ def family_words(f):
 
 def families(models):
     """The loaded models grouped by family (a model loaded as two copies is one model):
-    [{id, copies: [models], at_once, busy, size}], first copy first."""
+    [{id, kind, copies: [models], at_once, busy, size}], first copy first; kind 'embedding' for an embedding model (its
+    family's kind, or LM Studio's type), whose slots are no batch's: at_once 0."""
     out = {}
     for m in models: out.setdefault(llmshare.family(m['id']), []).append(m)
     from .models import gb
-    return [dict(id=f, copies=sorted(ms, key=lambda m: (m['id'] != f, len(m['id']), m['id'])), at_once=sum(m['parallel'] or 0 for m in ms),
+    def kind(f, ms): return 'embedding' if llmshare.embedding(f) or any(m.get('type') == 'embedding' for m in ms) else 'llm'
+    return [dict(id=f, kind=kind(f, ms), copies=sorted(ms, key=lambda m: (m['id'] != f, len(m['id']), m['id'])),
+                 at_once=0 if kind(f, ms) == 'embedding' else sum(m['parallel'] or 0 for m in ms),
                  busy=sum(m.get('busy', 0) for m in ms), size=sum(gb(m.get('size')) for m in ms)) for f, ms in out.items()]
+
+
+def embedding_words(models=None):
+    """Each embedding family in the settings that is not loaded now, in words: ['<id>: embedding model not loaded: why']."""
+    from . import models as M
+    return [f"{e['id']}: embedding model not loaded: {e['words']}" for e in M.embeddings_view(models) if not e['loaded']]
 
 
 def batch(log_dir):
