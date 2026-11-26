@@ -1,6 +1,6 @@
 # <img src="docs/icon.png" alt="" width="32" height="32"> Local Models Hub
 
-By [Haedo Labs](https://haedolabs.com).
+By [Haedo Labs](https://haedolabs.com)™.
 
 A gateway in front of LM Studio, for a Mac where several programs and Claude Code sessions share the same local models.
 
