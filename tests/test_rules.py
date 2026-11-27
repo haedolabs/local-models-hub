@@ -1324,17 +1324,6 @@ def test_privacy_check(box):
     t('it says what it read: the commits not on origin, so many lines, files and messages',
       r['status'] == 'hits' and r['since'] == 'origin' and r['lines'] == 4 and r['files'] == 1 and r['commits'] == 1, {k: r[k] for k in ('status', 'since', 'lines', 'files', 'commits')})
     t('no word list: it says the check was skipped, never a silent pass', cli.private_check(repo, os.path.join(box, 'none.txt'))['status'] == 'skipped')
-    from unittest.mock import patch
-    import contextlib, io
-    suites = [(name, True, 'passed') for name in cli.TESTS]
-    with patch.object(cli, '_git', side_effect=lambda *a: '' if a[0] == 'status' else 'main'), patch.object(cli, 'preflight', return_value=None), \
-         patch.object(cli, 'run_tests', return_value=suites), patch.object(cli, 'stamp') as stamp:
-        with patch.object(cli.shutil, 'which', return_value=None), contextlib.redirect_stdout(io.StringIO()): code = cli.publish([])
-        t('publish stops before the stamp when plugin validation cannot run', code == 1 and not stamp.called)
-        with patch.object(cli.shutil, 'which', return_value='/validator'), patch.object(cli.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
-             patch.object(cli, 'PRIVATE_WORDS', os.path.join(box, 'none.txt')), contextlib.redirect_stdout(io.StringIO()): code = cli.publish([])
-        t('publish stops before the stamp when the privacy check was skipped', code == 1 and not stamp.called)
-
     print('publish: a word stays in the commit that added it; a later commit does not clear it')
     g('reset', '-q', '--hard', 'origin/main')
     open(os.path.join(repo, 'b.txt'), 'w').write('zephyr in one commit\n')
@@ -1397,20 +1386,65 @@ def test_privacy_check(box):
     except RuntimeError as e: moved = f'refused: {e}'
     t('HEAD moved since the checks: refused', str(moved).startswith('refused'), moved)
 
-    print('publish: before anything is stamped, the version, the tag and origin are checked')
-    g('reset', '-q', '--hard', 'HEAD~1'); g('push', '-q', '-f', 'origin', 'HEAD:refs/heads/main'); g('fetch', '-q', 'origin')
-    P = lambda want, cur='1.0.0': cli.preflight(repo, want, cur, 'main')
-    t('a version not above the current one is refused', P('1.0.0') and P('0.9.9') and P('1.0') , (P('1.0.0'), P('0.9.9'), P('1.0')))
-    g('tag', '-a', 'v1.0.5', '-m', 'old'); t('a tag that exists here is refused', P('1.0.5') and 'v1.0.5' in P('1.0.5'), P('1.0.5')); g('tag', '-d', 'v1.0.5')
-    other = os.path.join(box, 'other-clone'); subprocess.run(['git', 'clone', '-q', origin, other], check=True)
-    o = lambda *a: subprocess.run(['git', '-C', other, *a], capture_output=True, text=True, check=True).stdout
-    o('config', 'user.email', 't@example.org'); o('config', 'user.name', 'T'); o('config', 'commit.gpgsign', 'false'); o('config', 'tag.gpgsign', 'false')
-    o('tag', '-a', 'v1.0.6', '-m', 'pushed elsewhere'); o('push', '-q', 'origin', 'v1.0.6')
-    w6 = P('1.0.6')
-    t('a tag that is already on origin is refused', w6 and 'origin' in w6, w6)
-    t('a new version with origin contained in HEAD: nothing to say', P('1.0.7') is None, P('1.0.7'))
-    open(os.path.join(other, 'later.txt'), 'w').write('x\n'); o('add', '.'); o('commit', '-q', '-m', 'pushed from elsewhere'); o('push', '-q', 'origin', 'HEAD:main')
-    t('origin has a commit this branch lacks: refused (pull first), nothing stamped', P('1.0.7') and 'pull' in P('1.0.7'), P('1.0.7'))
+    test_release_commands(repo, origin, words)
+
+
+def test_release_commands(repo, origin, words):
+    """Both repositories are temporary. HEAD is a version stamp whose tag has not been written yet."""
+    import contextlib, io
+    from unittest.mock import patch
+    from localmodels import cli
+    def git(folder, *args):
+        return subprocess.run(['git', '-C', folder, *args], check=True, capture_output=True, text=True).stdout.strip()
+    def run(*args):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cli.main(args)
+    base, stamped = git(origin, 'rev-parse', 'main'), git(repo, 'rev-parse', 'HEAD')
+    git(repo, 'remote', 'set-url', 'origin', origin + '-offline')
+    with patch.object(cli, 'HOME', repo), patch.object(cli, 'PRIVATE_WORDS', words):
+        t('commit finishes an interrupted local tag without a second bump', run('commit') == 0
+          and git(repo, 'rev-parse', 'v1.0.1^{commit}') == stamped and git(repo, 'rev-parse', 'HEAD') == stamped)
+        git(repo, 'commit', '--allow-empty', '-qm', 'Next change')
+        change = git(repo, 'rev-parse', 'HEAD')
+        t('commit --dry previews without stamping', run('commit', '--dry') == 0 and git(repo, 'rev-parse', 'HEAD') == change)
+        t('commit refuses lower, unchanged, or nonnumeric versions', all(run('commit', '--version', v) for v in ('0.9.9', '1.0.1', '1.0', '1.0.1-2')))
+        git(repo, 'tag', '-a', 'v1.0.4', '-m', 'Reserved version')
+        t('an existing local tag cannot be reused', run('commit', '--version', '1.0.4') != 0)
+        t('commit stamps and tags locally with origin unreachable', run('commit') == 0)
+        release = git(repo, 'rev-parse', 'HEAD')
+        tag = git(repo, 'rev-parse', 'refs/tags/v1.0.2')
+        t('one patch increment in both files; annotated tag at HEAD and remote unchanged',
+          git(repo, 'rev-parse', 'v1.0.2^{commit}') == release and git(repo, 'cat-file', '-t', tag) == 'tag'
+          and "'1.0.2'" in git(repo, 'show', 'HEAD:' + cli.STAMPED[0]) and json.loads(git(repo, 'show', 'HEAD:' + cli.STAMPED[1]))['version'] == '1.0.2'
+          and git(origin, 'rev-parse', 'main') == base and not git(origin, 'tag', '-l', 'v1.0.2'))
+        t('repeating commit does not bump a tagged checkout again', run('commit') == 0 and git(repo, 'rev-parse', 'HEAD') == release)
+        git(repo, 'remote', 'set-url', 'origin', origin)
+        git(repo, 'config', 'push.followTags', 'true')
+        suites = [(name, True, 'passed') for name in cli.TESTS]
+        with patch.object(cli, 'run_tests', return_value=suites), patch.object(cli.shutil, 'which', return_value='/usr/bin/true'):
+            with patch.object(cli.shutil, 'which', return_value=None):
+                t('no plugin validator: push stops', run('push') != 0)
+            with patch.object(cli, 'PRIVATE_WORDS', words + '-absent'):
+                t('no private word list: push stops', run('push') != 0)
+            t('a different requested version is refused', run('publish', '--version', '1.0.3') != 0)
+            t('push --dry leaves both remote refs alone', run('push', '--dry') == 0 and git(origin, 'rev-parse', 'main') == base
+              and not git(origin, 'tag', '-l', 'v1.0.2'))
+            t('push sends the exact commit and tag object, without following other tags', run('push') == 0
+              and git(origin, 'rev-parse', 'main') == release and git(origin, 'rev-parse', 'v1.0.2') == tag and not git(origin, 'tag', '-l', 'v1.0.4'))
+            t('publish retries the same release without another stamp', run('publish') == 0 and git(repo, 'rev-parse', 'HEAD') == release)
+            git(repo, 'tag', '-a', 'later-note', '-m', 'nothing-matches-this', release)
+            t('an explicit tag on a commit already on origin is still checked', cli.private_check(repo, words, tip=git(repo, 'rev-parse', 'later-note'))['status'] == 'hits')
+            git(repo, 'commit', '--allow-empty', '-qm', 'Another change')
+            t('push refuses untagged changes at HEAD', run('push') != 0 and git(origin, 'rev-parse', 'main') == release)
+            git(origin, 'update-ref', 'refs/tags/v1.0.3', base)
+            t('a conflicting remote tag leaves the remote branch intact', run('commit') == 0 and run('push') != 0
+              and git(origin, 'rev-parse', 'main') == release and git(origin, 'rev-parse', 'v1.0.3') == base)
+            # Advance origin/main separately; a rejected branch must not publish its accompanying tag either.
+            foreign = git(repo, 'commit-tree', release + '^{tree}', '-p', release, '-m', 'Other checkout')
+            git(repo, '-c', 'push.followTags=false', 'push', 'origin', f'{foreign}:refs/heads/main')
+            git(repo, 'commit', '--allow-empty', '-qm', 'Prepare another version')
+            t('a divergent origin stops the branch and tag together', run('commit', '--version', '1.1.0') == 0 and run('push') != 0
+              and git(origin, 'rev-parse', 'main') == foreign and not git(origin, 'tag', '-l', 'v1.1.0'))
 
 
 def test_secret_check(box):

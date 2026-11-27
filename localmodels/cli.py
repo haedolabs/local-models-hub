@@ -80,8 +80,10 @@
   localmodels stop [--now]       the supervisor and every worker, once no request is in flight (--now: at once)
   localmodels gateway            the supervisor, in the foreground (what launchd runs); --check validates a release's
   localmodels mcp                the MCP server (Claude Code starts it)
-  localmodels publish [--version X.Y.Z] [--dry] [--remote URL]   the tests, the plugin check, the privacy and secrets
-                                 checks, then the version stamped, committed, tagged and pushed (--dry: the checks only)
+  localmodels commit [--version X.Y.Z] [--dry]   after committing the changes, stamp and tag the next patch locally
+                                 (--version selects a version; --dry shows it). No remote is contacted
+  localmodels push [--dry] [--remote URL]   check and push the tagged release at HEAD to origin, without a version bump
+  localmodels publish            same as push; --version X.Y.Z verifies the version already committed
   localmodels prepush            git's pre-push hook (install writes it): the privacy and secrets checks on every push,
                                  and no rewrite or deletion of a remote branch (LOCALMODELS_ALLOW_REWRITE=1 on purpose)
   localmodels help | -h | --help anywhere: this text. An option a verb does not take, or a value it cannot use, runs
@@ -1678,6 +1680,12 @@ def _scan_push(repo, tip, held, held_name, remote='origin'):
             if kind != 'tag' or target not in sent: continue
             for line in body.split('\n'):
                 if held(line): hit(f'tag {name}', line.strip()[:160], ('tag', name, line))
+    # An explicit tag can be new even when its commit is already on the remote.
+    if git('cat-file', '-t', tip).strip() == 'tag':
+        headers, _, body = git('cat-file', 'tag', tip).partition('\n\n')
+        name = next(line[4:] for line in headers.splitlines() if line.startswith('tag '))
+        for line in body.splitlines():
+            if held(line): hit(f'tag {name}', line.strip()[:160], ('tag', name, line))
     out['status'] = 'hits' if out['hits'] else 'clean'
     return out
 
@@ -1763,22 +1771,26 @@ def set_prepush_hook(repo=None):
     return f'the pre-push hook {"updated" if cur else "written"}: every push from this checkout gets the privacy and secrets checks ({path})'
 
 
-def preflight(repo, want, current, branch):
-    """What would make this release go wrong, checked before anything is stamped: a version that is not X.Y.Z or not
-    above the current one, its tag already here or on origin, or origin's branch holding commits HEAD lacks (the branch
-    push would be refused while the tag went out). Fetches origin. -> words, or None when all is well."""
-    if not re.match(r'^\d+\.\d+\.\d+$', str(want or '')): return f'{want!r} is not a version like 1.2.3'
-    cur = (current if current.count('.') == 2 else current + '.0').split('.')
-    if tuple(int(x) for x in want.split('.')) <= tuple(int(x) for x in cur): return f'{want} is not above the current version {current}'
-    git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True, timeout=120)
-    if git('rev-parse', '-q', '--verify', f'refs/tags/v{want}').returncode == 0: return f'the tag v{want} already exists here'
-    if 'origin' not in git('remote').stdout.split(): return None                   # the first push: nothing there yet
-    r = git('fetch', '-q', 'origin')
-    if r.returncode: return f'could not fetch origin ({(r.stderr or r.stdout).strip()[:200]}): nothing checked against it'
-    if git('ls-remote', '--tags', 'origin', f'refs/tags/v{want}').stdout.strip(): return f'the tag v{want} is already on origin'
-    if git('rev-parse', '-q', '--verify', f'refs/remotes/origin/{branch}').returncode == 0 and \
-            git('merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD').returncode != 0:
-        return f'origin/{branch} has commits this branch lacks: pull first (git pull --ff-only origin {branch})'
+RELEASE_VERSION = re.compile(r'(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}')
+
+
+def release_checkout():
+    """The clean checkout being released. Both committed version files must agree."""
+    if _git('status', '--porcelain'):
+        raise ValueError('the working tree has changes: commit the intended changes first (git status)')
+    branch, head = _git('rev-parse', '--abbrev-ref', 'HEAD'), _git('rev-parse', 'HEAD')
+    if branch == 'HEAD': raise ValueError('HEAD is detached: check out the release branch first')
+    match = re.search(r"^VERSION = '([^']+)'$", _git('show', f'{head}:{STAMPED[0]}'), re.M)
+    plugin = json.loads(_git('show', f'{head}:{STAMPED[1]}'))
+    if not match or not RELEASE_VERSION.fullmatch(match[1]) or not isinstance(plugin, dict) or plugin.get('version') != match[1]:
+        raise ValueError('the hub and plugin must have the same X.Y.Z version')
+    return branch, head, match[1]
+
+
+def release_tag(version, head):
+    """The exact annotated tag object for this version at head, or None."""
+    tag = _git('rev-parse', '-q', '--verify', f'refs/tags/v{version}^{{tag}}', check=False)
+    if tag and _git('rev-parse', f'{tag}^{{commit}}') == head: return tag
     return None
 
 
@@ -1788,37 +1800,66 @@ def stamp(repo, want, head):
     staged or changed, so nothing goes into the release that was not read."""
     git = lambda *a: subprocess.run(['git', '-C', repo, *a], capture_output=True, text=True)
     now = git('rev-parse', 'HEAD').stdout.strip()
-    if now != head: raise RuntimeError(f'HEAD moved since the checks ({head[:7]} to {now[:7]}): run publish again')
-    if git('status', '--porcelain').stdout.strip(): raise RuntimeError('the working tree or the index changed since the checks: run publish again')
+    if now != head: raise RuntimeError(f'HEAD moved since the checks ({head[:7]} to {now[:7]}): run localmodels commit again')
+    if git('status', '--porcelain').stdout.strip(): raise RuntimeError('the working tree or the index changed: run localmodels commit again')
     init = os.path.join(repo, 'localmodels', '__init__.py')
     text = open(init).read()
     new = re.sub(r"VERSION = '[^']*'", f"VERSION = '{want}'", text, count=1)
     if new == text: raise RuntimeError('could not find VERSION in localmodels/__init__.py')
     p = os.path.join(repo, STAMPED[1])
-    d = json.load(open(p)); d['version'] = want
-    open(init, 'w').write(new)
-    open(p, 'w').write(json.dumps(d, indent=2) + '\n')
-    r = git('commit', '-q', '-m', f'Release {want}', '--', *STAMPED)
-    if r.returncode:
-        git('checkout', 'HEAD', '--', *STAMPED)                # the stamp is undone: the tree is as the checks left it
-        raise RuntimeError((r.stderr or r.stdout).strip())
-    return git('rev-parse', 'HEAD').stdout.strip()
-
-
-def publish(a):
-    """Tests, the version stamped into the code and the plugin manifest, a commit, a tag, a push. Nothing leaves this Mac
-    until the push, and the push needs a remote (--remote URL the first time, or set up by hand)."""
+    manifest = open(p).read()
+    d = json.loads(manifest); d['version'] = want
+    updates = [(init, text, new), (p, manifest, json.dumps(d, indent=2) + '\n')]
     try:
-        if _git('status', '--porcelain'): print('the working tree has changes: commit or stash them first (git status)'); return 2
-        branch, head = _git('rev-parse', '--abbrev-ref', 'HEAD'), _git('rev-parse', 'HEAD')
-    except RuntimeError as e: print(f'git: {e}'); return 2
-    if branch == 'HEAD': print('HEAD is detached: check out the branch to release first'); return 2
-    cur = VERSION if VERSION.count('.') == 2 else VERSION + '.0'
-    want = opt(a, '--version')
-    if not want:
-        x, y, z = (int(p) for p in cur.split('.')); want = f'{x}.{y}.{z + 1}'
-    why = preflight(HOME, want, VERSION, branch)
-    if why: print(f'nothing published: {why}'); return 2
+        for path, _, after in updates:
+            with open(path, 'w') as f: f.write(after)
+        r = git('commit', '-q', '-m', f'Release {want}', '--', *STAMPED)
+        if r.returncode: raise RuntimeError((r.stderr or r.stdout).strip())
+    except (OSError, RuntimeError):
+        for path, before, after in updates:
+            if os.path.isfile(path) and open(path).read() == after:
+                with open(path, 'w') as f: f.write(before)
+        raise
+    release = git('rev-parse', 'HEAD').stdout.strip()
+    if git('rev-parse', release + '^').stdout.strip() != head:
+        raise RuntimeError('HEAD moved during the release commit; check the branch before tagging')
+    return release
+
+
+def commit_release(a):
+    """Stamp and tag committed changes locally. Retrying after a tag failure finishes the same version."""
+    try:
+        branch, head, current = release_checkout()
+        want = opt(a, '--version')
+        tagged = release_tag(current, head)
+        if tagged and (want is None or want == current):
+            print(f'v{current} is already committed locally at {head[:7]}'); return 0
+        pending = (not tagged and _git('log', '-1', '--format=%s', head) == f'Release {current}'
+                   and set(_git('diff-tree', '--no-commit-id', '--name-only', '-r', head).splitlines()) == set(STAMPED))
+        if pending:
+            if want is not None and want != current: raise ValueError(f'finish the untagged release {current} first')
+            want = current
+        else:
+            major, minor, patch = map(int, current.split('.'))
+            if want is None: want = f'{major}.{minor}.{patch + 1}'
+            if not RELEASE_VERSION.fullmatch(want): raise ValueError(f'{want!r} is not a version like 1.2.3')
+            if tuple(map(int, want.split('.'))) <= (major, minor, patch): raise ValueError(f'{want} is not above {current}')
+        if _git('tag', '--list', f'v{want}'): raise ValueError(f'tag v{want} already exists')
+        if '--dry' in a:
+            print(f'would tag v{want} locally on {branch}' + (' (already stamped)' if pending else ' after stamping the version')); return 0
+        lock = os.path.join(HOME, _git('rev-parse', '--git-common-dir'), 'localmodels-release.lock')
+        with llmshare.flocked(lock):
+            if release_checkout() != (branch, head, current) or _git('tag', '--list', f'v{want}'):
+                raise ValueError('the checkout or tag changed: run localmodels commit again')
+            release = head if pending else stamp(HOME, want, head)
+            _git('tag', '-a', f'v{want}', '-m', f'Release {want}', release)
+        print(f'v{want} committed locally at {release[:7]} on {branch}'); return 0
+    except (OSError, RuntimeError, ValueError) as e:
+        print(f'local release incomplete: {e}'); return 2
+
+
+def release_checks(head):
+    """The gates for publishing the tagged checkout, including all commits the push would send."""
     print('1. the sandbox tests:')
     suites = run_tests()
     missing = set(TESTS) - {name for name, _, _ in suites}
@@ -1859,27 +1900,36 @@ def publish(a):
         for line in secret_words(sc): print('   ' + line)
         print('   nothing published'); return 1
     print('   clean: no credential, no key file, no file that runs code on GitHub or on install')
-    if '--dry' in a: print(f'--dry: the checks only; nothing stamped, committed or pushed (this release would be {want})'); return 0
-    try:
-        release = stamp(HOME, want, head)
-        _git('tag', '-a', f'v{want}', '-m', f'Release {want}', release)
-    except (RuntimeError, OSError, ValueError) as e: print(f'nothing published: {e}'); return 1
-    print(f'4. version {want} stamped, committed and tagged (v{want}) on {branch}')
-    remote = opt(a, '--remote')
-    try:
-        if remote and 'origin' not in _git('remote').split(): _git('remote', 'add', 'origin', remote)
-        if 'origin' not in _git('remote').split():
-            print('5. no remote yet: create an empty repository on GitHub (public), then either\n'
-                  f'   localmodels publish --remote git@github.com:<owner>/<repo>.git   (next time; this release is committed and tagged)\n'
-                  '   or: git remote add origin <url> && git push -u origin main --follow-tags')
-            return 0
-        _git('push', '--atomic', 'origin', f'{release}:refs/heads/{branch}', '--follow-tags')   # the checked commit and its release commit, with its tag, or nothing
-        url = _git('remote', 'get-url', 'origin')
-    except RuntimeError as e: print(f'5. push failed: {e}'); return 1
-    m = re.search(r'github\.com[:/]([^/]+)/([^/.]+)', url)
-    print(f'5. pushed to {url}')
-    if m: print(f'   install line for Claude Code users: /plugin install local-models --marketplace {m.group(1)}/{m.group(2)}')
     return 0
+
+
+def publish(a):
+    """Publish the existing local tag and its commit atomically. A retry never creates a release."""
+    try:
+        branch, head, version = release_checkout()
+        want = opt(a, '--version')
+        if want is not None and want != version: raise ValueError(f'the checkout is {version}, not {want}')
+        tag = release_tag(version, head)
+        if not tag: raise ValueError(f'HEAD is not tagged v{version}; prepare the local release with localmodels commit')
+        url = opt(a, '--remote')
+        has_origin = 'origin' in _git('remote').splitlines()
+        if has_origin:
+            if url and url != _git('remote', 'get-url', '--push', 'origin'): raise ValueError('--remote differs from the configured origin')
+            _git('fetch', '--no-tags', '--prune', 'origin')
+        elif not url: raise ValueError('no origin configured: supply --remote URL for the first push')
+        elif _git('ls-remote', '--refs', url): raise ValueError('the first remote is not empty: configure it as origin first')
+        if release_checks(tag): return 1
+        if release_checkout() != (branch, head, version) or release_tag(version, head) != tag:
+            raise ValueError('the checked release changed: run localmodels push again')
+        dry = '--dry' in a
+        if not has_origin and not dry: _git('remote', 'add', 'origin', url)
+        dest = url if dry and not has_origin else 'origin'
+        _git('push', '--atomic', '--no-follow-tags', *(['--dry-run'] if dry else []), dest,
+             f'{head}:refs/heads/{branch}', f'{tag}:refs/tags/v{version}')
+        print(f'{"would push" if dry else "pushed"} v{version} ({head[:7]}) and {branch} to origin')
+        return 0
+    except (OSError, RuntimeError, ValueError) as e:
+        print(f'nothing published: {e}'); return 1
 
 
 FLAGS = {   # verb: (options that take a value, options that stand alone); a verb not listed reads its own words
@@ -1890,7 +1940,8 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
     'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude', '--force')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ('--now',)),
-    'restart': ((), ('--cold', '--now')), 'rollback': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'publish': (('--version', '--remote'), ('--dry',)), 'version': ((), ()),
+    'restart': ((), ('--cold', '--now')), 'rollback': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'version': ((), ()),
+    'commit': (('--version',), ('--dry',)), 'push': (('--version', '--remote'), ('--dry',)), 'publish': (('--version', '--remote'), ('--dry',)),
 }
 LEAST = {'--hours': 0, '--days': 0, '--wait': 0, '--minutes': 0, '--max-turns': 1, '--parallel': 0, '--context': 1}
 
@@ -1993,7 +2044,8 @@ def main(argv):
         from . import mcp_server
         if not a: print('localmodels agent-run <folder>'); return 2
         return mcp_server.run_folder(a[0])
-    if verb == 'publish': return publish(a)
+    if verb == 'commit': return commit_release(a)
+    if verb in ('push', 'publish'): return publish(a)
     if verb == 'prepush': return prepush(a)
     if verb == 'help': print(__doc__.strip()); return 0
     if verb == 'version': print(VERSION); return 0

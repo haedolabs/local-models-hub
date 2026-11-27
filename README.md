@@ -77,6 +77,8 @@ Requests stay on the Mac, or go over the peer cable when one is set up. The hub'
 
 Configuration, endpoints, architecture, the trust model, and known limitations: [docs/reference.md](docs/reference.md).
 
+For maintainers: `localmodels commit` versions and tags committed changes locally. `localmodels push` publishes that version to GitHub.
+
 ## License
 
 MIT, © 2026 [Haedo Labs](https://haedolabs.com); see [LICENSE](LICENSE). The dashboard's typeface, Libre Franklin, is under the SIL Open Font License 1.1.
