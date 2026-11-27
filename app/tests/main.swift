@@ -16,7 +16,7 @@ func snap(_ json: String) -> [String: Any] {
 
 let now = 1_800_000_000.0
 let fam = #"{"id": "test/family", "busy": 3, "at_once": 8}"#
-let peerUp = #"{"name": "m4pro", "state": "up", "off": false, "since": 1799999000, "families": {"test/family": {"match": true, "busy": 1, "slots": 4}}}"#
+let peerUp = #"{"name": "m4pro", "state": "up", "off": false, "since": 1799999000, "families": {"test/family": {"match": true, "busy": 1, "slots": 4}, "test/embed": {"kind": "embedding", "match": true, "busy": 1, "slots": 1}}}"#
 let peerDown0 = #"{"name": "m4pro", "state": "down", "since": 1799999000, "why": "no route", "families": {}}"#
 
 print("menu-bar app: the snapshot read into the icon, the menu and the notifications")

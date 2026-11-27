@@ -19,7 +19,8 @@
                                  Refused while a run holds a lease on a loaded model, unless --force
   localmodels off --peers [reason ...]   the same here, while the gateway keeps admitting requests and sends every one to
                                  its peers' slots (503 with Retry-After when no peer can take it); nothing is cut and no
-                                 lease refuses it: this Mac's instances are unloaded once the requests on them finish
+                                 lease refuses it: this Mac's instances are unloaded once the requests on them finish.
+                                 Peers are asked to load missing embedding families they already have on disk
   localmodels on                 switch them on again: the families loaded when switched off are loaded (all replicas)
   localmodels app install | uninstall   the menu-bar app: built here from app/ with the Command Line Tools' swiftc, signed
                                  ad hoc, in ~/Applications (state icon, on/off per host, two notifications, and a section

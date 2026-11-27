@@ -552,8 +552,8 @@ class Door(http.server.BaseHTTPRequestHandler):
     def over_link(self, method):
         """A request from a peer's hub (this Mac serves as a peer): only with the shared token, never from a web page, and
         only what a front needs: a model's work, the model listing, this Mac's report, and switching its local models off
-        and on (what `localmodels off` / `on` does here, refused while a run here holds a lease unless forced). Loads,
-        unloads, recycles, maintenance windows and the dashboard stay this Mac's own business."""
+        and on, and requesting a downloaded embedding from this Mac's instance manager. General model loads, unloads,
+        recycles, maintenance windows and the dashboard stay on loopback."""
         if self.headers.get('Origin'): return self._send(403, dict(error='forbidden: requests with an Origin header are not accepted on the peer link'))
         if not peers.token_ok(self.headers.get('X-Hub-Token')):
             return self._send(401, dict(error='unauthorized: missing or invalid X-Hub-Token (peer-token)'))
@@ -563,6 +563,11 @@ class Door(http.server.BaseHTTPRequestHandler):
         route = path.split('?')[0].rstrip('/').lower()
         if route in batches.ROUTES.values() and method == 'POST': return self.batch_inference(route)
         if method == 'GET' and route == '/hub/peer': return self._send(200, peers.report(self._link))
+        if method == 'POST' and route == peers.EMBED_ROUTE:
+            from . import models
+            try: req = json.loads(self._body())
+            except ValueError: req = None
+            return self._send(*models.request_embeddings(req.get('models') if isinstance(req, dict) else None))
         if method == 'GET' and route == '/hub/health':
             return self._send(200, dict(ok=True, hub='local-models', version=VERSION, name=peers.me(), maintenance=maint.view(), handoff=1, code=code_digest()))
         if method == 'GET' and route in ('/v1/models', '/api/v0/models', '/api/v1/models'): return self.forward('GET', path, b'', False)
@@ -582,7 +587,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                 why = llmshare.clean(j.get('why'), 100)
                 return self._send(*models.switch_off(bool(j.get('force')), f'from {self._link}' + (f': {why}' if why else '')))
             return self._switch_on_now()
-        return self._send(403, dict(error='forbidden on the peer link: only inference endpoints, the model list, /hub/peer, /hub/health and POST /hub/off, /hub/on are served'))
+        return self._send(403, dict(error=f'forbidden on the peer link: only inference endpoints, the model list, /hub/peer, /hub/health and POST /hub/off, /hub/on, {peers.EMBED_ROUTE} are served'))
 
     # ---- a request that makes a model work
     def batch_inference(self, route):
@@ -614,6 +619,10 @@ class Door(http.server.BaseHTTPRequestHandler):
             out = [c for c in llmshare.copies(model) if c not in away]
             if not out and llmshare.family(model) != model:
                 out = [c for c in llmshare.copies(llmshare.family(model)) if c not in away]
+            if self._link and out and llmshare.family(model) not in (llmshare.settings().get('families') or {}):
+                # An embedding requested by a front need not be in local settings. Never forward an unlisted id for JIT loading.
+                loaded = {r['id'] for r in llmshare.loaded() if r['state'] != 'LOADING'}
+                out = [c for c in out if c in loaded]
         if self._batch_pin and out:
             ids = {r['id'] for r in llmshare.loaded() if r['state'] != 'LOADING' and r['id'] in out
                    and batches.pin(peers.fingerprint(r)) == self._batch_pin}
@@ -816,6 +825,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                 path = batches.ROUTES[path]
                 headers['X-Batch-Pin'] = self._batch_pin
         who = f'peer {name}' if name else 'LM Studio'
+        peer_catalog = method == 'GET' and not self._link and path.split('?')[0] == '/api/v0/models' and maint.peers_only()
         up = None
         for attempt in (1, 2):
             try: up = Upstream(method, path, body if method in ('POST', 'PUT') else None, headers, base=target); break
@@ -823,6 +833,9 @@ class Door(http.server.BaseHTTPRequestHandler):
                 if peer:
                     w = peers.reach_words(e); peers.LINK.failed(peer, 0, w)
                     return 502, {}, f'peer {name}: {w}'
+                if peer_catalog:
+                    code, _ = self._send(200, peers.embedding_catalog(dict(object='list', data=[])))
+                    return code, {}, None
                 if attempt == 1 and start_lmstudio(): continue
                 if model: return 502, {}, f"LM Studio server unreachable at {UP} ({e})"
                 code, _ = self._send(502, dict(error=f"LM Studio server unreachable at {UP} ({e}): start it in LM Studio's Developer tab, or run: lms server start"))
@@ -911,7 +924,9 @@ class Door(http.server.BaseHTTPRequestHandler):
                 try:
                     obj = json.loads(data)
                     usage = counts(obj)
-                    if rename_model(obj, self._dialect, rename): data = json.dumps(obj, separators=(',', ':')).encode()
+                    if peer_catalog and isinstance(obj, dict) and isinstance(obj.get('data'), list):
+                        data = json.dumps(peers.embedding_catalog(obj)).encode()
+                    elif rename_model(obj, self._dialect, rename): data = json.dumps(obj, separators=(',', ':')).encode()
                 except ValueError: pass
             self.send_response(code); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(data)))
             self.end_headers(); self.wfile.write(data); self._sent = True

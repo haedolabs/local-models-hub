@@ -4,9 +4,8 @@ request to a peer Mac that has the same model loaded, over the Thunderbolt Bridg
 Every Mac runs the same hub. The Mac the projects run on is the front: its settings name each peer and its address
 ("peers": {"<name>": {"url": "http://<address>:1235"}}). A peer's settings say where it listens for the front
 ("serve": {"address": "<its Thunderbolt Bridge address>"}). Both hold the same token in peer-token (mode 0600, beside the
-settings; never in the repo or in models.json). Over the link a peer's door answers only requests with that token, never a
-web page, a load or unload, a recycle or the dashboard (gateway.Door.over_link); the one control it takes is switching its
-local models off and on (POST /hub/off, /hub/on), which the front sends with `localmodels peer off|on <name>` (switch()).
+settings; never in the repo or in models.json). The authenticated link supports inference, local off/on, and requests to
+load downloaded embedding models for a peers-only front. Swaps, recycles and the dashboard are loopback-only.
 
   report()      what a peer tells a front (GET /hub/peer): each family loaded there with its copies, its slots, how many
                 are busy and how many of those a front's requests hold, its fingerprint, its maintenance, its keeper's
@@ -53,6 +52,8 @@ ON = ' on '                    # a copy on a peer is "<family> on <peer>": model
 POLL, BACKOFF_MAX, REFUSED_AGAIN, ROUTE_EVERY, WRITE_EVERY = 2.0, 10.0, 300.0, 300.0, 10.0   # a peer is only ever on a direct link: a look at one that is away costs a connect timeout at most
 STRIKES, STRIKE_WINDOW = 3, 60   # requests a peer failed though its look was fine, within this many seconds: it is backed off
 PEER_WAIT = 5                  # seconds a peer's door may keep this Mac's request waiting for a slot before it answers 503
+EMBED_RETRY = 60               # seconds between requests for the same missing embeddings on a peer
+EMBED_ROUTE = '/hub/peer/ensure-embeddings'
 CONNECT = 3                    # seconds to connect to a peer
 WAKE = threading.Event()       # a request to a peer failed: look again at once
 LISTEN = {'words': None}       # in the door: what its listener for peers does now, in words (gateway.listen_link)
@@ -527,13 +528,14 @@ def report(front=None):
     loads = admission.in_flight(marks)
     for r in rows:
         base = llmshare.family(r['id'])
-        f = fams.setdefault(base, dict(copies=[], slots=0, busy=0, answering=collections.Counter(), holders=collections.Counter(),
+        kind = 'embedding' if r.get('type') == 'embedding' or llmshare.embedding(base, conf) else 'llm'
+        f = fams.setdefault(base, dict(kind=kind, copies=[], slots=0, busy=0, answering=collections.Counter(), holders=collections.Counter(),
                                        fingerprint=None, in_settings=base in conf, ctx=dict(budget=0, load=0, by=collections.Counter())))
         down = r['id'] in crashes.down_copies(base)
         n = busy.get(llmshare._safe(r['id']), 0)
         usable = r['state'] != 'LOADING' and not down and r['id'] not in draining
         b = admission.budget(r['id'])
-        f['copies'].append(dict(id=r['id'], parallel=r.get('parallel') or 1, state=r['state'], busy=n, down=down, draining=r['id'] in draining,
+        f['copies'].append(dict(id=r['id'], parallel=r.get('parallel') or 1, context=r.get('context'), state=r['state'], busy=n, down=down, draining=r['id'] in draining,
                                 ctx=loads.get(r['id'], 0), budget=b))
         if usable:
             f['slots'] += max(1, r.get('parallel') or 1); f['busy'] += n
@@ -562,7 +564,7 @@ def report(front=None):
     mem = dict(used=round(sample['used'], 1), total=round(sample['total'], 1), at=sample['at']) if sample else None
     try: chip = {k: v for k, v in dash.every('soc', 2, dash.soc).items() if k != 'cpu'}   # the front shows this host's chip at work
     except Exception as e: chip = None; errors.record('peer report: soc', e)
-    return dict(hub='local-models', version=VERSION, batch_inference=1, name=me(), time=round(time.time(), 1), maintenance=maint.view(), switching=maint.switching(),
+    return dict(hub='local-models', version=VERSION, batch_inference=1, ensure_embeddings=1, name=me(), time=round(time.time(), 1), maintenance=maint.view(), switching=maint.switching(),
                 listing_ok=llmshare.read_ok(), families={b: dict(f, answering=dict(f['answering']), holders=dict(f['holders'])) for b, f in fams.items()},
                 keeper=keeper, memory=mem, soc=chip)
 
@@ -582,6 +584,7 @@ class Peer:
         self.ctx = {}                                   # family -> (its context budget, what others hold there), from the last look
         self.match = {}                                 # family -> (True, None) or (False, words)
         self.first = {}                                 # family -> the slots of the peer's first copy (filled before a second copy anywhere)
+        self.embedding_request, self.embedding_retry, self.embedding_note = (), 0.0, None
 
 
 class Link:
@@ -704,8 +707,39 @@ class Link:
                 p.first[b] = int(cs[0].get('parallel') or 1) if cs else 0
                 if b not in conf: p.match[b] = (False, "not a family in this host's settings"); continue
                 p.match[b] = match(self.mine.get(b), (f or {}).get('fingerprint'), (conf.get(b) or {}).get('variant'))
+        self._ensure_embeddings(p, tok, rep, conf)
         if p.state == 'up' and time.time() - p.route_at > ROUTE_EVERY:
             p.route, p.route_at = route_of(p.host), time.time()
+
+    def _ensure_embeddings(self, p, tok, report, families):
+        """In peers-only mode request missing embedding families on each available peer, independently of inference.
+        A load refusal must not take the peer's already-serving chat models out of routing."""
+        wanted = ()
+        if p.state == 'up' and report.get('listing_ok') and maint.peers_only():
+            loaded = report.get('families') or {}
+            wanted = tuple(sorted(b for b in families if llmshare.embedding(b, families) and b not in loaded))
+        with self.lock:
+            if not wanted:
+                p.embedding_request, p.embedding_note = (), None
+                return
+            if not report.get('ensure_embeddings'):
+                p.embedding_note = 'update the peer hub to load missing embeddings: ' + ', '.join(wanted)
+                return
+            if wanted == p.embedding_request and time.time() < p.embedding_retry: return
+            p.embedding_request, p.embedding_retry = wanted, time.time() + EMBED_RETRY
+        try:
+            code, data = fetch(p.url, EMBED_ROUTE, {'X-Hub-Token': tok, 'X-Hub-From': me()},
+                               method='POST', body=json.dumps(dict(models=wanted)).encode())
+            reply = json.loads(data)
+            if code != 200: note = f'embedding load request: HTTP {code}'
+            else:
+                missing = set(reply['unavailable']) & set(wanted)
+                note = ('embedding not available on this peer: ' + ', '.join(sorted(missing)) if missing else
+                        'embedding load requested: ' + ', '.join(wanted))
+        except (OSError, http.client.HTTPException, KeyError, TypeError, ValueError) as e:
+            note = f'embedding load request failed: {type(e).__name__}'
+        with self.lock:
+            if wanted == p.embedding_request: p.embedding_note = note
 
     def _down(self, p, why):
         with self.lock:
@@ -845,7 +879,8 @@ class Link:
                 for b, f in ((p.report or {}).get('families') or {}).items() if p.state in ('up', 'maintenance') else ():
                     good, why = p.match.get(b, (False, None))
                     cap, here = p.cap.get(b, 0), self.held(name, b)
-                    fams[b] = dict(match=good, why=why, slots=f.get('slots'), busy=f.get('busy'), cap=cap, here=here, first=p.first.get(b, 0),
+                    kind = f.get('kind') or ('embedding' if llmshare.embedding(b) else 'llm')
+                    fams[b] = dict(kind=kind, match=good, why=why, slots=f.get('slots'), busy=f.get('busy'), cap=cap, here=here, first=p.first.get(b, 0),
                                    free_here=max(0, cap - here), copies=f.get('copies') or [], holders=f.get('holders') or {},
                                    answering=f.get('answering') or {}, fingerprint=f.get('fingerprint'),
                                    ctx=list(p.ctx[b]) if b in p.ctx else None)
@@ -855,7 +890,8 @@ class Link:
                          route_words=route_words(p.route[0], {p.route[0]: p.route[1]} if p.route[1] else {}) if p.route[0] else None,
                          address_words=address_words(p.host), next_at=round(p.next_at, 1), fails=p.fails, since=round(p.since, 1), families=fams,
                          maintenance=rep.get('maintenance'), switching=rep.get('switching') if p.state in ('up', 'maintenance') else None, off=bool((rep.get('maintenance') or {}).get('off')) if p.state == 'maintenance' else False,
-                         keeper=rep.get('keeper'), version=rep.get('version'), batch_inference=rep.get('batch_inference'), their_name=rep.get('name'),
+                          keeper=rep.get('keeper'), version=rep.get('version'), batch_inference=rep.get('batch_inference'), their_name=rep.get('name'),
+                          embedding_note=p.embedding_note,
                          memory=rep.get('memory') if p.state in ('up', 'maintenance') else None,
                          soc=rep.get('soc') if p.state in ('up', 'maintenance') else None)
                 d['words'] = words(d)
@@ -969,6 +1005,32 @@ def capacity(model):
                if p.get('state') == 'up' and (p.get('families') or {}).get(fam, {}).get('match'))
 
 
+def embedding_catalog(catalog):
+    """The v0 catalog in peers-only mode: preserve native metadata and show an embedding as loaded only when a
+    healthy, matching peer serves it. Busy slots still count as loaded; a requested or mismatched model does not."""
+    families = llmshare.settings().get('families') or {}
+    serving = {}
+    for p in view():
+        if p.get('state') != 'up': continue
+        for b, f in (p.get('families') or {}).items():
+            if llmshare.embedding(b, families) and f.get('match') and f.get('slots'):
+                contexts = [c['context'] for c in f.get('copies') or [] if c.get('context') and not c.get('down')
+                            and not c.get('draining') and c.get('state') != 'LOADING']
+                serving.setdefault(b, []).extend(contexts)
+    rows = catalog.setdefault('data', [])
+    by_id = {m.get('id'): m for m in rows if isinstance(m, dict) and m.get('type') == 'embeddings'}
+    for m in by_id.values():
+        m['state'] = 'not-loaded'
+        m.pop('loaded_context_length', None)
+    for b, contexts in serving.items():
+        m = by_id.get(b)
+        if m is None:
+            m = dict(id=b, object='model', type='embeddings'); rows.append(m)
+        m['state'] = 'loaded'
+        if contexts: m['loaded_context_length'] = min(contexts)
+    return catalog
+
+
 def words(p):
     """One peer in a line: state, link, and each family it serves as a replica for this gateway."""
     name, st = p.get('name'), p.get('state')
@@ -988,6 +1050,6 @@ def words(p):
         if not f.get('match'): bits.append(f"{b} excluded: {f.get('why')}"); continue
         n = len(f.get('copies') or [])
         bits.append(f"{b}: {n} instance{'s' if n != 1 else ''}, {f.get('free_here')}/{f.get('slots')} slots free for this gateway ({f.get('busy')} busy, {f.get('here')} from this gateway)")
-    warn = [w for w in (p.get('route_words'), p.get('address_words')) if w] + list((p.get('keeper') or {}).get('warnings') or [])
+    warn = [w for w in (p.get('route_words'), p.get('address_words'), p.get('embedding_note')) if w] + list((p.get('keeper') or {}).get('warnings') or [])
     if p.get('version') and p['version'] != VERSION: warn.append(f"runs release {p['version']}, this host {VERSION}")
     return f"peer {name}: reachable{link} · " + ('; '.join(bits) or 'no model loaded') + (' · ' + '; '.join(warn) if warn else '')

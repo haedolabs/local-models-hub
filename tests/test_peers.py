@@ -67,8 +67,12 @@ def fake(label):
                         self.wfile.write(b'data: ' + json.dumps(ev).encode() + b'\n\n')
                     self.wfile.write(b'data: [DONE]\n\n'); self.close_connection = True
                     return
-                out = json.dumps(dict(model=body.get('model'), choices=[dict(message=dict(content=f'{label} {tag}'))],
-                                      usage=dict(prompt_tokens=3, completion_tokens=2))).encode()
+                if self.path == '/v1/embeddings':
+                    result = dict(model=body['model'], data=[dict(index=0, embedding=[0.25, 0.75])])
+                else:
+                    result = dict(model=body.get('model'), choices=[dict(message=dict(content=f'{label} {tag}'))],
+                                  usage=dict(prompt_tokens=3, completion_tokens=2))
+                out = json.dumps(result).encode()
                 self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(out)))
                 self.end_headers(); self.wfile.write(out)
             except OSError: pass
@@ -940,6 +944,67 @@ def test_two_doors(box):
           headers={'X-Batch-Pin': '0' * 64})[0] == 503 and len(B.seen) == 1)
         snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=30).read())
         t('the dashboard\'s snapshot says peers only, in words', (snap.get('maintenance') or {}).get('peers') is True and 'peers only' in ((snap.get('maintenance') or {}).get('words') or ''), snap.get('maintenance'))
+
+        embed = 'test/embedding'
+        home = Path(peer_dir, 'lmstudio')
+        embedding = dict(ps_row(embed, parallel=1, variant=embed), modelKey=embed, type='embedding', contextLength=2048)
+        original = json.loads((home / 'ps.json').read_text())
+        (home / 'downloaded.json').write_text(json.dumps([ps_row(F), embedding]))
+        (home / 'with-embedding.json').write_text(json.dumps(original + [embedding]))
+        Path(lms_b).write_text('''#!/bin/sh
+cd "$(dirname "$0")/.." || exit 1
+case "$1" in
+    ls) cat downloaded.json ;;
+    load) [ "$2" = test/embedding ] || exit 1
+          echo "$2" >> loads
+          cp with-embedding.json ps.json ;;
+    ps) cat ps.json ;;
+    *) exit 1 ;;
+esac
+''')
+        conf['families'][embed] = dict(kind='embedding', variant=embed)
+        endpoint = '/hub/peer/ensure-embeddings'
+        request = dict(models=[embed])
+        t('only an authenticated peer can request embedding loads',
+          link(endpoint, token=None, method='POST', body=request)[0] == 401)
+        code, response = link(endpoint, method='POST', body=dict(models=[F, 'absent']))
+        t('the peer accepts neither a chat model nor a missing download for an embedding load',
+          code == 200 and response.get('requested') == [] and set(response.get('unavailable', [])) == {F, 'absent'}, (code, response))
+        Path(off_file).write_text(json.dumps(dict(at=time.time(), peers=True)))
+        try:
+            t('a peer with its own models off refuses the embedding request', link(endpoint, method='POST', body=request)[0] == 503)
+        finally: os.remove(off_file)
+        L.poll(force=True)
+        t('a requested embedding is not advertised before it is loaded',
+          not any(m.get('id') == embed and m.get('state') == 'loaded'
+                  for m in json.load(urllib.request.urlopen(url + '/api/v0/models'))['data']))
+        # Run the peer's regular instance-manager pass with the sandbox's two looks adjacent.
+        keeper = subprocess.run([sys.executable, '-c', 'from localmodels import crashes, models; crashes.MISS = 0; models.keep(); models.keep()'],
+                                cwd=HOME, env=env, capture_output=True, text=True, timeout=30)
+        L.poll(force=True)
+        until = time.monotonic() + 6
+        while not L.replicas(embed) and time.monotonic() < until:
+            time.sleep(0.1)
+            L.poll(force=True)
+        catalog = json.load(urllib.request.urlopen(url + '/api/v0/models'))['data']
+        t('peers only loads the requested embedding once beside the peer chat model, without changing its settings',
+          keeper.returncode == 0 and (home / 'loads').exists() and (home / 'loads').read_text().splitlines() == [embed]
+          and json.loads((home / 'ps.json').read_text()) == original + [embedding]
+          and embed not in json.loads(Path(peer_dir, 'models.json').read_text())['families'], keeper.stderr)
+        t('the normal model catalog discovers the matched peer embedding with its loaded context',
+          any(m.get('id') == embed and m.get('type') == 'embeddings' and m.get('state') == 'loaded'
+              and m.get('loaded_context_length') == 2048 for m in catalog), (catalog, L.peers['peer'].match))
+        plan(A); plan(B)
+        code, reply = front('/v1/embeddings', dict(model=embed, input='one'))
+        t('an embedding request reaches the peer and does not consume a chat slot',
+          code == 200 and reply.get('data') == [dict(index=0, embedding=[0.25, 0.75])]
+          and len(B.seen) == 1 and B.seen[0][0] == embed and not A.seen and llmshare.at_once() == 2, (code, reply))
+        conf['families'][embed]['variant'] = 'another-variant'
+        L.poll(force=True)
+        catalog = json.load(urllib.request.urlopen(url + '/api/v0/models'))['data']
+        t('a different embedding variant is neither advertised as loaded nor used',
+          not any(m.get('id') == embed and m.get('state') == 'loaded' for m in catalog) and not L.replicas(embed))
+        del conf['families'][embed]
         code, j = front('/hub/on', {})
         for _ in range(100):
             if not maint.switched_off(): break

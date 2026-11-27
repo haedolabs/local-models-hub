@@ -298,7 +298,7 @@ func hubGlance(_ snap: [String: Any], now: Double) -> Glance {
     let refusing = str(mt?["phase"]) == "on" && !peersOnly          // every request gets 503: no slot anywhere takes one
 
     // this Mac's slots
-    let fams = list(dict(snap["lmstudio"])["families"])
+    let fams = list(dict(snap["lmstudio"])["families"]).filter { str($0["kind"]) != "embedding" }
     let localBusy = off ? 0 : fams.reduce(0) { $0 + int($1["busy"]) }, localSlots = off ? 0 : fams.reduce(0) { $0 + int($1["at_once"]) }
     var busy = localBusy, slots = localSlots
 
@@ -317,7 +317,7 @@ func hubGlance(_ snap: [String: Any], now: Double) -> Glance {
         var b = 0, s = 0
         for (_, f) in dict(p["families"]) {
             let f = dict(f)
-            if (f["match"] as? Bool) == true { b += int(f["busy"]); s += int(f["slots"]) }
+            if (f["match"] as? Bool) == true && str(f["kind"]) != "embedding" { b += int(f["busy"]); s += int(f["slots"]) }
         }
         let since = num(p["since"])
         var title: String, action = Action.none

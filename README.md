@@ -30,7 +30,7 @@ The hub listens on `localhost:1235` and handles these. Clients change only their
 - **Crashes.** A crashed or stalled instance is reloaded with its settings, and requests that had not started answering are sent again.
 - **Recycling.** Each instance is drained and reloaded before the token counts at which the engine has been measured to crash.
 - **Attribution.** Each request is logged with its project and, when available, its Claude Code or OpenCode session ID. The dashboard lists recent sessions from both clients. Prompts and completions are never logged.
-- **Other Macs.** A second Mac's hub, over a Thunderbolt Bridge cable, can serve as more replicas.
+- **Other Macs.** A second Mac's hub can serve replicas over Thunderbolt Bridge. In peers-only mode, the gateway also asks peers to load matching embedding models they have on disk.
 - **Maintenance and off.** A window or a switch refuses new requests with `Retry-After`, lets the ones in flight finish, and loads nothing until it ends.
 - **Local agents.** `ask` and `batch` run the loaded model with read-only file tools, confined to the calling project's folder.
 - **Durable batches.** Submit embeddings or structured extraction, close the client, and collect the results by ID later. The hub pins the model and resumes unfinished items after a restart.

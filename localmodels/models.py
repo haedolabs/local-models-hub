@@ -47,6 +47,7 @@ LOADER = os.path.expanduser('~/Library/LaunchAgents/com.local-models.load-at-log
 START_TRIES, START_GAP = 3, 30                            # loads tried at start, and seconds between them
 EMBED_ROOM = 1.0                                          # GiB free an embedding model's load needs beside its weights
 EMBED_PAUSES = (60, 120, 300)                             # seconds before an embedding family's next try after 1, 2, 3+ failed loads
+PEER_EMBED_TTL = 180                                      # a front renews a missing embedding once a minute
 KV_ROOM = 1.5                                             # GiB an instance needs within the GPU's limit beside its weights, at least
 _gpu, _cond = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': (0, 0)}
 _sizes, _BORN = {}, time.time()                          # sizes on disk (read once a process); when this process started
@@ -395,7 +396,8 @@ def keep():
     try: did += watchdog.check(rows, fams)                  # an instance still listed whose engine stopped: out of routing, reloaded below
     except Exception as e: did.append(f'watchdog failed: {type(e).__name__}: {e}'); errors.record('instance manager: watchdog', e)
     have = {r['id'] for r in rows}
-    downs = crashes._read(fresh=True).get('down') or {}
+    state = crashes._read(fresh=True)
+    downs = state.get('down') or {}
     down = set(downs)
     reloading = {b for b, d in downs.items() if d.get('state') in ('loading again', 'waiting for room')}
     todo = []
@@ -413,7 +415,10 @@ def keep():
         if go: boot.append((b, f))
         if w: did.append(w)
     embeds = []                                              # embedding families: loaded whenever missing for sure, from nothing too
-    for b, f in fams.items():
+    embedding_families = {b: dict(key=b, kind='embedding') for b, rec in (state.get('embed') or {}).items()
+                          if rec.get('requested_until', 0) > time.time()}
+    embedding_families.update(fams)                          # the peer's own configuration takes precedence
+    for b, f in embedding_families.items():
         if not isinstance(f, dict) or f.get('kind') != 'embedding' or b in down: continue   # down: the crash machinery has it
         want = [c for c in llmshare.copy_ids(b, f.get('copies', 1)) if c not in have]
         if not want:
@@ -459,18 +464,67 @@ def _embed_update(b, **fields):
     with crashes._state() as st: st.setdefault('embed', {}).setdefault(b, {}).update(fields)
 
 
+def _downloaded_embeddings():
+    rows = downloaded()
+    if not isinstance(rows, list): return None
+    return {m['modelKey']: m for m in rows if isinstance(m, dict) and m.get('modelKey')
+            and m.get('type') == 'embedding' and not m.get('deviceIdentifier')}
+
+
+def request_embeddings(names):
+    """A linked front needs these families. Only the peer's installed embedding models qualify. The regular
+    instance manager performs the loads; this request never changes settings, unloads a model, or downloads weights."""
+    if not isinstance(names, list) or not names or any(not isinstance(b, str) or len(b) > 200 or not _ok_id(b)
+                                                       or llmshare.family(b) != b for b in names):
+        return 400, dict(error='models must be a nonempty list of embedding family ids')
+    if maint.on(): return 503, dict(error='local model loads paused on this peer')
+    available = _downloaded_embeddings()
+    if available is None: return 503, dict(error='could not list the models downloaded on this peer')
+    fams = llmshare.settings().get('families') or {}
+    wanted, unavailable = [], []
+    for b in sorted(set(names)):
+        f = fams.get(b)
+        key = (f or {}).get('key') or b
+        if key in available and (f is None or llmshare.embedding(b, fams)):
+            wanted.append(b)
+        else:
+            unavailable.append(b)
+    if wanted:
+        with crashes._state() as st:
+            for b in wanted:
+                if b not in fams:
+                    st.setdefault('embed', {}).setdefault(b, {})['requested_until'] = time.time() + PEER_EMBED_TTL
+        crashes.nudge()
+    return 200, dict(requested=wanted, unavailable=unavailable)
+
+
 def _load_embedding(b, f, c):
     """Load a missing instance of an embedding family (under the swap lock): its own settings, or LM Studio's defaults. A
     failed load pauses 1, 2, then 5 minutes before the next. -> words."""
-    if c in {r['id'] for r in llmshare.loaded(fresh=True)}: return []   # it changed meanwhile
+    if maint.on() or c in {r['id'] for r in llmshare.loaded(fresh=True)} or not llmshare.read_ok(): return []
     blocked = crashes.load_blocked(b, conditions())
     if blocked: return [f'{c}: embedding model load skipped: {blocked}']
-    why = room_for(f, _size_of(f.get('key') or b), 0)
+    key = f.get('key') or b
+    configured = (llmshare.settings().get('families') or {}).get(b)
+    if configured is None:                                 # the catalog or request can change before the keeper takes the swap lock
+        if embed_state(b).get('requested_until', 0) <= time.time(): return []
+        model = (_downloaded_embeddings() or {}).get(key)
+        if not model: return [f'{c}: requested embedding no longer available on disk']
+        size = (model.get('sizeBytes') or 0) / 2**30
+    else:
+        if configured != f: return []
+        size = _size_of(key)
+    why = room_for(f, size, 0)
     if why:
         _embed_update(b, words=f'load deferred: {why}'); return [f'{c}: embedding model load deferred: {why}']
-    ok, out = load(f.get('key') or b, c, None, None)
+    if maint.on(): return []
+    ok, out = load(key, c, None, None)
     if ok:
         ensure_server()                                    # LM Studio may turn its server off when a model changes
+        listed = llmshare.loaded(fresh=True, force=True)
+        ok = llmshare.read_ok() and any(r['id'] == c for r in listed)
+        if not ok: out = 'could not verify the loaded embedding in LM Studio'
+    if ok:
         _embed_update(b, fails=0, next=0.0, words=None, at=time.time())
         return [f'{c} loaded (embedding model, kept loaded)']
     fails = int(embed_state(b).get('fails') or 0) + 1
@@ -677,6 +731,10 @@ def _again(job, room):
     blocked = crashes.load_blocked(base, conditions())
     if blocked: return [f'{base}: crash recovery reload skipped: {blocked}']     # it would be refused again: nothing has changed
     f = (llmshare.settings().get('families') or {}).get(base)
+    context, parallel = job['context'], job['parallel']
+    if f is None and embed_state(base).get('requested_until'):
+        f = dict(kind='embedding')                          # a peer-requested embedding uses its observed settings or engine defaults
+    if (f or {}).get('kind') != 'embedding': context, parallel = context or 32768, parallel or 4
     for c in job['ids']:
         rows = llmshare.loaded(fresh=True)
         if c in {r['id'] for r in rows}: continue
@@ -685,7 +743,7 @@ def _again(job, room):
             crashes.waiting(base, why); did.append(f'{c} crashed; reload deferred: {why}'); return did
         if not tried: crashes.trying(base); tried = True
         t1 = time.time()
-        ok, out = load(job['key'], c, job['context'] or 32768, job['parallel'] or 4)
+        ok, out = load(job['key'], c, context, parallel)
         if not ok:
             crashes.loaded(base, [c], False, time.time() - t0, refused(out) or out)
             did.append(f'{c}: crash recovery reload failed: {refused(out) or out[-200:]}'); return did
@@ -735,8 +793,8 @@ def plan(ident, context=None):
         return want, [r['id'] for r in rows if llmshare.family(r['id']) == llmshare.family(ident)
                       and (r['id'] not in want or (context and r['context'] and r['context'] != int(context)))]
     context = int(context or f.get('context') or 32768)
-    drop = [r['id'] for r in rows if not llmshare.embedding(r['id'], fams)   # an embedding family stays loaded through a swap
-            and (r['id'] not in want or (r['context'] and r['context'] != context))]
+    drop = [r['id'] for r in llmshare.chat_rows(rows, fams)   # a peer-requested embedding also stays loaded through a chat swap
+            if r['id'] not in want or (r['context'] and r['context'] != context)]
     return want, drop
 
 

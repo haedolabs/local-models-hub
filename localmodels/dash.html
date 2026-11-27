@@ -692,7 +692,7 @@ function renderNow() {
   const hosts = [offHere ? 'this Mac off' : `this Mac ${busy}/${cap}`];
   for (const p of (S.peers || []).filter(p => p.state === 'up')) {
     let b = 0, c = 0;
-    for (const f of Object.values(p.families || {})) if (f.match) { b += f.busy || 0; c += f.slots || 0; }
+    for (const f of Object.values(p.families || {})) if (f.match && f.kind !== 'embedding') { b += f.busy || 0; c += f.slots || 0; }
     if (c && !refused) { busy += b; cap += c; hosts.push(`${p.name} ${b}/${c}`); }
   }
   $('k-ans').replaceChildren(String(busy), el('small', {}, `of ${cap} slots`));
