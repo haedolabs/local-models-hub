@@ -42,7 +42,7 @@ only requests with the shared token, and only a model's work, the model listing 
 """
 import http.client, http.server, itertools, json, os, re, resource, select, socket, subprocess, sys, threading, time, traceback, urllib.parse, urllib.request
 
-from . import HOME, VERSION, admission, affinity, crashes, dash, errors, icon, llmshare, maint, names, peers, recycle, runs, web, whois
+from . import HOME, VERSION, admission, affinity, batches, crashes, dash, errors, icon, llmshare, maint, names, peers, recycle, runs, web, whois
 
 llmshare.REMOTE = peers.LINK                            # slots on peers' copies are counted by this process's link
 PORT = llmshare.HUB_PORT
@@ -387,11 +387,16 @@ class InputError(Exception):
         self.status = status
 
 
+class NoBatchReplica(Exception):
+    """The last permitted copy disappeared before admission could take its slot."""
+
+
 class Door(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     server_version = f'localmodels-hub/{VERSION}'
     _sent, _dialect, _link = False, 'openai', None      # _link: the front's name, for a request that came over the link
     _stall = None                                        # the instance a forward was cut from because it stalled (watchdog.py)
+    _batch_pin, _batch_peers = None, ()
 
     def log_message(self, *a): pass
 
@@ -556,6 +561,7 @@ class Door(http.server.BaseHTTPRequestHandler):
         self._link = llmshare.clean(self.headers.get('X-Hub-From'), 40) or 'a peer'
         path = self.path
         route = path.split('?')[0].rstrip('/').lower()
+        if route in batches.ROUTES.values() and method == 'POST': return self.batch_inference(route)
         if method == 'GET' and route == '/hub/peer': return self._send(200, peers.report(self._link))
         if method == 'GET' and route == '/hub/health':
             return self._send(200, dict(ok=True, hub='local-models', version=VERSION, name=peers.me(), maintenance=maint.view(), handoff=1, code=code_digest()))
@@ -579,6 +585,19 @@ class Door(http.server.BaseHTTPRequestHandler):
         return self._send(403, dict(error='forbidden on the peer link: only inference endpoints, the model list, /hub/peer, /hub/health and POST /hub/off, /hub/on are served'))
 
     # ---- a request that makes a model work
+    def batch_inference(self, route):
+        value = self.headers.get('X-Batch-Pin') or ''
+        if not re.fullmatch('[0-9a-f]{64}', value): return self._send(400, dict(error='a model fingerprint is required'))
+        body = self._body()
+        try: j = json.loads(body)
+        except ValueError: j = None
+        if not isinstance(j, dict) or not isinstance(j.get('model'), str) or not j['model'] or j.get('stream'):
+            return self._send(400, dict(error='a non-streaming request with a model is required'))
+        self._batch_pin = value
+        self._batch_peers = set((self.headers.get('X-Batch-Peers') or '').split(',')) - {''}
+        path = next(path for path, alias in batches.ROUTES.items() if route == alias)
+        return self.generate(path, body, j, self.headers.get('X-Project'))
+
     def _candidates(self, model, skip=(), kind=None):
         """The copies this request may go to right now, in the order it takes them: the model's loaded copies, less those
         down after a crash or being drained for a recycle, and the family's copies on peers (peers.LINK: those up, with
@@ -595,8 +614,15 @@ class Door(http.server.BaseHTTPRequestHandler):
             out = [c for c in llmshare.copies(model) if c not in away]
             if not out and llmshare.family(model) != model:
                 out = [c for c in llmshare.copies(llmshare.family(model)) if c not in away]
+        if self._batch_pin and out:
+            ids = {r['id'] for r in llmshare.loaded() if r['state'] != 'LOADING' and r['id'] in out
+                   and batches.pin(peers.fingerprint(r)) == self._batch_pin}
+            out = [c for c in out if c in ids and llmshare.read_ok()]
         if not self._link and (llmshare.family(model) == model or not out):
             there = peers.LINK.replicas(model, skip)
+            if self._batch_pin:
+                there = [c for c in there if peers.split(c)[1] in self._batch_peers
+                         and batches.pin(peers.LINK.batch_fingerprint(c)) == self._batch_pin]
             if there and len(out) > 1 and kind not in llmshare.PEOPLE:
                 first = [c for c in there if peers.LINK.first_free(c)]
                 out = out[:1] + first + out[1:] + [c for c in there if c not in first]
@@ -630,7 +656,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             who = whois.identity(pid) if pid else {}
         project = llmshare.clean(project or who.get('project') or 'unknown', 80) or 'unknown'
         who = dict(who, session=llmshare.clean(self.headers.get('X-Session') or who.get('session'), 120) or None)
-        kind = llmshare.clean(self.headers.get('X-Kind'), 20).lower()
+        kind = 'batch' if self._batch_pin else llmshare.clean(self.headers.get('X-Kind'), 20).lower()
         if kind not in llmshare.KINDS: kind = (own_kind(pid) if pid else None) or 'other'
         step = llmshare.clean(self.headers.get('X-Step'), 120) or None
         run = runs.from_headers(self.headers)                                  # X-Run, X-Run-Total, X-Run-Done: the whole run; X-Phase...: its phase
@@ -676,6 +702,12 @@ class Door(http.server.BaseHTTPRequestHandler):
                     if words: rec['wait_for'] = words
                     else: rec.pop('wait_for', None)
                     mark_write(mark, rec)
+
+            def eligible():
+                candidates = self._candidates(model, skip, kind)
+                if self._batch_pin and not candidates: raise NoBatchReplica
+                return affinity.order(akey, candidates)
+
             base = llmshare.family(model)
             m = maint.refusing()
             if m:
@@ -693,6 +725,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                     if client_gone(self.connection):
                         code, note = 499, ('client closed the connection while queued' if tries == 1 else f'client closed the connection while held for a resend (after: {note})'); break
                     if not self._candidates(model, skip):  # the hold ran out, or no copy is loaded and none is on the way
+                        if self._batch_pin: raise NoBatchReplica
                         why = (f'local models switched off here (peers only) and no peer can take this request now ({peer_states()})' if maint.peers_only() else
                                f'{base} is still reloading after a crash' if crashes.reloading(model) else
                                f'{base} is being recycled' if recycle.draining() else
@@ -700,7 +733,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                         code, _ = self._send(503, dict(error=f'{why}; retry in {RETRY_AFTER} s'), retry_after=RETRY_AFTER); note = why; break
                     rec.update(state='queued', copy=None); mark_write(mark, rec)     # queued again after a hold or a resend
                     prefer = affinity.preferred(akey)
-                    with llmshare.slot_any(lambda: affinity.order(akey, self._candidates(model, skip, kind)), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
+                    with llmshare.slot_any(eligible, wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
                                            kind=kind, since=t0, publish=publish, need=need, fits=admission.fits, waiting=waiting,
                                            cancelled=lambda: client_gone(self.connection)) as (chosen, w):
                         waited += w
@@ -741,6 +774,9 @@ class Door(http.server.BaseHTTPRequestHandler):
                         time.sleep(1)
                 if note and not self._sent and code != 499:
                     code, _ = self._send(503, dict(error=f'no response from the model ({note}); the instance manager is reloading it; retry in {RETRY_AFTER} s'), retry_after=RETRY_AFTER)
+        except NoBatchReplica:
+            code, note = 503, 'no permitted replica of the pinned model is available'
+            self._send(code, dict(error=note), retry_after=5)
         except ConnectionAbortedError as e:
             code, note, waited = 499, str(e), max(0.0, time.time() - t0 - held)
         except TimeoutError as e:
@@ -776,6 +812,9 @@ class Door(http.server.BaseHTTPRequestHandler):
             if not target: return 502, {}, f'peer {name}: removed from settings'
             headers = {k: v for k, v in headers.items() if k.lower() not in OWN}   # the client's own credentials stay on this Mac
             headers.update(along or {}); headers.update(extra); headers['X-Timeout'] = str(peers.PEER_WAIT)
+            if self._batch_pin:
+                path = batches.ROUTES[path]
+                headers['X-Batch-Pin'] = self._batch_pin
         who = f'peer {name}' if name else 'LM Studio'
         up = None
         for attempt in (1, 2):
@@ -896,6 +935,14 @@ class Door(http.server.BaseHTTPRequestHandler):
     # ---- the hub's own pages
     def hub(self, method, path):
         route = path.split('?')[0].rstrip('/')
+        if route in batches.ROUTES.values() and method == 'POST': return self.batch_inference(route)
+        if route == '/hub/batches' or route.startswith('/hub/batches/'):
+            if self.headers.get('Origin') or self.headers.get('Sec-Fetch-Mode') or self.headers.get('Sec-Fetch-Site'):
+                return self._send(403, dict(error='batch records are available only to the calling project'))
+            cwd = whois.caller_folder(self.connection)
+            if not cwd: return self._send(403, dict(error='could not identify the calling project'))
+            code, obj = batches.api(method, path, self._body() if method == 'POST' else b'', self.headers.get_content_type(), cwd)
+            return self._send(code, obj)
         if route == '/hub/health':
             m = maint.read()
             sup = llmshare.supervisor()
@@ -980,7 +1027,7 @@ class Door(http.server.BaseHTTPRequestHandler):
             errors.record(f'{method} {route}', e); _internal['n'] += 1
             return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
         if route == '/hub/status':
-            return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(),
+            return self._send(200, dict(inflight=llmshare.inflight(), leases=llmshare.leases(), loaded=llmshare.loaded(), batches=batches.overview(),
                                         last_hour=llmshare.by_project(llmshare.requests_log(1)), waiting=llmshare.waiting()))
         return self._send(404, dict(error='not found; hub endpoints: /hub/health, /hub/status, /hub/snapshot, /hub/history, /hub/recent, /hub/peer, /hub/link, /hub/errors, /hub/runs, /hub/extensions, POST /hub/runs, POST /hub/recycle, POST /hub/off, POST /hub/on, POST /hub/link/off, POST /hub/link/on, POST /hub/extensions/run, POST /hub/client-error'))
 
@@ -1183,6 +1230,7 @@ def main(argv=()):
     threading.Thread(target=beats, daemon=True).start()
     threading.Thread(target=listen_link, daemon=True).start()          # this Mac as a peer, when the settings say so
     threading.Thread(target=peers.poller, daemon=True).start()         # this Mac's look at its peers, when it has any
+    threading.Thread(target=batches.recover, daemon=True).start()
     if not os.environ.get('LOCALMODELS_NO_KEEPER'): threading.Thread(target=keeper, daemon=True).start()
     threading.Thread(target=web.sampler, daemon=True).start()           # memory every 15 s, for the dashboard's chart
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} local-models gateway {VERSION} listening on {llmshare.HUB} -> LM Studio at {UP}", flush=True)

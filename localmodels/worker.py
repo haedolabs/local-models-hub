@@ -5,7 +5,7 @@ A worker's life:
   warming    adopt the listeners, sweep what dead gateways left, import every module, read the model listing, answer its
              own self-test on a private port; it accepts nothing yet. Then 'ready'.
   serving    after the supervisor's 'go': serve every listener, take the singleton roles (instance manager, peer poller,
-             memory sampler, link listener) whenever nobody holds them, report progress every 5 s.
+             memory sampler, link listener, batch recovery) whenever nobody holds them, report progress every 5 s.
   draining   after 'drain' (or SIGTERM): stop accepting, give the roles up between two passes, finish every connection it
              accepted, with no deadline; then leave the registry, say 'bye' and exit 0.
 A newer worker and an older one share the listeners, the admission queue, the slots and the peer slots, so both may
@@ -17,7 +17,7 @@ supervisor went away.
 """
 import importlib, json, os, select, signal, socket, struct, sys, threading, time, traceback, urllib.request
 
-from . import HOME, VERSION, errors, gateway, llmshare, maint, peers, web
+from . import HOME, VERSION, batches, errors, gateway, llmshare, maint, peers, web
 
 CHANNEL = 1                       # the lifeline protocol (supervisor.CHANNEL)
 WARM_LISTING = 45                 # seconds a warming worker tries to read the model listing
@@ -25,7 +25,7 @@ SELF_TEST = 20                    # seconds each self-test request may take
 PROGRESS_EVERY = 5
 ROLE_TRY = 0.5                    # a serving worker tries to take a free role this often
 IM_HANDOVER = 30                  # seconds a draining worker waits for another to take the instance manager
-ROLES = ('instance-manager', 'peer-poller', 'memory-sampler', 'link-listener')
+ROLES = ('instance-manager', 'peer-poller', 'memory-sampler', 'link-listener', 'batch-runner')
 LAZY = ('models', 'crashes', 'recycle', 'dash', 'peers', 'web', 'maint', 'runs', 'names', 'sessions', 'whois', 'errors')
 
 
@@ -306,6 +306,7 @@ class Worker:
         if name == 'instance-manager': gateway.keeper(self.stop)
         elif name == 'peer-poller': peers.poller(self.stop)
         elif name == 'memory-sampler': web.sampler(self.stop)
+        elif name == 'batch-runner': batches.recover(self.stop)
         elif name == 'link-listener':
             adopted = {k: s for k, s in self.servers.items() if self.listen.get(k, {}).get('link')}
             gateway.listen_link(self.stop, adopted=adopted, hold=self.hold_listener, drop=self.drop_listener)

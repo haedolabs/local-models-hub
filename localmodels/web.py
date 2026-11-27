@@ -132,6 +132,7 @@ def _embeddings(rows):
 
 
 def _snapshot():
+    from . import batches
     lm, users, cs = dash.lmstudio(), dash.users(), dash.claude()
     holders = collections.defaultdict(collections.Counter)          # copy -> {project: answering}
     marks = llmshare.inflight()
@@ -160,7 +161,7 @@ def _snapshot():
                door=dict(up=True, port=llmshare.HUB_PORT, queue=llmshare.waiting()),       # every live gateway's queue
                lmstudio=dict(server=lm['server'], families=fams, listing_ok=llmshare.read_ok(), listing_age=round(llmshare.listing_age()),
                              embeddings=_embeddings(lm['models'])),
-               settings_error=llmshare.settings_error(), write_problem=llmshare.write_problem(),
+               settings_error=llmshare.settings_error(), write_problem=llmshare.write_problem(), batches=batches.overview(),
                crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7)), stalled=crashes.stalled()),
                recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10]), held=recycle.held_back()),
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],

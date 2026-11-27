@@ -982,8 +982,8 @@ function progress(u) {             // the run (all its phases) and the phase it 
 }
 
 function renderUsers() {
-  const box = $('users'), us = S.users;
-  if (!us.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No active clients.')); return; }
+  const box = $('users'), us = S.users, batches = S.batches || [];
+  if (!us.length && !batches.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No active clients.')); return; }
   const head = ['project', 'what', 'now', 'model', 'running', 'Claude session'].map(h => el('th', {}, h));
   const rows = [];
   for (const u of us) {
@@ -1008,6 +1008,8 @@ function renderUsers() {
         el('td', {}, j.pct != null ? el('div', {class: 'ink2'}, `${j.pct}%` + (j.left ? ` · ~${left(j.left)}` : ''), el('div', {class: 'bar-thin'}, el('div', {style: `width:${j.pct}%`}))) : el('span', {class: 'muted'}, 'starting'))));
     }
   }
+  for (const b of batches) rows.push(el('tr', {}, el('td', {}, b.project), el('td', {}, 'batch'),
+    el('td', {colspan: 4}, `${b.state} · ${b.done} of ${b.total} done` + (b.failed ? ` · ${b.failed} failed` : '') + (b.reason ? ` · ${b.reason}` : ''))));
   tableIn(box, head, rows, 'localmodels for all of them');
 }
 

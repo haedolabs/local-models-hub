@@ -33,6 +33,7 @@ The hub listens on `localhost:1235` and handles these. Clients change only their
 - **Other Macs.** A second Mac's hub, over a Thunderbolt Bridge cable, can serve as more replicas.
 - **Maintenance and off.** A window or a switch refuses new requests with `Retry-After`, lets the ones in flight finish, and loads nothing until it ends.
 - **Local agents.** `ask` and `batch` run the loaded model with read-only file tools, confined to the calling project's folder.
+- **Durable batches.** Submit embeddings or structured extraction, close the client, and collect the results by ID later. The hub pins the model and resumes unfinished items after a restart.
 - **Dashboard and status.** At `http://localhost:1235`, in the terminal (`localmodels`), and in an optional menu-bar app.
 
 ## Install
@@ -65,13 +66,15 @@ Optional headers name the work: `X-Project`, `X-Kind` (`batch`, `chat`, `ask`, `
 
 In Claude Code, the plugin adds the MCP tools `status`, `guide`, `ask`, `batch`, `job_status`, `name`, and `swap_check`, and a hook that announces maintenance.
 
+From a project folder, `localmodels batch requests.jsonl` returns a job ID. `localmodels jobs ID` shows progress; `localmodels jobs ID --results` exports the finished results as JSONL. The [batch format and HTTP API](GUIDE.md#durable-batches) are the same for scripts and MCP.
+
 ## Rules for clients
 
 Send every request through the gateway. Hold a lease for a run that pauses more than 2 minutes. Call `swap_check` before loading or unloading a model. Leave LM Studio's server running. Honor `Retry-After` on `503`. The full contract is [GUIDE.md](GUIDE.md).
 
 ## Privacy
 
-Requests stay on the Mac, or go over the peer cable when one is set up. The hub's records hold metadata and token counts, never a prompt or a completion; the local agents' job logs are each project's own record of its answers. The gateway answers loopback requests only, and refuses requests from web pages. The peer link listens on one cable address and needs a shared token.
+Requests stay on the Mac, or go over the peer cable when one is set up. Durable batches stay local unless the submitting project names approved peers. Shared records hold metadata and token counts; batch inputs and answers are stored in the project's private job folder. The peer link listens on one cable address and needs a shared token.
 
 ## Reference
 

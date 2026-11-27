@@ -635,7 +635,7 @@ def live_gateways():
 
 class Role:
     """A loop only one gateway on this Mac runs at a time (the instance manager, the peer poller, the memory sampler, the
-    link listener): its holder is whoever holds run/roles/<name>.lock, freed by the OS when the holder dies. The lock's
+    link listener, and batch recovery): its holder is whoever holds run/roles/<name>.lock, freed by the OS when the holder dies. The lock's
     descriptor is never inherited, so lms and caffeinate children never keep a role. <name>.json says {pid, gen, since}."""
     def __init__(self, name, gen=None):
         self.name, self.gen, self.fd, self.since = name, gen, None, None

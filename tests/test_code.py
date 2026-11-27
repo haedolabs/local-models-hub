@@ -323,8 +323,7 @@ def test_agent_roots(box):
         scope = mcp_server._session_folder()
         t('an external worktree can use its own files and shares its main checkout’s job identity',
           scope.checkout == external and scope.main == repo and R(external, within=scope) == (external, None))
-        with patch.object(mcp_server.agent, 'loaded_model', return_value=({'id': 'test'}, None)), patch.object(subprocess, 'Popen') as launch:
-            launch.return_value.pid = os.getpid()
+        with patch.object(mcp_server.batches, 'model_info', return_value=('test', 'a' * 64, 4096)):
             jid, _ = mcp_server.start('batch', [dict(prompt='x')], folder=external, within=scope)
         os.environ['PWD'] = repo
         t('the main checkout can read a job started in the external worktree', mcp_server.call('job_status', dict(job=jid))['ok'])

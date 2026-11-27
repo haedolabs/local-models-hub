@@ -44,6 +44,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
     """A pretend LM Studio: answers by a plan ('ok', 'crash', 'bad', 'odd', 'slow', 'reset'), and remembers who asked, in order."""
     plan, seen, slow, on_odd, on_unload, hang = [], [], 3.0, None, None, 8.0
     lock = threading.Lock()
+    gates = {}
 
     def log_message(self, *a): pass
 
@@ -58,6 +59,7 @@ class Fake(http.server.BaseHTTPRequestHandler):
             except OSError: pass
             self.close_connection = True; return
         if what == 'slow': time.sleep(Fake.slow)
+        if what == 'gated': Fake.gates[body['tag']].wait(30)
         if what in ('hang', 'sse-hang'):                     # a stalled engine: nothing comes, then the door cuts the connection
             if what == 'sse-hang':
                 self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
@@ -125,7 +127,7 @@ def run(box):
     llmshare.REQUESTS, llmshare.WAITS = os.path.join(box, 'requests.jsonl'), os.path.join(box, 'waits.jsonl')
     crashes.STATE, crashes.RECORD, crashes.LOGS = os.path.join(box, 'keeper.json'), os.path.join(box, 'crashes.jsonl'), os.path.join(box, 'logs')
     crashes._seen_state.update(at=0.0, st={})
-    row = lambda i: dict(id=i, key=F, state='IDLE', size='1 GB', context=4096, parallel=1)
+    row = lambda i: dict(id=i, key=F, state='IDLE', size='1 GB', bytes=2**30, context=4096, parallel=1)
     rows = [row(F), row(F2)]
     llmshare.loaded, llmshare.parallel_of, llmshare.read_ok = (lambda fresh=False, force=False: list(rows)), (lambda m: 1), (lambda: True)
     llmshare.api_models = lambda timeout=3: {r['id']: 4096 for r in rows}
@@ -286,22 +288,39 @@ def run(box):
                   events[0][key] == wanted and events[0]['delta'] == payload['delta'])
 
         print('the door: the queue and programs that leave')
-        plan('slow', 'slow'); Fake.slow = 3.0
+        plan('gated', 'gated')
+        Fake.gates = {f'slow{i}': threading.Event() for i in range(2)}
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'slow{i}', kind='batch')) for i in range(2)]
         for x in ths: x.start()
-        time.sleep(0.8)                                              # both slots busy
+        assert until(lambda: len(Fake.seen) == 2, 10)
         threading.Thread(target=raw, args=(F, 'ghost'), kwargs=dict(close_after=0.5)).start()   # gives up while it waits
-        time.sleep(1.0)
         t('a disconnected waiter leaves admission while all slots are still occupied',
-          until(lambda: any(r.get('status') == 499 for r in llmshare.requests_log(1)), 0.8) and all(x.is_alive() for x in ths))
-        batch = threading.Thread(target=lambda: ask(tag='batch', kind='batch')); batch.start()
-        time.sleep(0.5)
+          until(lambda: any(r.get('status') == 499 for r in llmshare.requests_log(1)), 10) and all(x.is_alive() for x in ths))
+        from localmodels import batches
+        pinned = batches.pin(_peers.fingerprint(rows[0]))
+        path = batches.ROUTES['/v1/chat/completions']
+        lost = []
+        waiter = threading.Thread(target=lambda: lost.append(ask(tag='lost-replica', path=path, headers={'X-Batch-Pin': pinned})))
+        waiter.start()
+        assert until(lambda: llmshare.waiting_here()['others'] == 1, 10)
+        for r in rows: r['bytes'] += 1
+        waiter.join(5)
+        for r in rows: r['bytes'] -= 1
+        t('a queued pinned request reports the loss of its eligible replicas without waiting for a slot timeout',
+          lost and lost[0][0] == 503 and lost[0][2].get('Retry-After') and not any(s[1] == 'lost-replica' for s in Fake.seen))
+        batch = threading.Thread(target=lambda: ask(tag='batch', kind='ask', path=path,
+                                                   headers={'X-Batch-Pin': pinned})); batch.start()
+        assert until(lambda: llmshare.waiting_here()['others'] == 1, 10)
         chat = threading.Thread(target=lambda: ask(tag='chat', kind='chat')); chat.start()
+        assert until(lambda: llmshare.waiting_here()['people'] == 1, 10)
+        Fake.gates['slow0'].set()
+        assert until(lambda: any(s[1] == 'chat' for s in Fake.seen), 10)
+        Fake.gates['slow1'].set()
         for x in ths + [batch, chat]: x.join(30)
         tags = [s_[1] for s_ in Fake.seen]
         ghost_rows = [r_ for r_ in rows_logged(6) if r_.get('status') == 499]
         t('a program that hung up while waiting is dropped, not sent', 'ghost' not in tags and len(ghost_rows) == 1 and 'client closed' in ghost_rows[0].get('note', ''), (tags, [g.get('note') for g in ghost_rows]))
-        t('the chat request got the next free slot before the batch request that came first', tags.index('chat') < tags.index('batch'), tags)
+        t('the chat request got the next free slot before the earlier pinned batch, even with an interactive header', tags.index('chat') < tags.index('batch'), tags)
         plan('slow'); Fake.slow = 8.0; t_leave = time.time()
         s = raw(F, 'leaver', kind='test')
         time.sleep(1.2); s.close()                                   # gives up during the answer, 6.8 s before LM Studio would finish it

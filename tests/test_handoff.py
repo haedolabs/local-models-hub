@@ -234,7 +234,7 @@ def run(box, procs):
         return st if st.get('current') == os.path.basename(r1) and not st.get('deploy') else None
     st = wait_for(initial_deploy_done, 30) or {}
     t('status: one serving worker, the listeners, the run', st.get('ok') and [w['role'] for w in st.get('workers', [])] == ['serving'] and sorted(st.get('listeners') or {}) == ['v4', 'v6'], st)
-    t('the roles are taken by the serving worker', wait_for(lambda: set(health(port).get('roles') or {}) >= {'peer-poller', 'memory-sampler', 'link-listener'}, 10),
+    t('the roles are taken by the serving worker', wait_for(lambda: set(health(port).get('roles') or {}) >= {'peer-poller', 'memory-sampler', 'link-listener', 'batch-runner'}, 10),
       health(port).get('roles'))
 
     print('a deploy under load: a new connection every 10 ms on each address, a long stream in flight')

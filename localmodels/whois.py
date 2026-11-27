@@ -159,6 +159,17 @@ def peer_pid(peer_port, server_port, host='127.0.0.1'):
     return None
 
 
+def caller_folder(connection):
+    """Private batch reads need the current client of this exact socket, not a cached attribution."""
+    def endpoint(addr):
+        host, port = addr[:2]
+        return f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+    server, client = connection.getsockname(), connection.getpeername()
+    match = endpoint(client), endpoint(server)
+    pids = {pid for pid, local, remote in _lsof_tcp(f':{server[1]}') if (local, remote) == match}
+    return cwd_of(pids.pop()) if len(pids) == 1 else None
+
+
 def clients_of(port, skip=()):
     """{pid: connections} of every program connected to this local port right now (the server itself left out)."""
     out = {}

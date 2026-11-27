@@ -11,6 +11,7 @@ a lone copy it has not shown it can load again. Nothing real is loaded or unload
 you: python3 tests/test_peers.py
 """
 import collections, errno, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request  # noqa: E401
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,10 +81,10 @@ def lmstudio_home(root, yaml_text):
     """An ~/.lmstudio with the family's definition (model.yaml and manifest.json) and a pretend lms that prints ps.json."""
     d = os.path.join(root, 'hub', 'models', 'test', 'family')
     os.makedirs(d); os.makedirs(os.path.join(root, 'bin'))
-    open(os.path.join(d, 'model.yaml'), 'w').write(yaml_text)
-    open(os.path.join(d, 'manifest.json'), 'w').write('{"type": "model", "name": "family", "revision": 1}')
+    Path(d, 'model.yaml').write_text(yaml_text)
+    Path(d, 'manifest.json').write_text('{"type": "model", "name": "family", "revision": 1}')
     lms = os.path.join(root, 'bin', 'lms')
-    open(lms, 'w').write('#!/bin/sh\ncat "$(dirname "$0")/../ps.json"\n'); os.chmod(lms, 0o755)
+    Path(lms).write_text('#!/bin/sh\ncat "$(dirname "$0")/../ps.json"\n'); os.chmod(lms, 0o755)
     return lms
 
 
@@ -920,6 +921,23 @@ def test_two_doors(box):
           code == 200 and all(v_[0] == 200 for v_ in out.values()) and not A.seen and sorted(s_[1] for s_ in B.seen) == ['q1', 'q2', 'q3'],
           (code, {k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
         t("at_once: the peer's 2 slots alone, this Mac's 2 not counted", llmshare.at_once(F) == 2 and llmshare.at_once() == 2, (llmshare.at_once(F), llmshare.at_once()))
+        from localmodels import batches
+        fingerprint = batches.pin(peers.fingerprint(rows[0]))
+        def pinned(allowed, value=fingerprint):
+            req = urllib.request.Request(url + '/hub/infer/chat', data=json.dumps(dict(model=F, messages=[], tag='pinned')).encode(),
+                                         headers={'X-Batch-Pin': value, 'X-Batch-Peers': allowed, 'Content-Type': 'application/json'})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r: return r.status
+            except urllib.error.HTTPError as e: return e.code
+        plan(A); plan(B)
+        t('a local-only batch waits in peers-only mode; no private request reaches the peer', pinned('') == 503 and not B.seen)
+        capability = L.peers['peer'].report.pop('batch_inference')
+        try: t('an approved peer running the earlier protocol receives no batch input', pinned('peer') == 503 and not B.seen)
+        finally: L.peers['peer'].report['batch_inference'] = capability
+        t('the approved peer checks the pin at inference and serves the item', pinned('peer') == 200 and len(B.seen) == 1)
+        t('a changed model cannot receive a pinned request', pinned('peer', '0' * 64) == 503 and len(B.seen) == 1)
+        t('the peer itself refuses a stale fingerprint', link('/hub/infer/chat', method='POST', body=dict(model=F, messages=[]),
+          headers={'X-Batch-Pin': '0' * 64})[0] == 503 and len(B.seen) == 1)
         snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=30).read())
         t('the dashboard\'s snapshot says peers only, in words', (snap.get('maintenance') or {}).get('peers') is True and 'peers only' in ((snap.get('maintenance') or {}).get('words') or ''), snap.get('maintenance'))
         code, j = front('/hub/on', {})
@@ -938,6 +956,7 @@ def test_two_doors(box):
           ({k: v_[0] for k, v_ in out.items()}, [x.get('note') for x in last]))
         v = {p['name']: p for p in peers.view()}.get('peer') or {}
         t('the peer is marked down, in words, and skipped', v.get('state') == 'down' and 'ECONNREFUSED' in (v.get('words') or '') and not L.replicas(F), v.get('words'))
+        t('with the approved peer gone a pinned batch continues on the matching local copy', pinned('peer') == 200 and A.seen[-1][1] == 'pinned')
         from unittest.mock import patch
         p = L.peers['peer']
         with patch.object(peers, 'time', wraps=time) as clock:

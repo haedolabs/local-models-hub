@@ -11,6 +11,7 @@ The instructions for any project live in GUIDE.md at the root of this repo; the 
   whois       which project, Claude session and process is behind a connection
   sessions    every Claude Code session on this Mac, by project
   agent       local agents: one well-defined job on the loaded model, with tools that only read
+  batches     durable submission, pinned inference, and project-scoped results
   dash        the terminal dashboard; web and dash.html, the web dashboard the gateway serves
   mcp_server  the hub's MCP tools for every Claude Code session (registered once, or shipped by the plugin)
   cli         the `localmodels` command

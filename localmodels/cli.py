@@ -61,9 +61,10 @@
                                  Network blocking of the gateway from a link failure); print the route
   localmodels ask "<question>" [--dir FOLDER] [--no-files] [--no-think] [--schema FILE] [--max-turns N]
                                  (--no-think: no thinking: several times faster, for lookups and extraction)
-  localmodels batch <jobs.json> [--dir FOLDER] [--parallel N]
-  localmodels jobs               recent local-agent jobs started through the gateway
-  localmodels prune [--days 30]  remove local-agent job folders and logs older than N days (they hold prompts and answers)
+  localmodels batch <jobs.json|requests.jsonl> [--dir FOLDER] [--parallel N] [--model ID] [--peers NAME,NAME]
+                                 submit a durable batch; default: this Mac only. Returns its project-scoped ID
+  localmodels jobs [ID [--results | --retry-failed]]   recent jobs, one job's status, JSONL results, or retry only errors
+  localmodels prune [--days 30]  remove old private job folders and logs; keep running jobs and unfinished durable batches
   localmodels check              self-test: sandbox suites, then live checks against the installed gateway
   localmodels install [--wait MINUTES] [--force] [--plugin] [--dry] [--no-claude]
                                  set the hub up on this Mac; run it again after changing the hub's code: it builds a
@@ -89,7 +90,7 @@
   localmodels help | -h | --help anywhere: this text. An option a verb does not take, or a value it cannot use, runs
                                  nothing (exit 2); --name=value is read as --name value, --dry-run as --dry
 """
-import errno, glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
+import contextlib, errno, glob, json, os, plistlib, re, shlex, shutil, subprocess, sys, time, urllib.request
 
 from . import HOME, NAME, VERSION, llmshare
 
@@ -114,7 +115,7 @@ _HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.pa
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_peers.py', 'test_extensions.py', 'test_code.py', 'test_handoff.py', 'test_supervisor.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_batches.py', 'test_peers.py', 'test_extensions.py', 'test_code.py', 'test_handoff.py', 'test_supervisor.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -178,7 +179,7 @@ def opt(a, name, default=None):
 
 # ---------------------------------------------------------------- reading
 def status():
-    from . import dash, recycle
+    from . import batches, dash, recycle
     d, lm, users, cs = dash.door(), dash.lmstudio(), dash.users(), dash.claude()
     from . import maint
     mt = maint.view()
@@ -227,6 +228,8 @@ def status():
         who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
         print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or r.get('job') or {}).get('started') else 'since'} {ago(r['since'])}"
               + (track_words('run', b) if b.get('phases') else (track_words('run', b) if b.get('total') else '') + track_words('phase', r.get('job'))) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
+    for b in batches.overview():
+        print(f"batch: {b['project']} · {b['state']} · {b['done']} of {b['total']} done, {b['failed']} failed" + (f" · {b['reason']}" if b['reason'] else ''))
     work = [c for c in cs if c['working']]
     print(f"Claude Code sessions: {len(work)} active" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
           + f", {len(cs) - len(work)} idle in the last 3 hours")
@@ -606,38 +609,67 @@ def keep():
     return 0
 
 
-def jobs(n=8):
-    from . import mcp_server
+def jobs(n=8, args=()):
+    from . import batches, mcp_server
+    if args:
+        ids = [x for x in args if not x.startswith('-')]
+        if len(ids) != 1 or '--results' in args and '--retry-failed' in args: print('localmodels jobs ID [--results | --retry-failed]'); return 2
+        scope = mcp_server._session_folder()
+        d = batches.locate(mcp_server.AGENTS, ids[0], scope)
+        if d:
+            try:
+                if '--results' in args:
+                    for row in batches.results(d, finished_only=True): print(json.dumps(row))
+                elif '--retry-failed' in args: print(f'{batches.retry(d)} failed items queued for retry')
+                else: print(json.dumps(batches.status(d), indent=2))
+                return 0
+            except ValueError as e: print(e, file=sys.stderr); return 1
+        st = mcp_server.job_status(ids[0], results='--results' in args, retry_failed='--retry-failed' in args, within=scope)
+        print(json.dumps(st, indent=2)); return 0 if st['ok'] else 1
     ds = sorted(glob.glob(os.path.join(mcp_server.AGENTS, '*', '*')), key=os.path.getmtime)[-n:]
     if not ds: print('no local-agent jobs started through the gateway yet'); return 0
     for d in ds:
         job = os.path.relpath(d, mcp_server.AGENTS)
-        st = mcp_server.job_status(job)
-        print(f"  {job}: {st.get('done')} of {st.get('of')} done" + (' · finished' if st.get('finished') else ' · running') + (f" · {st['problem'][:80]}" if st.get('problem') else ''))
+        durable = batches.locate(mcp_server.AGENTS, job)
+        st = batches.status(durable) if durable else mcp_server.job_status(job)
+        state = st.get('state') or ('finished' if st.get('finished') else 'running')
+        why = st.get('reason')
+        if st.get('problem'): state, why = 'stopped', 'the runner did not finish'
+        print(f"  {job}: {st.get('done')} of {st.get('of')} done · {state}" + (f' · {why[:100]}' if why else ''))
     return 0
 
 
 def prune(days=30, root=None):
     """Remove local-agent job folders and loose job logs older than `days` under ~/Library/Logs/LocalModels/agents (the
     one place the hub keeps prompts and answers, as each project's own record). A folder whose runner is alive, or with
-    a job still running, is kept. -> (folders removed, files removed, bytes freed)."""
-    from . import mcp_server
-    root = root or mcp_server.AGENTS
+    a job still running, or a durable batch still unfinished, is kept. -> (folders removed, files removed, bytes freed)."""
+    from . import batches, mcp_server
+    root = os.path.realpath(root or mcp_server.AGENTS)
     cutoff, folders, files, size = time.time() - days * 86400, 0, 0, 0
     for p in glob.glob(os.path.join(root, '*', '*')) + glob.glob(os.path.join(root, '*.json')):   # a run_job log can sit at the root
         try: m = os.path.getmtime(p)
         except OSError: continue
-        if m >= cutoff: continue
+        if m >= cutoff or os.path.realpath(p) != p: continue
         if os.path.isdir(p):
-            try: pid = json.load(open(os.path.join(p, 'runner.json'))).get('pid')
-            except (OSError, ValueError): pid = None
-            live = [r for r in glob.glob(os.path.join(p, '*.running'))]
-            if (pid and llmshare._alive(pid) and not os.path.exists(os.path.join(p, 'summary.json'))) or live: continue
-            for d, _, fs in os.walk(p):
-                for f in fs:
-                    try: size += os.path.getsize(os.path.join(d, f))
-                    except OSError: pass
-            shutil.rmtree(p, ignore_errors=True); folders += 1
+            job = os.path.relpath(p, root)
+            try:
+                # Submission holds this same lock before publishing the database. Retry and prune also exclude each other.
+                with batches.lock(p) if batches.JOB_ID.fullmatch(job) else contextlib.nullcontext(True) as acquired:
+                    if not acquired: continue
+                    if batches.locate(root, job):
+                        if not batches.status(p)['finished']: continue
+                        batches.dequeue(p)
+                    else:
+                        try:
+                            with open(os.path.join(p, 'runner.json')) as f: pid = json.load(f).get('pid')
+                        except (OSError, ValueError): pid = None
+                        if (pid and llmshare._alive(pid) and not os.path.exists(os.path.join(p, 'summary.json'))) or glob.glob(os.path.join(p, '*.running')): continue
+                    for d, _, fs in os.walk(p):
+                        for f in fs:
+                            try: size += os.path.getsize(os.path.join(d, f))
+                            except OSError: pass
+                    shutil.rmtree(p); folders += 1
+            except FileNotFoundError: continue                 # another prune got this directory first
         elif p.endswith('.json'):
             try: size += os.path.getsize(p); os.remove(p); files += 1
             except OSError: pass
@@ -666,11 +698,16 @@ def ask(a):
 
 
 def batch(a):
-    from . import mcp_server
-    spec = json.load(open(a['jobs'])); spec = spec['jobs'] if isinstance(spec, dict) else spec
-    try: job, d = mcp_server.start('batch', spec, int(a.get('parallel') or llmshare.at_once() or llmshare.settings().get('batch_at_once', 8)), a.get('dir'))
-    except (ValueError, TypeError) as e: print(e); return 1
-    print(f'started {len(spec)} jobs as {job}; follow it: localmodels jobs (or the dash). Results in {d}')
+    from . import batches, mcp_server
+    try:
+        with open(a['jobs'], 'rb') as f: spec = batches.decode(f.read(), a['jobs'].lower().endswith(('.jsonl', '.ndjson')))
+        allowed = a['peers'].split(',') if a.get('peers') else spec.get('peers')
+        parallel = a.get('parallel') if a.get('parallel') is not None else spec.get('parallel')
+        job, d = mcp_server.start('batch', spec['jobs'], parallel, a.get('dir') or spec.get('folder'), spec.get('read_files', True),
+                                  within=None if a.get('dir') else mcp_server._session_folder(), run=spec.get('run'), phase=spec.get('phase'),
+                                  model=a.get('model') or spec.get('model'), peers=allowed)
+    except (ValueError, TypeError, OSError) as e: print(e); return 1
+    print(f"submitted {len(spec['jobs'])} items as {job}; status: localmodels jobs {job}; results in {d}")
     return 0
 
 
@@ -1938,7 +1975,7 @@ FLAGS = {   # verb: (options that take a value, options that stand alone); a ver
     'use': (('--context', '--parallel'), ('--dry',)), 'keep': ((), ()), 'recycle': ((), ('--status',)),
     'demo': (('--minutes', '--project', '--workers', '--model', '--seed'), ('--dry',)), 'pictures': (('--out',), ('--dry',)), 'peer': (('--hours',), ('--dry', '--force')), 'peers': (('--hours',), ('--dry', '--force')), 'crashes': (('--days',), ('--scan',)),
     'errors': (('--minutes',), ('--trace',)), 'ask': (('--dir', '--schema', '--max-turns', '--model'), ('--no-files', '--no-think')),
-    'batch': (('--dir', '--parallel'), ()), 'jobs': ((), ()), 'prune': (('--days',), ()), 'check': ((), ()),
+    'batch': (('--dir', '--parallel', '--model', '--peers'), ()), 'jobs': ((), ('--results', '--retry-failed')), 'prune': (('--days',), ()), 'check': ((), ()),
     'install': (('--wait',), ('--plugin', '--dry', '--no-claude', '--force')), 'uninstall': ((), ()), 'start': ((), ()), 'stop': ((), ('--now',)),
     'restart': ((), ('--cold', '--now')), 'rollback': ((), ()), 'mcp': ((), ()), 'on': ((), ()), 'off': ((), ('--force', '--peers')), 'app': ((), ()), 'ext': ((), ()), 'version': ((), ()),
     'commit': (('--version',), ('--dry',)), 'push': (('--version', '--remote'), ('--dry',)), 'publish': (('--version', '--remote'), ('--dry',)),
@@ -1984,7 +2021,7 @@ def main(argv):
     if verb == 'log':
         h = num(a, '--hours', 24.0); return log(h) if h is not None else 2
     if verb == 'swapcheck': return swapcheck([x for x in a if not x.startswith('-')])
-    if verb == 'jobs': return jobs()
+    if verb == 'jobs': return jobs(args=a)
     if verb == 'prune':
         d = num(a, '--days', 30.0)
         if d is None: return 2
@@ -2022,10 +2059,10 @@ def main(argv):
         if mt is None: return 2
         return ask(dict(prompt=q, dir=opt(a, '--dir'), schema=opt(a, '--schema'), max_turns=int(mt), model=opt(a, '--model'), no_files='--no-files' in a, think='--no-think' not in a))
     if verb == 'batch':
-        if not a or a[0].startswith('-'): print('localmodels batch <jobs.json>'); return 2
-        par = num(a, '--parallel', 0)
-        if par is None: return 2
-        return batch(dict(jobs=a[0], dir=opt(a, '--dir'), parallel=int(par) or None))
+        if not a or a[0].startswith('-'): print('localmodels batch <jobs.json|requests.jsonl>'); return 2
+        par = opt(a, '--parallel')
+        if par is not None and not par.isdecimal(): print('--parallel needs a positive integer'); return 2
+        return batch(dict(jobs=a[0], dir=opt(a, '--dir'), parallel=int(par) if par is not None else None, model=opt(a, '--model'), peers=opt(a, '--peers')))
     if verb == 'check': return check()
     if verb == 'install':
         w = num(a, '--wait', 1.5); return install(w * 60, plugin='--plugin' in a, dry='--dry' in a, no_claude='--no-claude' in a, force='--force' in a) if w is not None else 2

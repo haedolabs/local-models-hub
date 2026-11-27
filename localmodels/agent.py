@@ -350,7 +350,15 @@ def step_words(fn, a):
 
 
 # ---------------------------------------------------------------- one agent
-def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None, system=SYSTEM, words=step_words, kind='batch', headers=None):
+class Deferred(Exception):
+    """The durable runner should keep this item pending until the service can take it."""
+    def __init__(self, reason, seconds):
+        super().__init__(reason)
+        self.seconds = max(1, seconds)
+
+
+def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None, system=SYSTEM, words=step_words, kind='batch', headers=None,
+            transport=None, context=None, persist=True):
     """One job, start to answer. defs(job) -> the tools it may use (MCP-style dicts); call(name, args, job) -> a result.
     headers: more for the hub on each request (a dict, or a function returning one, read at each request): the run and
     phase it belongs to, e.g. agent.phase_headers(run, phase, total, done).
@@ -369,7 +377,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
     msgs = [{'role': 'system', 'content': system + ('\n' + job['system'] if job.get('system') else '')},
             {'role': 'user', 'content': job['prompt']}]
     calls, usage, final, turns = [], dict(prompt=0, completion=0, reasoning=0, peak_prompt=0, trimmed=0, retries=0, empty=0), '', 0
-    ctx = context_of(model) or 32768
+    ctx = context or context_of(model) or 32768
     cpt = [CHARS_PER_TOKEN]
     cap = lambda: int(ctx * cpt[0] * CONTEXT_SHARE)
 
@@ -382,7 +390,8 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
         wait_down = WAIT_DOWN if job.get('wait_down') is None else float(job['wait_down'])
         while True:
             more = (headers() if callable(headers) else headers) or {}
-            try: r = post('/v1/chat/completions', req, project, kind, headers={**more, 'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
+            try: r = (transport or post)('/v1/chat/completions', req, project, kind, headers={**more, 'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
+            except Deferred: raise
             except Exception as e:                       # not recorded: a failed request is retried or raised to the job, whose log holds it
                 again, pause, _ = transient(e)
                 if not again or time.time() - t_first >= wait_down: raise
@@ -489,6 +498,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                 out['error'] = (f"the conversation outgrew the model's {ctx:,}-token context (load it with more, or ask for less): {body_}" if big
                                 else f'HTTP {code_} from LM Studio on the answer as JSON: {body_}')
         out.update(ok=bool(final) if job.get('schema') is None else result is not missing, answer=final, result=None if result is missing else result)
+    except Deferred: raise
     except urllib.error.HTTPError as e:
         body = err_text(e)
         big = re.search(r'context|token|length|exceed', body, re.I) or usage['peak_prompt'] > 0.8 * ctx
@@ -502,6 +512,7 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
     if usage['peak_prompt'] > 0.85 * ctx:
         out['context_warning'] = f"its biggest request used {usage['peak_prompt']:,} of {ctx:,} tokens: near the limit"
     out.update(seconds=round(time.time() - t0, 1), turns=turns, calls=calls, usage=usage)
+    if not persist: return out                             # the durable batch commits this outcome with its item ID
     d = log_dir or logs or os.path.expanduser('~/Library/Logs/LocalModels/agents')
     try:
         os.makedirs(d, exist_ok=True)
@@ -531,11 +542,11 @@ def plan_run(run, phases, project, end=False):
 
 def new_dir(logs, kind):
     """A fresh folder for a batch, never one another session is writing: the time, then -2, -3... if taken."""
-    os.makedirs(logs, exist_ok=True)
+    os.makedirs(logs, mode=0o700, exist_ok=True)
     base, n = os.path.join(logs, time.strftime('%Y%m%d-%H%M%S') + '-' + kind), 1
     while True:
         d = base if n == 1 else f'{base}-{n}'
-        try: os.makedirs(d); return d
+        try: os.mkdir(d, mode=0o700); return d
         except FileExistsError: n += 1
 
 
