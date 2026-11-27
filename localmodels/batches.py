@@ -111,8 +111,11 @@ def database(d, write=False):
     db = Path(d, DB)
     if any(Path(str(db) + suffix).is_symlink() for suffix in ('', '-wal', '-shm', '-journal')):
         raise ValueError('invalid batch database')
-    with contextlib.closing(sqlite3.connect(db.as_uri() + ('?mode=rw' if write else '?mode=ro'), uri=True, timeout=10)) as conn:
+    # Apple's SQLite needs a writable handle to open a WAL database before its sidecars exist.
+    # mode=rw still refuses a missing database, and query_only prevents readers from changing its contents.
+    with contextlib.closing(sqlite3.connect(db.as_uri() + '?mode=rw', uri=True, timeout=10)) as conn:
         if write: conn.execute('PRAGMA synchronous=FULL')
+        else: conn.execute('PRAGMA query_only=ON')
         yield conn
 
 

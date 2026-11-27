@@ -1322,11 +1322,11 @@ def run_tests(quiet=False):
         last = (p.stdout.strip().split('\n') or [''])[-1]
         out.append((name, p.returncode == 0, last if not fails else '; '.join(fails)[:300] if p.returncode else last))
         if p.returncode and not fails: out[-1] = (name, False, (p.stderr.strip().split('\n') or ['?'])[-1][:300])
-    old = '/usr/bin/python3'                                  # the handoff suites again under the system's Python 3.9, when it is another
+    old = '/usr/bin/python3'                                  # also check handoffs and SQLite batch recovery on the system Python
     if os.path.exists(old) and os.path.realpath(old) != os.path.realpath(PY):
         try: ok39 = subprocess.run([old, '-c', 'import sys; sys.exit(sys.version_info < (3, 9))'], capture_output=True, timeout=30).returncode == 0
         except (OSError, subprocess.SubprocessError): ok39 = False
-        for name in (n for n in TESTS if n in ('test_handoff.py', 'test_supervisor.py')) if ok39 else ():
+        for name in (n for n in TESTS if n in ('test_batches.py', 'test_handoff.py', 'test_supervisor.py')) if ok39 else ():
             path = os.path.join(HOME, 'tests', name)
             if not os.path.exists(path): continue
             try: p = subprocess.run([old, path], capture_output=True, text=True, timeout=300)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Durable batches in a sandbox. --acceptance runs both two-gateway interruption tests at 10,000 items each."""
-import collections, http.server, json, os, signal, subprocess, sys, threading, time, unittest
+import collections, http.server, json, os, signal, sqlite3, subprocess, sys, threading, time, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -152,8 +152,22 @@ class Durable(unittest.TestCase):
         self.assertEqual(list(batches.results(folder))[0]['custom_id'], 'digest-001')
         self.assertTrue(all(c.args[-1]['X-Step'] == 'batch item' for c in send.call_args_list))
 
+        # A retry can be interrupted after removing failed exports but before clearing the committed error.
+        _, failed = self.submit(jobs)
+        with patch.object(batches, 'request', side_effect=ValueError('invalid test item')): batches.run(failed)
+        batches.enqueue(failed)
+        for name in ('summary.json', 'digest-001.json'): Path(failed, name).unlink()
+        with patch.object(batches, 'request') as send:
+            batches.run(failed)
+            send.assert_not_called()
+        self.assertEqual(json.loads(Path(failed, 'digest-001.json').read_text())['error'], 'ValueError: invalid test item')
+        self.assertEqual(json.loads(Path(failed, 'summary.json').read_text())['ok'], 0)
+
     def test_wait_prune_and_privacy(self):
         job, folder = self.submit([item(2, '/v1/embeddings')])
+        with batches.database(folder) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM item').fetchone(), (1,))
+            with self.assertRaises(sqlite3.OperationalError): db.execute('DELETE FROM item')
         with patch.object(batches, 'request', side_effect=agent.Deferred('waiting for a permitted replica', 1)):
             batches.run(folder)
         self.assertEqual(batches.status(folder)['state'], 'waiting')
@@ -166,6 +180,9 @@ class Durable(unittest.TestCase):
         with patch.object(batches, 'request', return_value=dict(data=[dict(index=0, embedding=[2])])): batches.run(folder)
         self.assertFalse(Path(folder, 'summary.json').exists())  # a raw batch needs only its committed database
         os.utime(folder, (1, 1))
+        with batches.lock(folder) as held:
+            self.assertTrue(held)
+            self.assertEqual(cli.prune()[0], 0)
         self.assertEqual(cli.prune()[0], 1)
         self.assertFalse(Path(folder).exists())
 

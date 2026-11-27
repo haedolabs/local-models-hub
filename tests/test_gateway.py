@@ -493,7 +493,8 @@ def run(box):
                 code, _, _ = ask(tag='adoption', headers={'X-Project': 'adopted', 'X-Hub-From': 'front'})
             t('a peer request spanning adoption completes and releases its new holder’s count',
               code == 200 and during.get('lease') == 1 and until(lambda: gateway._live[path]['n'] == 0, 2))
-            with patch.object(llmshare, 'STALE', 0): llmshare.leases()
+            # end_lease writes the final heartbeat under this lock just after decrementing the count.
+            with gateway._lock, patch.object(llmshare, 'STALE', 0): llmshare.leases()
             t('the adopted lease ages out after the last request', not os.path.exists(path))
 
         plan()
