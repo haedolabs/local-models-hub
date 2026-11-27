@@ -8,7 +8,21 @@ struct Spec {
     var line: Line? = nil                                 // nil: a separator
     var key = ""
     var on = false
+    var attributedTitle: NSAttributedString? = nil
     var kind: Kind { line == nil ? .separator : line!.children.isEmpty ? .line : .submenu }
+
+    private static let makerInk = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 56/255, green: 121/255, blue: 228/255, alpha: 1)
+            : NSColor(srgbRed: 15/255, green: 82/255, blue: 186/255, alpha: 1)
+    }
+
+    static func about(version: String) -> Spec {
+        let name = "Local Models Hub" + (version.isEmpty ? "" : " \(version)")
+        let credit = NSMutableAttributedString(string: name + " · ")
+        credit.append(NSAttributedString(string: "By Haedo Labs™.", attributes: [.foregroundColor: makerInk]))
+        return Spec(line: Line(title: credit.string, action: .openMaker, indent: 0), attributedTitle: credit)
+    }
 }
 
 /// A glance's lines as menu items, each separator an item of its own.
@@ -42,7 +56,9 @@ final class MenuKeeper {
     /// One item set to its line, each property only when it differs (setting one redraws the item).
     func set(_ m: NSMenuItem, _ w: Spec) {
         guard let l = w.line else { return }
+        if w.attributedTitle == nil && m.attributedTitle != nil { m.attributedTitle = nil }
         if m.title != l.title { m.title = l.title }
+        if let title = w.attributedTitle, m.attributedTitle != title { m.attributedTitle = title }
         let tip: String? = l.tooltip.isEmpty ? nil : l.tooltip
         if m.toolTip != tip { m.toolTip = tip }
         if (m.representedObject as? Box)?.action != l.action { m.representedObject = Box(l.action) }

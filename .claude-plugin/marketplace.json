@@ -2,7 +2,7 @@
   "name": "local-models-hub",
   "description": "Local Models Hub: a gateway in front of LM Studio, for a Mac where several programs and Claude Code sessions share the same local models.",
   "owner": {
-    "name": "Haedo Labs"
+    "name": "Haedo Labs™"
   },
   "plugins": [
     {

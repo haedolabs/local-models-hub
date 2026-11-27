@@ -1,16 +1,16 @@
 # <img src="docs/icon.png" alt="" width="32" height="32"> Local Models Hub
 
-By [Haedo Labs](https://haedolabs.com)™.
+[By Haedo Labs™.](https://haedolabs.com)
 
 A gateway in front of LM Studio for programs, Claude Code sessions, and OpenCode sessions that share local models on a Mac.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/dashboard-light.png">
-  <img alt="The dashboard during a synthetic workload: every slot in use, two requests queued, the requests by project over an hour, and each client's run with its finish time" src="docs/dashboard-light.png">
+  <img alt="Three example projects use six of eight model slots. Charts show concurrency, throughput, requests, and memory over an hour." src="docs/dashboard-light.png">
 </picture>
 
-The dashboard during `localmodels demo`, a synthetic workload.
+The dashboard with simulated requests from three projects.
 
 ## Why
 
@@ -84,4 +84,4 @@ For maintainers: `localmodels commit` versions and tags committed changes locall
 
 ## License
 
-MIT, © 2026 [Haedo Labs](https://haedolabs.com); see [LICENSE](LICENSE). The dashboard's typeface, Libre Franklin, is under the SIL Open Font License 1.1.
+MIT, © 2026 [Haedo Labs™](https://haedolabs.com); see [LICENSE](LICENSE). The dashboard's typeface, Libre Franklin, is under the SIL Open Font License 1.1.

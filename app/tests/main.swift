@@ -260,5 +260,28 @@ t("a hub alert added at the top: one item inserted, every item after it the same
 keeper.sync(real, specs(after.lines) + footer)
 t("...and gone again: the item removed, the rest kept", ids(real) == before)
 
+let creditMenu = NSMenu()
+keeper.sync(creditMenu, [.about(version: "1.2.3")])
+let creditItem = creditMenu.items[0]
+let title = "Local Models Hub 1.2.3 · By Haedo Labs™."
+let maker = (title as NSString).range(of: "By Haedo Labs™.")
+let ink = creditItem.attributedTitle?.attribute(.foregroundColor, at: maker.location, effectiveRange: nil) as? NSColor
+let signInk = creditItem.attributedTitle?.attribute(.foregroundColor, at: NSMaxRange(maker) - 1, effectiveRange: nil) as? NSColor
+t("the menu credit includes the mark and colors only the maker", creditItem.title == title
+  && ink != nil && ink == signInk && creditItem.attributedTitle?.attribute(.foregroundColor, at: 0, effectiveRange: nil) == nil)
+t("the credit opens the maker's site", creditItem.isEnabled && (creditItem.representedObject as? Box)?.action == .openMaker)
+for (appearance, expected) in [(NSAppearance.Name.aqua, [15, 82, 186]), (.darkAqua, [56, 121, 228])] {
+    var rgb: [Int] = []
+    NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+        if let color = ink?.usingColorSpace(.sRGB) {
+            rgb = [color.redComponent, color.greenComponent, color.blueComponent].map { Int(($0 * 255).rounded()) }
+        }
+    }
+    t("the maker uses sapphire in \(appearance.rawValue)", rgb == expected)
+}
+keeper.sync(creditMenu, [Spec(line: Line(title: "Open dashboard", action: .openDashboard, indent: 0))])
+t("a reused item loses the maker's styling", creditMenu.items[0] === creditItem
+  && creditItem.title == "Open dashboard" && creditItem.attributedTitle == nil)
+
 print("\(results.filter { $0 }.count) of \(results.count) ok")
 exit(results.allSatisfy { $0 } ? 0 : 1)
