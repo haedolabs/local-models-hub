@@ -19,5 +19,5 @@ The instructions for any project live in GUIDE.md at the root of this repo; the 
 import os
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERSION = '2.1.1'
+VERSION = '3.0.0'
 NAME = 'Local Models Hub'                    # the product's name wherever a person sees it: the tab, the page, the corner
