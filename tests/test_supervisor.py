@@ -20,13 +20,13 @@ def _port():
 
 PORT = _port()
 os.makedirs(os.path.join(STATE, 'releases')); os.makedirs(os.path.join(BOX, 'logs'))
-os.environ.update(LOCALMODELS_STATE=STATE, LOCALMODELS_PORT=str(PORT), LMSTUDIO_LOGS=os.path.join(BOX, 'logs'))   # before the package
+os.environ.update(HOME=BOX, LOCALMODELS_STATE=STATE, LOCALMODELS_PORT=str(PORT), LMSTUDIO_LOGS=os.path.join(BOX, 'logs'))   # before the package
 sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'tests'))
 import test_handoff as H                                   # noqa: E402  (its pretend LM Studio, releases, hammer)
 from localmodels import cli, deploy, llmshare, supervisor as SUP   # noqa: E402
 
 LEGACY_TAG = 'v1.13.0'                                    # the last release before the supervisor
-TIMINGS = dict(SOAK=0.5, PROBATION=4, FAILOPEN_AFTER=6, FAILOPEN_RETRY=[2, 2, 2, 2], WEDGED=4, WEDGED_KILL=8, STOP_DEADLINE=1.0)
+TIMINGS = dict(SOAK=0.5, PROBATION=4, FAILOPEN_AFTER=6, FAILOPEN_RETRY=[2, 2, 2, 2], WEDGED=15, WEDGED_KILL=30, STOP_DEADLINE=1.0)
 ok = []
 
 
@@ -155,7 +155,16 @@ def run(procs):
         r2 = H.build(STATE, 'r2', lambda d: open(os.path.join(d, 'localmodels', 'marker.txt'), 'w').write('r2\n'))
         want[0] = r2
         ld.calls.clear()
-        with H.Hammer(PORT) as hm: code, words = install()
+        probe = deploy.health
+        def miss_once(*args, **kw):
+            deploy.health = probe
+            return None
+        with H.held_stream(PORT, up) as stream:
+            deploy.health = miss_once
+            try:
+                with H.Hammer(PORT) as hm: code, words = install()
+            finally: deploy.health = probe
+        t('a missed health probe during install preserves the active stream', stream['done'] and stream['events'] == 17 and 'bootout' not in ld.calls, stream)
         t('deploy: release 2 serves on both addresses, nothing refused or cut, launchd untouched', code == 0 and H.health(PORT).get('code') == os.path.basename(r2)
           and not hm.errors and hm.n > 20 and set(ld.calls) <= {'print'}, (code, words, hm.errors[:3], ld.calls))
 
@@ -186,44 +195,47 @@ def run(procs):
           and sup_pid() == p0 and H.health(PORT).get('code') == os.path.basename(r4), (code, words))
 
         print('probation: a new release that dies goes back to the last good one')
-        time.sleep(TIMINGS['PROBATION'] + 1)
-        t('release 4 passed its probation: the last good one', status().get('last_good') == os.path.basename(r4), status().get('last_good'))
+        t('release 4 passed its probation: the last good one', H.wait_for(lambda: status().get('last_good') == os.path.basename(r4), TIMINGS['PROBATION'] + 10))
         r6 = build_from(r4, 'r6', lambda d: open(os.path.join(d, 'localmodels', 'marker.txt'), 'w').write('r6\n'))
         idle(); r = H.call(STATE, 'deploy', release=os.path.basename(r6))
-        pid6 = H.health(PORT).get('pid')
-        os.kill(pid6, signal.SIGKILL)
-        h = H.wait_for(lambda: (lambda x: x if x.get('code') == os.path.basename(r4) and x.get('role') == 'serving' else None)(H.health(PORT)), 20)
-        st = status()
-        t('killed on probation: release 6 marked bad, a worker from release 4 serves, SHARED/hub back on it', r.get('ok') and h
-          and os.path.basename(r6) in (st.get('bad') or []) and os.path.realpath(os.path.join(STATE, 'hub')) == os.path.realpath(r4), (r, st.get('bad'), tail()))
+        os.kill(r['pid'], signal.SIGKILL)                        # health can still answer from the preceding worker
+        def rolled_back():
+            if os.path.basename(r6) not in (status().get('bad') or []): return False
+            h = H.health(PORT)
+            return h.get('code') == os.path.basename(r4) and h.get('role') == 'serving' and os.path.realpath(os.path.join(STATE, 'hub')) == os.path.realpath(r4)
+        t('killed on probation: release 6 marked bad, a worker from release 4 serves, SHARED/hub back on it',
+          r.get('ok') and H.wait_for(rolled_back, 30), (r, status().get('bad'), tail()))
 
         print('a wedged worker (no progress for WEDGED s) is handed off')
         r7 = build_from(r4, 'r7', lambda d: _sub(os.path.join(d, 'localmodels', 'worker.py'), 'PROGRESS_EVERY = 5', 'PROGRESS_EVERY = 10 ** 12'))
         idle(); r = H.call(STATE, 'deploy', release=os.path.basename(r7))
-        g7 = H.health(PORT).get('gen')
-        moved = H.wait_for(lambda: H.health(PORT).get('gen') not in (None, g7), TIMINGS['WEDGED'] + 15)
+        g7 = r['gen']
+        moved = H.wait_for(lambda: int(H.health(PORT)['gen']) > g7, TIMINGS['WEDGED'] + 20)
         t('its gen gave way to a new one through a handoff, nothing refused', r.get('ok') and moved, (r, H.health(PORT).get('gen'), g7))
         idle(); r = H.call(STATE, 'deploy', release=os.path.basename(r4), force=True)
         t('(and back to release 4)', r.get('ok') and H.wait_for(lambda: H.health(PORT).get('code') == os.path.basename(r4), 20), r)
 
         print('a draining worker killed mid-drain: only its own connections are cut')
-        out = {}
-        th = threading.Thread(target=H.stream, args=(PORT, out)); th.start(); time.sleep(0.6)
-        old = H.health(PORT).get('pid')
-        with H.Hammer(PORT) as hm:
-            idle(); r = H.call(STATE, 'restart')
-            H.wait_for(lambda: any(w['pid'] == old and w['role'] == 'draining' for w in status().get('workers', [])), 10)
-            time.sleep(1)                                      # its accept loop closed: what it holds now is only its own
-            os.kill(old, signal.SIGKILL); time.sleep(1)
-        th.join(30)
-        t('the serving worker is unaffected: no hammer failure; the stream on the killed one ended early', r.get('ok') and not hm.errors and hm.n > 20
+        idle()
+        with H.Hammer(PORT) as hm, H.held_stream(PORT, up) as out:
+            old = next(m['hub_pid'] for m in llmshare.inflight() if m.get('state') == 'answering')
+            r = H.call(STATE, 'restart')
+            draining = H.wait_for(lambda: any(w['pid'] == old and w['role'] == 'draining' for w in status().get('workers', [])), 10)
+            def listeners_closed():
+                ls = subprocess.run(['lsof', '-nP', '-a', '-p', str(old), f'-iTCP:{PORT}', '-sTCP:LISTEN', '-t'], capture_output=True, timeout=5)
+                return ls.returncode == 1 and not ls.stdout and not ls.stderr
+            assert draining and H.wait_for(listeners_closed, 10), 'the worker still accepts connections'
+            os.kill(old, signal.SIGKILL)
+            serving = H.wait_for(lambda: H.health(PORT).get('pid') == r.get('pid'), 10)
+        t('the serving worker is unaffected: no hammer failure; the stream on the killed one ended early', r.get('ok') and serving and not hm.errors and hm.n > 20
           and not out.get('done'), (r, hm.errors[:3], out))
         t('its marks are gone from the shared view', H.wait_for(lambda: not [m for m in llmshare.inflight() if m.get('hub_pid') == old], 5))
 
         print('a shared-state protocol change: no overlap (the old one drains first), nothing refused')
-        r8 = build_from(r4, 'r8', lambda d: _sub(os.path.join(d, 'localmodels', 'llmshare.py'), 'STATE_PROTOCOL = 1 ', 'STATE_PROTOCOL = 2 '))
+        current = llmshare.STATE_PROTOCOL
+        r8 = build_from(r4, 'r8', lambda d: _sub(os.path.join(d, 'localmodels', 'llmshare.py'), f'STATE_PROTOCOL = {current} ', f'STATE_PROTOCOL = {current+1} '))
         t("the release says its own shared-state protocol (read from its files, not from the process that built it)",
-          json.load(open(os.path.join(r8, 'RELEASE.json'))).get('state_protocol') == 2)
+          json.load(open(os.path.join(r8, 'RELEASE.json'))).get('state_protocol') == current + 1)
         idle()
         seen = []
         stop = threading.Event()

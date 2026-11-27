@@ -239,7 +239,7 @@ def _history(minutes):
         if 0 <= i < nb: req[names.project(r.get('project'))][i] += 1
     mem = [x for x in list(_mem) if x[0] >= now - minutes * 60]
     there = sorted({k for x in mem if x[2] for k in x[2]})                     # peers sampled in the window, stacked over this Mac
-    local = round(dash.mac()['total'])
+    local = round(dash.memory()[1])
     rnd = lambda xs: [round(x, 2) for x in xs]
     shown = sorted(set(answering) | set(req))
     return dict(start=t0, step=step, n=n, now=now, answering={p: rnd(v) for p, v in answering.items()}, waiting=rnd(waiting),
@@ -253,10 +253,9 @@ def _history(minutes):
 
 def recent(n=25):
     try: n = max(1, min(int(float(n or 25)), 200))
-    except (TypeError, ValueError): n = 25
-    rows = llmshare.requests_log(24)[-n:]
+    except (TypeError, ValueError, OverflowError): n = 25
     out = []
-    for raw in reversed(rows):
+    for raw in llmshare.recent_requests(n, 24):
         r = names.request(raw)                                   # the project and the step as the person named them
         out.append(dict(at=r.get('at'), project=r.get('project'), kind=r.get('kind'), model=r.get('model'), copy=r.get('copy'),
                         seconds=r.get('seconds'), waited=r.get('waited'), tokens=(r.get('prompt_tokens') or 0) + (r.get('completion_tokens') or 0),
@@ -287,23 +286,26 @@ def load_tail():
 
 
 def sampler(stop=None):
-    """Memory every 15 s, in the one gateway that holds the memory-sampler role: in memory for the chart, and on disk (a
-    day of it) so a restart or a handoff keeps the picture. stop: returns between two samples when it is set."""
+    """Publish admission's memory reading each second; keep a day of chart samples at 15-second intervals. Only
+    the memory-sampler role writes either. stop: return between samples when set."""
     load_tail()
-    written = 0
+    written, next_chart = 0, 0.0
     while stop is None or not stop.is_set():
         try:
-            t, pl = time.time(), dash.pool()
-            u, o = pl['hosts'][0]['used'], {h['name']: [h['used'], h['total']] for h in pl['hosts'][1:]} or None
-            _mem.append((t, u, o))
-            with open(MEMORY, 'a') as f: f.write(json.dumps([round(t), round(u, 1)] + ([o] if o else [])) + '\n')
-            written += 1
-            if written % 240 == 0 and os.path.getsize(MEMORY) > 400_000:      # an hour of samples: keep only the last day
-                keep = [json.dumps([round(a), round(b, 1)] + ([o] if o else [])) for a, b, o in list(_mem)]
-                tmp = f'{MEMORY}.{os.getpid()}.tmp'; open(tmp, 'w').write('\n'.join(keep) + '\n'); os.replace(tmp, MEMORY)
+            sample = admission.refresh_sample()
+            if time.monotonic() >= next_chart and sample:
+                next_chart = time.monotonic() + 15
+                t, pl = sample['at'], dash.pool(sample)
+                u, o = pl['hosts'][0]['used'], {h['name']: [h['used'], h['total']] for h in pl['hosts'][1:]} or None
+                _mem.append((t, u, o))
+                with open(MEMORY, 'a') as f: f.write(json.dumps([round(t), round(u, 1)] + ([o] if o else [])) + '\n')
+                written += 1
+                if written % 240 == 0 and os.path.getsize(MEMORY) > 400_000:      # an hour of samples: keep only the last day
+                    keep = [json.dumps([round(a), round(b, 1)] + ([o] if o else [])) for a, b, o in list(_mem)]
+                    tmp = f'{MEMORY}.{os.getpid()}.tmp'; open(tmp, 'w').write('\n'.join(keep) + '\n'); os.replace(tmp, MEMORY)
         except Exception as e: errors.record('memory sampler', e)
-        if stop is None: time.sleep(15)
-        elif stop.wait(15): return
+        if stop is None: time.sleep(1)
+        elif stop.wait(1): return
 
 
 def asset(name):

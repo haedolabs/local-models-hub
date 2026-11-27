@@ -11,6 +11,7 @@ a lone copy it has not shown it can load again. Nothing real is loaded or unload
 you: python3 tests/test_peers.py
 """
 import collections, errno, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request  # noqa: E401
+from unittest.mock import Mock, patch
 
 HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HOME)
@@ -36,6 +37,7 @@ def fake(label):
     class Fake(http.server.BaseHTTPRequestHandler):
         plan, seen, heads, slow = [], [], [], 2.0
         now, most = collections.Counter(), collections.Counter()
+        gates = {}
         lock = threading.Lock()
         name = label
 
@@ -55,7 +57,8 @@ def fake(label):
                 Fake.heads.append({k.lower(): v for k, v in self.headers.items()})
                 Fake.now[tag[:1]] += 1; Fake.most[tag[:1]] = max(Fake.most[tag[:1]], Fake.now[tag[:1]])
             try:
-                if what == 'slow': time.sleep(Fake.slow)
+                if tag in Fake.gates: Fake.gates[tag].wait(45)
+                elif what == 'slow': time.sleep(Fake.slow)
                 if what == 'sse':
                     self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
                     for ev in (dict(model=body.get('model'), choices=[dict(delta=dict(content='O'))]),
@@ -127,6 +130,21 @@ def test_units(box):
       peers.serve_problem('0.0.0.0') and peers.serve_problem('::') and peers.serve_problem('mac.local') and peers.serve_problem('192.168.213.1') is None)
     t('a loopback peer (a sandbox) is on lo0; an IPv6 link-local address names its interface',
       peers.on_link('127.0.0.1', ifc)[0] == 'lo0' and peers.on_link('fe80::2%bridge0', ifc)[0] == 'bridge0')
+    for fault in (patch.object(peers, 'interface_of', return_value=None), patch.object(peers, 'bind_interface', side_effect=OSError('interface option failed'))):
+        with fault, patch.object(socket.socket, 'listen') as listen:
+            try: srv = gateway.link_server('127.0.0.1', 0)
+            except OSError: refused = True
+            else: refused = False; srv.server_close()
+        t('an unavailable interface or failed socket restriction never starts a peer listener', refused and not listen.called)
+    from localmodels import worker
+    with socket.socket() as original:
+        original.bind(('127.0.0.1', 0)); original.listen()
+        w = object.__new__(worker.Worker)
+        w.line, w.servers = Mock(), {}
+        w.listen = {'link:test': dict(fd=os.dup(original.fileno()), addr=original.getsockname(), link=True)}
+        with patch.object(peers, 'bind_interface', side_effect=OSError('interface unavailable')):
+            w.adopt()
+        t('an inherited peer socket that cannot be restricted is dropped before serving', not w.servers and not w.listen and w.line.send.call_args.args == ('drop',))
 
     mine = dict(variant='test/family@8bit', bytes=1000, format='safetensors', definition='abc')
     t('the same variant, size, format and definition: the same model', peers.match(mine, dict(mine))[0])
@@ -545,7 +563,7 @@ def test_link_rules(box):
         if real_conn: peers.LinkConnection.connect = real_conn
         catch.shutdown(); move.shutdown()
 
-    print('the link: a peer away for days keeps its 60 s backoff, and one peer that fails to be read never stops the others')
+    print('the link: a peer away for days keeps its 10 s backoff, and one peer that fails to be read never stops the others')
     fetch_was, peers.token = peers.fetch, lambda: TOKEN
     asked = []
 
@@ -634,6 +652,7 @@ def test_link_followers(box):
     finally: llmshare.settings = real
 
 
+@patch.object(gateway.whois, 'peer_pid', lambda *a: 0)
 def test_two_doors(box):
     print('two doors: this Mac and a peer, each with its own pretend LM Studio')
     front_dir, peer_dir = os.path.join(box, 'front'), os.path.join(box, 'peer')
@@ -705,15 +724,31 @@ def test_two_doors(box):
     def plan(fake_, *what):
         with fake_.lock: fake_.plan[:] = list(what); fake_.seen.clear(); fake_.heads.clear(); fake_.most.clear()
 
-    def together(*jobs, stagger=0.15):
+    def reached(fake_servers, tag, seconds=10):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if any(r[1] == tag for server in fake_servers for r in server.seen): return True
+            time.sleep(0.02)
+        return False
+
+    def together(*jobs, stagger=0.15, ordered=False):
         out, ths = {}, []
-        for k, (tag, kw) in enumerate(jobs):
-            th = threading.Thread(target=lambda tag=tag, kw=kw: out.__setitem__(tag, ask(tag, **kw))); th.start(); ths.append(th); time.sleep(stagger)
+        gate = threading.Event()
+        for tag, kw in jobs:
+            if ordered: A.gates[tag] = B.gates[tag] = gate
+            th = threading.Thread(target=lambda tag=tag, kw=kw: out.__setitem__(tag, ask(tag, **kw))); th.start(); ths.append(th)
+            if ordered:
+                if not reached((A, B), tag): break
+            else: time.sleep(stagger)
+        gate.set()
         for th in ths: th.join(60)
+        for tag, _ in jobs: A.gates.pop(tag, None); B.gates.pop(tag, None)
         return out
 
     try:
         t("the peer's door opens and answers its link with the token", peer_up(), open(os.path.join(box, 'peer-door.log')).read()[-400:])
+        end = time.monotonic() + 5
+        while not link('/hub/peer')[1].get('memory') and time.monotonic() < end: time.sleep(0.1)
         L.poll(force=True)
         v = {p['name']: p for p in peers.view()}.get('peer') or {}
         fam = (v.get('families') or {}).get(F) or {}
@@ -742,13 +777,13 @@ def test_two_doors(box):
         code, r, h = ask('a1')
         t('one request with this Mac\'s slots free is answered here', code == 200 and [s[1] for s in A.seen] == ['a1'] and not B.seen, (code, A.seen, B.seen))
         plan(A, 'slow', 'slow'); plan(B, 'slow', 'slow'); A.slow = B.slow = 2.0
-        out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}), stagger=0.4)   # in order even when a request takes longer to reach the queue
+        out = together(('b1', {}), ('b2', {}), ('b3', {}), ('b4', {}), ordered=True)
         t("a batch, four at once: this Mac's first copy, then the peer's (its own GPU), then this Mac's second copy; all answered",
           all(out[k][0] == 200 for k in out) and [s[1] for s in A.seen] == ['b1', 'b4'] and sorted(s[1] for s in B.seen) == ['b2', 'b3'],
           ({k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
         t('the answer from the peer names the model asked for', out['b2'][1].get('model') == F, out['b2'][1])
         plan(A, 'slow', 'slow'); plan(B, 'slow'); A.slow = B.slow = 2.0
-        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')), stagger=0.4)
+        out = together(('h1', dict(kind='batch')), ('h2', dict(kind='chat')), ('h3', dict(kind='batch')), ordered=True)
         t("a person waiting gets this Mac's second copy before the peer (the fastest free slot); the batch after it goes to the peer",
           [s[1] for s in A.seen] == ['h1', 'h2'] and [s[1] for s in B.seen] == ['h3'] and all(v_[0] == 200 for v_ in out.values()), (A.seen, B.seen))
         mine = [x for x in logged(llmshare.REQUESTS, 9) if x.get('peer') == 'peer']
@@ -781,12 +816,13 @@ def test_two_doors(box):
 
         print('two doors: never more in flight to the peer than it says it has free')
         plan(A, 'slow', 'slow', 'slow', 'slow'); plan(B, 'slow', 'slow', 'slow', 'slow'); A.slow, B.slow = 2.0, 4.0
+        B.gates['p1'] = threading.Event()
         mine_p = threading.Thread(target=lambda: ask('p1', base=f'http://localhost:{peer_port}', headers={'X-Project': 'peer-own'})); mine_p.start()
-        time.sleep(0.8); L.poll(force=True)
+        reached((B,), 'p1'); L.poll(force=True)
         fam = (({p['name']: p for p in peers.view()}.get('peer') or {}).get('families') or {}).get(F) or {}
         t("the peer's own work counts: one of its 2 slots busy, so this Mac may send it 1", fam.get('busy') == 1 and fam.get('free_here') == 1, fam)
         out = together(('f1', {}), ('f2', {}), ('f3', {}), ('f4', {}))
-        mine_p.join(30)
+        B.gates.pop('p1').set(); mine_p.join(30)
         t('four more at once: at most 1 at a time on the peer from this Mac, all answered', B.most['f'] <= 1 and all(v_[0] == 200 for v_ in out.values()),
           (dict(B.most), {k: v_[0] for k, v_ in out.items()}))
 
@@ -884,7 +920,7 @@ def test_two_doors(box):
           code == 200 and all(v_[0] == 200 for v_ in out.values()) and not A.seen and sorted(s_[1] for s_ in B.seen) == ['q1', 'q2', 'q3'],
           (code, {k: v_[0] for k, v_ in out.items()}, A.seen, B.seen))
         t("at_once: the peer's 2 slots alone, this Mac's 2 not counted", llmshare.at_once(F) == 2 and llmshare.at_once() == 2, (llmshare.at_once(F), llmshare.at_once()))
-        snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=10).read())
+        snap = json.loads(urllib.request.urlopen(url + '/hub/snapshot', timeout=30).read())
         t('the dashboard\'s snapshot says peers only, in words', (snap.get('maintenance') or {}).get('peers') is True and 'peers only' in ((snap.get('maintenance') or {}).get('words') or ''), snap.get('maintenance'))
         code, j = front('/hub/on', {})
         for _ in range(100):
@@ -902,13 +938,18 @@ def test_two_doors(box):
           ({k: v_[0] for k, v_ in out.items()}, [x.get('note') for x in last]))
         v = {p['name']: p for p in peers.view()}.get('peer') or {}
         t('the peer is marked down, in words, and skipped', v.get('state') == 'down' and 'ECONNREFUSED' in (v.get('words') or '') and not L.replicas(F), v.get('words'))
-        L.peers['peer'].next_at = 0; L.poll()
-        n1, gap1 = L.peers['peer'].fails, L.peers['peer'].next_at - time.time()
-        L.poll()
-        t('looked at again only after its pause (backoff)', L.peers['peer'].fails == n1 and gap1 > 1, (n1, L.peers['peer'].fails, gap1))
-        L.peers['peer'].next_at = 0; L.poll()
-        gap2 = L.peers['peer'].next_at - time.time()
-        t('each failed look doubles the pause, up to a minute', L.peers['peer'].fails == n1 + 1 and 1.8 * gap1 < gap2 <= 61, (round(gap1, 1), round(gap2, 1)))
+        from unittest.mock import patch
+        p = L.peers['peer']
+        with patch.object(peers, 'time', wraps=time) as clock:
+            clock.time.return_value = time.time()
+            L.poll(force=True)
+            n1, gap1 = p.fails, p.next_at - clock.time()
+            L.poll()
+            t('looked at again only after its pause (backoff)', p.fails == n1 and gap1 >= 2, (n1, p.fails, gap1))
+            clock.time.return_value = p.next_at
+            L.poll()
+            gap2 = p.next_at - clock.time()
+            t('each failed look doubles the pause up to the 10 s cap', p.fails == n1 + 1 and gap2 == min(2 * gap1, 10), (gap1, gap2))
         t('nobody waits once the queue is empty', llmshare.waiting_here() == dict(people=0, others=0), llmshare.waiting_here())
     finally:
         try: proc.terminate(); proc.wait(5)

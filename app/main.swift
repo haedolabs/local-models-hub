@@ -69,9 +69,10 @@ func request(_ path: String, body: [String: Any]? = nil, timeout: Double = 5, do
 }
 
 /// One request to an extension (its menu, or one of its POSTs), by full URL.
+let extensionSession = URLSession(configuration: .ephemeral, delegate: ExtensionRedirect(), delegateQueue: nil)
 func fetch(_ url: String, token: (header: String, value: String)? = nil, body: [String: String]? = nil, timeout: Double = 5,
            done: @escaping (Int, [String: Any]?) -> Void) {
-    guard let u = URL(string: url) else { done(0, nil); return }
+    guard originOf(url) != nil, let u = URL(string: url) else { done(0, nil); return }
     var r = URLRequest(url: u, timeoutInterval: timeout)
     r.cachePolicy = .reloadIgnoringLocalCacheData
     if let body = body {
@@ -80,7 +81,7 @@ func fetch(_ url: String, token: (header: String, value: String)? = nil, body: [
         if let t = token { r.setValue(t.value, forHTTPHeaderField: t.header) }
         r.httpBody = try? JSONSerialization.data(withJSONObject: body)
     }
-    URLSession.shared.dataTask(with: r) { data, resp, _ in
+    extensionSession.dataTask(with: r) { data, resp, _ in
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         DispatchQueue.main.async { done(code, json) }
@@ -90,8 +91,15 @@ func fetch(_ url: String, token: (header: String, value: String)? = nil, body: [
 /// The extensions this Mac has: every sound manifest in the state folder's extensions/, by file name.
 func readExtensions() -> [Extension] {
     let names = ((try? FileManager.default.contentsOfDirectory(atPath: extensionsDir)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
-    return names.compactMap { name in
-        guard let e = readExtension(FileManager.default.contents(atPath: extensionsDir + "/" + name)), name == e.id + ".json" else { return nil }
+    var manifests: [(String, [String: Any])] = [], counts: [String: Int] = [:]
+    for name in names {
+        guard let data = FileManager.default.contents(atPath: extensionsDir + "/" + name),
+              let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let id = m["id"] as? String else { continue }
+        counts[id, default: 0] += 1
+        manifests.append((name, m))
+    }
+    return manifests.compactMap { name, m in
+        guard let e = readManifest(m), name == e.id + ".json", counts[e.id] == 1 else { return nil }
         return e
     }
 }
@@ -257,15 +265,14 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     func extRun(_ e: Extension, _ verb: String) {
         let p = Process(); p.executableURL = URL(fileURLWithPath: e.command[0]); p.arguments = Array(e.command.dropFirst()) + [verb]
         var env = ProcessInfo.processInfo.environment; for (k, v) in e.env { env[k] = v }; p.environment = env
-        let out = Pipe(); p.standardOutput = out; p.standardError = out
-        p.terminationHandler = { t in
-            let words = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
-                if t.terminationStatus != 0 { ask("\(e.label): \(verb) did not finish", words.trimmingCharacters(in: .whitespacesAndNewlines), ok: "OK", cancel: nil) }
-                self.poll()
+        do {
+            try ExtensionOutput().run(p) { status, words in
+                DispatchQueue.main.async {
+                    if status != 0 { ask("\(e.label): \(verb) did not finish", words.trimmingCharacters(in: .whitespacesAndNewlines), ok: "OK", cancel: nil) }
+                    self.poll()
+                }
             }
-        }
-        do { try p.run() } catch { ask("\(e.label): \(verb) did not start", "\(e.command[0]): \(error.localizedDescription)", ok: "OK", cancel: nil) }
+        } catch { ask("\(e.label): \(verb) did not start", "\(e.command[0]): \(error.localizedDescription)", ok: "OK", cancel: nil) }
     }
 
     func switchModels(_ path: String, _ body: [String: Any], who: String, on: Bool) {

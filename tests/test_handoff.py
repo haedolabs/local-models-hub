@@ -5,11 +5,11 @@ folder, a pretend LM Studio in this process, a pretend lms. While every deploy r
 cannot start (it is marked bad, the serving worker untouched), the supervisor killed (the workers serve on, a new one
 adopts them) and a stop (everything ends within 5 s). `localmodels check` runs it; so can you: python3 tests/test_handoff.py
 """
-import http.server, json, os, shutil, signal, socket, stat, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+import contextlib, http.client, http.server, json, os, shutil, signal, socket, stat, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from localmodels import dash, supervisor as SUP  # noqa: E402
+from localmodels import dash, llmshare, supervisor as SUP  # noqa: E402
 
 F = 'qwen/qwen3.6-35b-a3b'
 ok = []
@@ -20,7 +20,7 @@ def t(name, good, note=''):
 
 
 class Fake(http.server.BaseHTTPRequestHandler):
-    """A pretend LM Studio: the model listings, plain answers, and a long stream (16 events, 0.25 s apart)."""
+    """A pretend LM Studio: model listings, plain answers, and a stream held open until the test releases it."""
     protocol_version = 'HTTP/1.0'
 
     def log_message(self, *a): pass
@@ -35,9 +35,14 @@ class Fake(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])) or b'{}')
         if body.get('stream'):
             self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
-            for k in range(16):
-                self.wfile.write(b'data: ' + json.dumps(dict(choices=[dict(delta=dict(content=f'{k} '))])).encode() + b'\n\n'); self.wfile.flush(); time.sleep(0.25)
-            self.wfile.write(b'data: [DONE]\n\n'); return
+            try:
+                for k in range(16):
+                    self.wfile.write(b'data: ' + json.dumps(dict(choices=[dict(delta=dict(content=f'{k} '))])).encode() + b'\n\n')
+                    self.wfile.flush()
+                    if k == 0 and not self.server.finish_stream.wait(90): return
+                self.wfile.write(b'data: [DONE]\n\n')
+            except (BrokenPipeError, ConnectionResetError): pass  # a test deliberately killed the worker holding this stream
+            return
         out = json.dumps(dict(model=body.get('model'), choices=[dict(message=dict(content='OK'))], usage=dict(prompt_tokens=3, completion_tokens=1))).encode()
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(out))); self.end_headers(); self.wfile.write(out)
 
@@ -102,13 +107,23 @@ class Hammer:
         for th in self.threads: th.join(15)
 
 
-def stream(port, out):
+@contextlib.contextmanager
+def held_stream(port, upstream):
+    """Yield after the client receives the first event. Let the upstream finish only after the handoff or worker exit."""
     req = urllib.request.Request(f'http://127.0.0.1:{port}/v1/chat/completions', data=json.dumps(dict(model=F, messages=[], stream=True)).encode(),
                                  headers={'Content-Type': 'application/json', 'Host': f'localhost:{port}', 'X-Project': 'test', 'X-Kind': 'test'})
+    finish = upstream.finish_stream = threading.Event()
     try:
-        r = urllib.request.urlopen(req, timeout=60); data = r.read()
-        out.update(status=r.status, done=data.rstrip().endswith(b'[DONE]'), events=data.count(b'data: '))
-    except Exception as e: out.update(error=f'{type(e).__name__}: {e}')
+        with urllib.request.urlopen(req, timeout=60) as r:
+            first = r.readline()
+            assert r.status == 200 and first.startswith(b'data: {'), (r.status, first)
+            out = dict(status=r.status, events=1, done=False)
+            yield out
+            finish.set()
+            try: data = r.read()
+            except (http.client.HTTPException, OSError) as e: out['error'] = str(e)
+            else: out.update(done=data.rstrip().endswith(b'[DONE]'), events=1 + data.count(b'data: '))
+    finally: finish.set()
 
 
 def wait_for(fn, seconds, every=0.1):
@@ -169,9 +184,10 @@ def unit_restart(state, r1, r2, r3):
     os.remove(hub)
     a, b = FakeConn(), FakeConn()
     s.hello(a, dict(pid=91001, gen=4, role='serving', release=n(r2), state_protocol=0, accepting=True, keys=[]))
-    s.hello(b, dict(pid=91002, gen=5, role='serving', release=n(r2), state_protocol=1, accepting=True, keys=[]))
+    current = SUP.release_info(r2)['state_protocol']
+    s.hello(b, dict(pid=91002, gen=5, role='serving', release=n(r2), state_protocol=current, accepting=True, keys=[]))
     wa, wb = s.workers[91001], s.workers[91002]
-    t('an adopted worker keeps the release and state protocol it said in its hello', wa.release == os.path.realpath(r2) and wa.protocol == 0 and wb.protocol == 1,
+    t('an adopted worker keeps the release and state protocol it said in its hello', wa.release == os.path.realpath(r2) and wa.protocol == 0 and wb.protocol == current,
       (wa.release, wa.protocol))
     time.sleep(0.1)
     t('two serving workers adopted (a crash during the overlap): the newest gen serves, every older one drains',
@@ -198,7 +214,7 @@ def run(box, procs):
     print('what a supervisor knows after a restart (unit: no worker started)')
     unit_restart(state, r1, r2, r3)
     os.symlink(os.path.relpath(r1, state), os.path.join(state, 'hub'))
-    env = dict(os.environ, LOCALMODELS_STATE=state, LOCALMODELS_PORT=str(port), LMSTUDIO_URL=f'http://127.0.0.1:{up.server_address[1]}', LMS=lms,
+    env = dict(os.environ, HOME=box, LOCALMODELS_STATE=state, LOCALMODELS_PORT=str(port), LMSTUDIO_URL=f'http://127.0.0.1:{up.server_address[1]}', LMS=lms,
                LMSTUDIO_LOGS=os.path.join(box, 'logs'), LOCALMODELS_PY=sys.executable, LOCALMODELS_NO_KEEPER='1',
                LOCALMODELS_TIMINGS=json.dumps(dict(SOAK=0.5, PROBATION=5, FAILOPEN_AFTER=60)))
     logf = open(os.path.join(box, 'gateway.log'), 'w')
@@ -213,18 +229,21 @@ def run(box, procs):
     h = wait_for(lambda: health(port).get('role') == 'serving' and health(port), 60)
     t('the supervisor starts gen 1 from the release the hub points at; it serves on 127.0.0.1 and [::1]',
       h and h.get('code') == os.path.basename(r1) and h.get('gen') == '1' and wait_for(lambda: health(port, '::1'), 5), h and {k: h.get(k) for k in ('code', 'gen', 'role')} or tail())
-    st = call(state, 'status')
+    def initial_deploy_done():
+        st = call(state, 'status')
+        return st if st.get('current') == os.path.basename(r1) and not st.get('deploy') else None
+    st = wait_for(initial_deploy_done, 30) or {}
     t('status: one serving worker, the listeners, the run', st.get('ok') and [w['role'] for w in st.get('workers', [])] == ['serving'] and sorted(st.get('listeners') or {}) == ['v4', 'v6'], st)
     t('the roles are taken by the serving worker', wait_for(lambda: set(health(port).get('roles') or {}) >= {'peer-poller', 'memory-sampler', 'link-listener'}, 10),
       health(port).get('roles'))
 
     print('a deploy under load: a new connection every 10 ms on each address, a long stream in flight')
-    out = {}
     with Hammer(port) as hm:
-        th = threading.Thread(target=stream, args=(port, out)); th.start(); time.sleep(0.5)
-        r = call(state, 'deploy', release=os.path.basename(r2))
-        th.join(30); time.sleep(0.5)
-    h = health(port)
+        with held_stream(port, up) as out: r = call(state, 'deploy', release=os.path.basename(r2))
+        def new_worker():
+            h = health(port)
+            return h if h.get('pid') == r.get('pid') else None
+        h = wait_for(new_worker, 10) or {}
     t('the deploy: gen 2 serves release 2', r.get('ok') and h.get('code') == os.path.basename(r2) and h.get('gen') == '2', r)
     t('not one connection refused, reset or cut while it happened', not hm.errors and hm.n > 50, (hm.n, hm.errors[:3]))
     t('both workers answered during the overlap', len(hm.pids) >= 2, hm.pids)
@@ -234,7 +253,7 @@ def run(box, procs):
     t('the roles moved to gen 2', wait_for(lambda: set((health(port).get('roles') or {}).values()) == {h.get('pid')}, 10), health(port).get('roles'))
     t('the hub link points at release 2', os.path.realpath(os.path.join(state, 'hub')) == os.path.realpath(r2), os.readlink(os.path.join(state, 'hub')))
     rel = json.load(open(os.path.join(r2, 'RELEASE.json')))
-    t('a release is named by its digest and says what it holds', rel.get('digest') == os.path.basename(r2) and rel.get('state_protocol') == 1
+    t('a release is named by its digest and says what it holds', rel.get('digest') == os.path.basename(r2) and rel.get('state_protocol') == llmshare.STATE_PROTOCOL
       and rel.get('supervisor') == SUP.supervisor_digest(r2) and dash.deploy_digest(r2) == os.path.basename(r2), rel)
 
     print('a release that cannot start')
@@ -248,7 +267,7 @@ def run(box, procs):
 
     print('the supervisor killed, then started again')
     sup.send_signal(signal.SIGKILL); sup.wait(5)
-    with Hammer(port) as hm: time.sleep(1.5)
+    with Hammer(port) as hm: wait_for(lambda: hm.n > 20, 15)
     t('its workers serve on (nothing refused) with no supervisor', not hm.errors and hm.n > 20, (hm.n, hm.errors[:3]))
     sup = start(); procs.append(sup)
     st = wait_for(lambda: (lambda s: s if [w for w in s.get('workers', []) if w.get('adopted') and w['role'] == 'serving'] and sorted(s.get('listeners') or {}) == ['v4', 'v6'] else None)(call(state, 'status', timeout=5)), 30)

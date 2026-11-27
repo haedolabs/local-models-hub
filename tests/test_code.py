@@ -234,18 +234,49 @@ def test_no_proxy(box):
         srv.shutdown()
 
 
+def test_recent_requests(box):
+    from concurrent.futures import ThreadPoolExecutor
+    from localmodels import web
+    from unittest.mock import patch
+    log = os.path.join(box, 'tail.jsonl')
+    now = time.time()
+    with patch.object(llmshare, 'REQUESTS', log):
+        for p, rows in ((log + '.1', range(5)), (log, range(5, 8))):
+            with open(p, 'w') as f:
+                for n in rows: f.write(json.dumps(dict(at=now, n=n, step=f'item {n}', note='x'*7000)) + '\n')
+        with open(log, 'a') as f: f.write('{"at":')
+        t('the newest rows cross rotation and block boundaries, skipping an incomplete final record',
+          [r['n'] for r in llmshare.recent_requests(4, 1)] == [7, 6, 5, 4])
+        t('a filtered tail stops after enough qualifying records', [r['n'] for r in llmshare.recent_requests(3, 1, lambda r: r['n'] % 2)] == [7, 5, 3])
+        with ThreadPoolExecutor(4) as pool:
+            views = list(pool.map(web.recent, [1, 3, 5, 8]))
+        t('concurrent dashboard readers each receive the requested tail across rotation',
+          all([r['step'] for r in v] == [f'item {n}' for n in range(7, 7-count, -1)] for v, count in zip(views, [1, 3, 5, 8])))
+
+
 def test_agent_roots(box):
+    import subprocess
+    from unittest.mock import patch
     from localmodels import mcp_server, whois
     home = os.path.realpath(os.path.join(box, 'home'))
     proj, other, ssh, lib = (os.path.join(home, *p) for p in (('Documents', 'proj', 'src'), ('Documents', 'other'), ('.ssh',), ('Library', 'x')))
     tree = os.path.join(home, 'Documents', 'proj', '.claude', 'worktrees', 'w')
-    for d in (proj, other, ssh, lib, tree): os.makedirs(d)
+    for d in (proj, other, ssh, lib): os.makedirs(d)
+    repo = os.path.dirname(proj)
+    def git(*args):
+        subprocess.run(['git', '-C', repo, *args], check=True, capture_output=True)
+    git('init', '--template=')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.org', '-c', 'commit.gpgSign=false', 'commit', '--allow-empty', '-m', 'fixture')
+    git('worktree', 'add', '--detach', tree)
     saved = os.environ.get('HOME'), os.environ.get('PWD'), whois.ROOTS, mcp_server.AGENTS
     os.environ['HOME'], os.environ['PWD'], whois.ROOTS = home, tree, [os.path.join(home, 'Documents')]
     mcp_server.AGENTS = os.path.join(box, 'agents')
-    for p in ('proj', 'other'):
-        os.makedirs(os.path.join(mcp_server.AGENTS, p, 'ask-1'))
-        open(os.path.join(mcp_server.AGENTS, p, 'ask-1', 'jobs.json'), 'w').write(json.dumps(dict(jobs=[])))
+    job = '20260101-120000-ask'
+    for p, root in (('proj', proj), ('other', other)):
+        job_dir = os.path.join(mcp_server.AGENTS, p, job)
+        os.makedirs(job_dir)
+        llmshare._write(os.path.join(job_dir, 'jobs.json'), dict(root=root, jobs=[dict(label='ask')]))
+        llmshare._write(os.path.join(job_dir, 'ask.json'), dict(ok=True, answer='x' * 7200))
     try:
         R = mcp_server._root
         t('the home folder named with other capitals is refused (it would put ~/Library inside the root)',
@@ -258,8 +289,57 @@ def test_agent_roots(box):
         r = mcp_server.call('batch', dict(jobs=[dict(prompt='x')], folder=ssh))
         t('and so is a dot-folder', r.get('ok') is False and '.ssh' in (r.get('error') or ''), r)
         t("job_status serves this project's jobs, not another project's",
-          mcp_server.call('job_status', dict(job='proj/ask-1')).get('ok') is True and mcp_server.call('job_status', dict(job='other/ask-1')).get('ok') is False,
-          (mcp_server.call('job_status', dict(job='proj/ask-1')), mcp_server.call('job_status', dict(job='other/ask-1'))))
+          mcp_server.call('job_status', dict(job='proj/' + job)).get('ok') is True and mcp_server.call('job_status', dict(job='other/' + job)).get('ok') is False)
+        t('a job id must have exactly the two generated components',
+          not mcp_server.call('job_status', dict(job='proj/extra/' + job))['ok'])
+        linked = os.path.join(mcp_server.AGENTS, 'proj', '20260101-120001-ask')
+        os.symlink(os.path.join(mcp_server.AGENTS, 'other', job), linked)
+        t('a linked directory is refused before reading results', not mcp_server.call('job_status', dict(job='proj/' + os.path.basename(linked)))['ok'])
+        result = mcp_server.call('job_status', dict(job='proj/' + job, label='ask'))
+        t('a labeled result includes the whole answer', len(result['results'][0]['answer']) == 7200)
+        result = mcp_server.call('job_status', dict(job='proj/' + job, results=True))['results'][0]
+        t('a summary still caps the answer and explains how to retrieve the rest', len(result['answer']) == 6000 and 'label' in result['note'])
+        old = os.path.join(mcp_server.AGENTS, 'proj', job)
+        for invalid_root in ('.', ['not a path']):
+            llmshare._write(os.path.join(old, 'jobs.json'), dict(root=invalid_root, jobs=[]))
+            t('legacy jobs require an absolute directory to establish ownership', not mcp_server.call('job_status', dict(job='proj/' + job))['ok'])
+        llmshare._write(os.path.join(old, 'jobs.json'), dict(root=proj, jobs=[dict(label='item'), dict(label='item')]))
+        llmshare._write(os.path.join(old, 'plan.json'), dict(jobs=['item', 'item-2']))
+        llmshare._write(os.path.join(old, 'item-2.json'), dict(ok=True, answer='second item', result=False))
+        result = mcp_server.call('job_status', dict(job='proj/' + job, label='item-2'))
+        t('legacy batches read the result names the runner actually wrote', result['results'][0]['answer'] == 'second item')
+        t('a false structured result survives labeled lookup', result['results'][0].get('result') is False)
+        sibling = os.path.join(os.path.dirname(repo), 'group', 'repo')
+        os.makedirs(sibling)
+        os.environ['PWD'] = sibling
+        t('a non-Git project under a shared parent is scoped to the session folder', mcp_server._session_folder().main == sibling)
+        git('-C', sibling, 'init', '--template=')
+        t('a nested repository is its own project', mcp_server._session_folder().main == sibling)
+        t('a legacy job named for a shared parent still requires the saved project root',
+          not mcp_server.call('job_status', dict(job='proj/' + job))['ok'])
+        external = os.path.join(home, 'Documents', 'external-worktree')
+        git('worktree', 'add', '--detach', external)
+        os.environ['PWD'] = external
+        scope = mcp_server._session_folder()
+        t('an external worktree can use its own files and shares its main checkout’s job identity',
+          scope.checkout == external and scope.main == repo and R(external, within=scope) == (external, None))
+        with patch.object(mcp_server.agent, 'loaded_model', return_value=({'id': 'test'}, None)), patch.object(subprocess, 'Popen') as launch:
+            launch.return_value.pid = os.getpid()
+            jid, _ = mcp_server.start('batch', [dict(prompt='x')], folder=external, within=scope)
+        os.environ['PWD'] = repo
+        t('the main checkout can read a job started in the external worktree', mcp_server.call('job_status', dict(job=jid))['ok'])
+        twin = os.path.join(home, 'Documents', 'group2', os.path.basename(repo))
+        os.makedirs(twin); git('-C', twin, 'init', '--template=')
+        os.environ['PWD'] = twin
+        t('independent repositories with the same name cannot read each other’s jobs', not mcp_server.call('job_status', dict(job=jid))['ok'])
+        shared = os.path.join(mcp_server.AGENTS, 'group', job)
+        os.makedirs(shared)
+        llmshare._write(os.path.join(shared, 'jobs.json'), dict(root=sibling, jobs=[]))
+        other_repo = os.path.join(os.path.dirname(sibling), 'sibling')
+        os.makedirs(other_repo); git('-C', other_repo, 'init', '--template=')
+        os.environ['PWD'] = other_repo
+        t('sibling Git checkouts under one display name authorize neither legacy results nor files from each other',
+          not mcp_server.call('job_status', dict(job='group/' + job))['ok'] and R(sibling, within=mcp_server._session_folder())[0] is None)
     finally:
         for k, v in (('HOME', saved[0]), ('PWD', saved[1])):
             if v is None: os.environ.pop(k, None)
@@ -332,6 +412,7 @@ def main():
         print("a project names itself (the name tool)")
         test_name_tool(box)
         print("the local agents read only the session's own project")
+        test_recent_requests(box)
         test_agent_roots(box)
         print('requests to this Mac never go through a proxy')
         test_no_proxy(box)

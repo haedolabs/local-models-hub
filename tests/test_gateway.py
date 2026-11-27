@@ -7,10 +7,12 @@ before batches in the queue, a chunked request body, a route with a trailing sla
 LM Studio serves (OpenAI chat, Anthropic messages, OpenAI responses, its own): how each stream ends, its token counts, its errors. Nothing real is
 loaded or unloaded. `localmodels check` runs it; so can you: python3 tests/test_gateway.py
 """
-import fcntl, select, http.server, json, os, re, shutil, socket, sys, tempfile, threading, time, urllib.error, urllib.request
+import fcntl, select, http.server, io, json, os, re, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _sandbox  # noqa: E402  (first: the state folder, port, LM Studio and lms point into a temporary folder)
+from _sandbox import until
 from localmodels import admission, crashes, gateway, llmshare, recycle
 
 F, F2 = 'test/family', 'test/family:2'
@@ -19,16 +21,6 @@ ok = []
 
 def t(name, good, note=''):
     ok.append(bool(good)); print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f': {note}' if note else ''))
-
-
-def until(fn, secs):
-    """fn() polled until it is truthy or `secs` pass -> its last value: a state the gateway reaches on its own thread is
-    waited for, not sampled after a fixed sleep (a busy Mac delays it by seconds)."""
-    end = time.time() + secs
-    while True:
-        v = fn()
-        if v or time.time() >= end: return v
-        time.sleep(0.05)
 
 
 SSE = {   # streams as LM Studio sends them: each ends with its own last event, none with [DONE] (only OpenAI's chat does)
@@ -104,6 +96,8 @@ class Fake(http.server.BaseHTTPRequestHandler):
         elif what == 'odd':
             if Fake.on_odd: Fake.on_odd()                     # the copy dies as it answers, with words the door has not seen
             out, code = json.dumps(dict(error='something new')).encode(), 400
+        elif what == 'replica-text':
+            out, code = json.dumps(dict(model=F2, choices=[dict(message=dict(content=F2, tool_calls=[dict(function=dict(arguments=F2))]))])).encode(), 200
         else:
             out, code = json.dumps(dict(model=body.get('model'), choices=[dict(message=dict(content='OK ' + str(body.get('tag'))))],
                                         usage=dict(prompt_tokens=3, completion_tokens=2))).encode(), 200
@@ -122,6 +116,7 @@ def main():
     return 0 if all(ok) else 1
 
 
+@patch.object(gateway.whois, 'peer_pid', lambda *a: 0)  # requests in this suite supply their own attribution
 def run(box):
     for name in ('SLOTS', 'LEASES', 'INFLIGHT'): setattr(llmshare, name, os.path.join(box, name.lower()))
     from localmodels import names as _names, peers as _peers           # never this Mac's live settings, names or peers
@@ -261,8 +256,8 @@ def run(box):
         t('a family in the settings with nothing loaded and nothing on the way: 503 within a second, never the bare id',
           code == 503 and time.time() - t0 < 2 and not Fake.seen and 'no copy' in json.loads(urllib.request.urlopen(url + '/hub/health').read() and b'{}') if False else code == 503 and time.time() - t0 < 2 and not Fake.seen, (code, Fake.seen))
         llmshare._ps['good_at'] = 0.0; plan(); got = {}
-        th = threading.Thread(target=lambda: got.update(r=ask(tag='w'))); th.start(); time.sleep(1.5)
-        held = [m for m in llmshare.inflight() if m.get('state') == 'held: waiting for the first model listing']
+        th = threading.Thread(target=lambda: got.update(r=ask(tag='w'))); th.start()
+        held = until(lambda: [m for m in llmshare.inflight() if m.get('state') == 'held: waiting for the first model listing'], 10)
         rows.append(row(F)); llmshare._ps['good_at'] = time.time(); th.join(10)
         t('a gateway that has never had a model listing holds the request (up to 30 s) instead of answering 503, then answers',
           held and got.get('r') and got['r'][0] == 200, (held and held[0].get('state'), got.get('r') and got['r'][0]))
@@ -271,6 +266,25 @@ def run(box):
         t('a model the settings do not know is still passed through', code == 200 and Fake.seen[0][0] == 'other/unknown', Fake.seen)
         rows[:] = [row(F), row(F2)]
 
+        with llmshare.slot(F, wait=2):
+            plan('replica-text')
+            code, result, _ = ask()
+            t('only the response model is renamed, including when the answer is exactly the replica id',
+              code == 200 and result['model'] == F and result['choices'][0]['message'] == dict(content=F2, tool_calls=[dict(function=dict(arguments=F2))]))
+            for route, event, meta in (('/v1/chat/completions', 'message_stop', dict(model=F2)),
+                                       ('/v1/messages', 'message_start', dict(message=dict(model=F2))),
+                                       ('/v1/responses', 'response.completed', dict(response=dict(model=F2))),
+                                       ('/api/v1/chat', 'chat.end', dict(result=dict(model_instance_id=F2)))):
+                payload = dict(meta, type=event, delta=dict(text=F2, arguments=F2))
+                SSE['replica-sse'] = [(event, payload), ('message_stop', dict(type='message_stop'))]
+                plan('replica-sse')
+                with raw(F, 'replica', stream=True, path=route) as s, s.makefile('rb') as stream:
+                    events = [json.loads(line[6:]) for line in stream if line.startswith(b'data: {')]
+                key = next(iter(meta))
+                wanted = F if key == 'model' else {next(iter(meta[key])): F}
+                t(f'{route}: the stream names the requested model and keeps the replica id in generated fields',
+                  events[0][key] == wanted and events[0]['delta'] == payload['delta'])
+
         print('the door: the queue and programs that leave')
         plan('slow', 'slow'); Fake.slow = 3.0
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'slow{i}', kind='batch')) for i in range(2)]
@@ -278,6 +292,8 @@ def run(box):
         time.sleep(0.8)                                              # both slots busy
         threading.Thread(target=raw, args=(F, 'ghost'), kwargs=dict(close_after=0.5)).start()   # gives up while it waits
         time.sleep(1.0)
+        t('a disconnected waiter leaves admission while all slots are still occupied',
+          until(lambda: any(r.get('status') == 499 for r in llmshare.requests_log(1)), 0.8) and all(x.is_alive() for x in ths))
         batch = threading.Thread(target=lambda: ask(tag='batch', kind='batch')); batch.start()
         time.sleep(0.5)
         chat = threading.Thread(target=lambda: ask(tag='chat', kind='chat')); chat.start()
@@ -326,6 +342,27 @@ def run(box):
             data += part
         s.close()
         t('a chunked request body is read whole', data.startswith(b'HTTP/1.0 200') and b'OK chunked' in data and Fake.seen and Fake.seen[0][1] == 'chunked', data[:60])
+        with patch.object(gateway, 'BODY_LIMIT', 16):
+            plan()
+            t('the fixed-length body limit is applied before forwarding', ask(tag='limit')[0] == 413 and not Fake.seen)
+            handler = object.__new__(gateway.Door)
+            for data, status in ((b'11\r\n', 413), (b'5\r\nabc', 400), (b'Z\r\n', 400)):
+                handler.rfile = io.BytesIO(data)
+                try: handler._chunks(); actual = 200
+                except gateway.InputError as e: actual = e.status
+                t('the chunked reader rejects oversize and incomplete input without forwarding a prefix', actual == status)
+        with socket.socket() as conn:
+            handler = object.__new__(gateway.Door)
+            handler.connection = conn; conn.settimeout(2)
+            with patch.object(http.server.BaseHTTPRequestHandler, 'parse_request', lambda h: h.connection.gettimeout()):
+                t('headers retain the idle deadline; generation has no upload deadline', handler.parse_request() == 2 and conn.gettimeout() is None)
+            handler.headers = http.client.HTTPMessage()
+            handler.headers['Content-Length'] = '1'
+            with patch.object(handler, 'rfile', create=True) as reader:
+                reader.read.side_effect = socket.timeout()
+                try: handler._body(); status = 200
+                except gateway.InputError as e: status = e.status
+                t('a stalled upload receives a timeout and releases its deadline', status == 408 and conn.gettimeout() is None)
         plan()
         code, r, h = ask(tag='slash', path='/v1/chat/completions/')
         row_ = rows_logged()[0]
@@ -386,17 +423,29 @@ def run(box):
         time.sleep(0.3)
         t('a request that fails before it is sent (its estimate raises) answers 500 and leaves no marker or lease count', code == 500 and held() == (0, 0), (code, held()))
         req = urllib.request.Request(url + '/api/v1/models/Unload', data=json.dumps(dict(instance_id=F2, model='other/x')).encode(), headers={'Content-Type': 'application/json'})
+        ps_ok, llmshare._ps['ok'] = llmshare._ps['ok'], True
+        plan()
         with llmshare.lease('someone', [F2], 'batch'):
             llmshare._write(os.path.join(llmshare.LEASES, 'someone-1-1.json'), dict(v=2, project='someone', pid=1, models=[F2], kind='batch', since=time.time(), beat=time.time()))
             try: urllib.request.urlopen(req, timeout=5); code = 200
-            except urllib.error.HTTPError as e: code = e.code
-        t('an unload sent through the door, in any case, naming the copy another run uses: refused (409)', code == 409, code)
+            except urllib.error.HTTPError as e: code, reason = e.code, json.load(e)['error']
+        t('an unload naming a leased copy is refused for that project before reaching LM Studio', code == 409 and 'someone' in reason and not Fake.seen)
         for f in os.listdir(llmshare.LEASES): os.remove(os.path.join(llmshare.LEASES, f))   # no run uses the models now (this suite's own leases too)
         plan(); saved_rows = list(rows); rows[:] = [row(F), row(F2)]
         with crashes._state() as st: st.setdefault('seen', {})[F2] = dict(loaded=True, since=time.time() - 60, at=time.time())
-        Fake.on_unload = lambda b: [rows.remove(r) for r in list(rows) if r['id'] == b.get('instance_id')]
-        ps_ok, llmshare._ps['ok'] = llmshare._ps['ok'], True       # the listing in `rows` stands for a good `lms ps`
+        during = {}
+        def unload_while_admitting(body):
+            during['gateway'] = ask(tag='during-swap')[0]
+            # A separate llmshare client tries a local slot after the blocker check but before the instance disappears.
+            rc = subprocess.run([sys.executable, '-c', 'import sys; from localmodels import llmshare as L; sys.exit(L._take_slot(sys.argv[1]) is not None)', F2], timeout=5)
+            during['direct'] = rc.returncode
+            rows[:] = [r for r in rows if r['id'] != body.get('instance_id')]
+        Fake.on_unload = unload_while_admitting
         req = urllib.request.Request(url + '/api/v1/models/unload', data=json.dumps(dict(instance_id=F2)).encode(), headers={'Content-Type': 'application/json'})
+        with llmshare.slot(F2, wait=2):
+            try: urllib.request.urlopen(req, timeout=5); reason = ''
+            except urllib.error.HTTPError as e: reason = json.load(e)['error']
+        t('a slot acquired first blocks the HTTP swap, even without a lease', 'slot' in reason and not Fake.seen)
         try: code = urllib.request.urlopen(req, timeout=5).status
         except urllib.error.HTTPError as e: code = e.code
         finally: llmshare._ps['ok'] = ps_ok
@@ -406,17 +455,37 @@ def run(box):
             time.sleep(0.1)
         t('an unload sent through the door: the instance it took is marked unloaded on purpose (LM Studio logs no unload line for it), never read as a crash',
           code == 200 and not (st.get('seen') or {}).get(F2, {}).get('loaded') and F2 not in (st.get('missing') or {}), (code, (st.get('seen') or {}).get(F2)))
+        t('a swap reserved first excludes both HTTP and cross-process slot admission through the unload',
+          during == dict(gateway=503, direct=0) and 'during-swap' not in [s[1] for s in Fake.seen], during)
         Fake.on_unload = None; rows[:] = saved_rows
 
+        # Run the adoption between forwarding the request and returning its answer.
+        old, new = os.getppid(), os.getpid()
+        with patch.dict(os.environ, LOCALMODELS_SUPERVISOR=str(old)), patch.object(door, 'link', True), \
+             patch.object(door, 'hosts', {f'localhost:{gateway.PORT}'}, create=True), patch.object(_peers, 'token_ok', return_value=True):
+            path = llmshare.hub_lease_path('adopted', new, 'front')
+            wait = gateway.Upstream.wait
+            def adopt(up):
+                gateway.rekey(old, new)
+                during['lease'] = gateway._live[path]['n']
+                return wait(up)
+            with patch.object(gateway.Upstream, 'wait', adopt):
+                plan()
+                code, _, _ = ask(tag='adoption', headers={'X-Project': 'adopted', 'X-Hub-From': 'front'})
+            t('a peer request spanning adoption completes and releases its new holder’s count',
+              code == 200 and during.get('lease') == 1 and until(lambda: gateway._live[path]['n'] == 0, 2))
+            with patch.object(llmshare, 'STALE', 0): llmshare.leases()
+            t('the adopted lease ages out after the last request', not os.path.exists(path))
+
         plan()
-        code, r, h = ask(tag='run', headers={'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '17', 'X-Step': 'extract 18 of 420'})
-        row_ = rows_logged()[0]
+        code, r, h = ask(tag='run', headers={'X-Project': 'run-header-check', 'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '17', 'X-Step': 'extract 18 of 420'})
+        row_ = until(lambda: next((r for r in llmshare.recent_requests(5, 1) if r.get('project') == 'run-header-check'), None), 10) or {}
         t('the run headers are logged with the request (name, total, done), never anything else about it',
-          (row_.get('run'), row_.get('run_total'), row_.get('run_done'), row_.get('step')) == ('report', 420, 17, 'extract 18 of 420'), {k: row_.get(k) for k in ('run', 'run_total', 'run_done')})
+          code == 200 and (row_.get('run'), row_.get('run_total'), row_.get('run_done'), row_.get('step')) == ('report', 420, 17, 'extract 18 of 420'),
+          (code, {k: row_.get(k) for k in ('run', 'run_total', 'run_done')}))
         plan('slow'); Fake.slow = 2.0
         th = threading.Thread(target=ask, kwargs=dict(tag='runlive', headers={'X-Run': 'report', 'X-Run-Total': '420', 'X-Run-Done': '18'})); th.start()
-        time.sleep(0.8)
-        live = [f for f in llmshare.inflight() if f.get('run') == 'report']
+        live = until(lambda: [f for f in llmshare.inflight() if f.get('run') == 'report'], 10)
         th.join(30); Fake.slow = 3.0
         t('a request in flight carries its run too, so the dash moves on at once', live and live[0].get('run_done') == 18, live)
 

@@ -84,28 +84,47 @@ struct ExtensionPage {
 }
 
 func originOf(_ url: String) -> String? {
-    guard let u = URLComponents(string: url), u.scheme == "http", let host = u.host, host == "localhost" || host == "127.0.0.1" else { return nil }
-    return "http://\(host)" + (u.port.map { ":\($0)" } ?? "")
+    guard !url.contains("\\"), url.rangeOfCharacter(from: .whitespacesAndNewlines.union(.controlCharacters)) == nil,
+          let u = URLComponents(string: url), u.scheme?.lowercased() == "http", u.user == nil, u.password == nil,
+          let host = u.percentEncodedHost?.lowercased(), host == "localhost" || host == "127.0.0.1",
+          (1...65535).contains(u.port ?? 80) else { return nil }
+    return "http://\(host)" + ((u.port ?? 80) == 80 ? "" : ":\(u.port!)")
 }
 
 /// A manifest read the way localmodels/extensions.py reads it; nil unless it is sound enough to draw and to act for.
 func readExtension(_ data: Data?) -> Extension? {
-    guard let data = data, let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          (m["extension"] as? NSNumber)?.intValue == 1,
-          let id = m["id"] as? String, id.range(of: "^[a-z0-9][a-z0-9._-]{0,63}$", options: .regularExpression) != nil,
-          let name = m["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty,
+    guard let data = data, let m = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    return readManifest(m)
+}
+
+func readManifest(_ m: [String: Any]) -> Extension? {
+    func present(_ key: String) -> Bool { m[key] != nil && !(m[key] is NSNull) }
+    guard let version = m["extension"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1,
+          let id = m["id"] as? String, id.range(of: #"^[a-z0-9][a-z0-9._-]{0,63}\z"#, options: .regularExpression) != nil,
+          ["title", "version", "maker"].allSatisfy({ m[$0] == nil || m[$0] is String }),
+          let name = m["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
           let menu = m["menu"] as? String, let home = originOf(menu) else { return nil }
     var e = Extension(id: id, name: name, menu: menu)
     e.title = (m["title"] as? String) ?? ""
     e.version = (m["version"] as? String) ?? ""
-    if let open = m["open"] as? String, originOf(open) == home { e.open = open }
-    if let token = m["token"] as? String, token.hasPrefix("/") { e.token = token }
-    if let h = m["token_header"] as? String, h.range(of: "^X-[A-Za-z0-9-]{1,60}$", options: .regularExpression) != nil { e.tokenHeader = h }
-    if let run = m["run"] as? [String: Any], let cmd = run["command"] as? [String], let first = cmd.first, first.hasPrefix("/"),
-       let verbs = run["verbs"] as? [String] {
-        e.command = cmd
-        e.env = (run["env"] as? [String: String]) ?? [:]
-        e.verbs = verbs.filter { $0.range(of: "^[a-z][a-z0-9-]{0,31}$", options: .regularExpression) != nil }
+    if present("open") {
+        guard let open = m["open"] as? String, originOf(open) == home else { return nil }
+        e.open = open
+    }
+    if present("token") {
+        guard let token = m["token"] as? String, token.hasPrefix("/") else { return nil }
+        e.token = token
+    }
+    if present("token_header") {
+        guard let h = m["token_header"] as? String, h.range(of: #"^X-[A-Za-z0-9-]{1,60}\z"#, options: .regularExpression) != nil else { return nil }
+        e.tokenHeader = h
+    }
+    if present("run") {
+        guard let run = m["run"] as? [String: Any], let cmd = run["command"] as? [String], cmd.first?.hasPrefix("/") == true,
+              cmd.allSatisfy({ !$0.isEmpty }), let verbs = run["verbs"] as? [String], !verbs.isEmpty,
+              verbs.allSatisfy({ $0.range(of: #"^[a-z][a-z0-9-]{0,31}\z"#, options: .regularExpression) != nil }),
+              run["env"] == nil || run["env"] is [String: String] else { return nil }
+        e.command = cmd; e.verbs = verbs; e.env = (run["env"] as? [String: String]) ?? [:]
     }
     return e
 }

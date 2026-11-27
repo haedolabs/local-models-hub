@@ -60,14 +60,7 @@ def run_dir():
 
 def supervisor_state():
     """supervisor.json when its supervisor is alive (its lock held), else None."""
-    p = os.path.join(run_dir(), 'supervisor.json')
-    try: st = json.load(open(p))
-    except (OSError, ValueError): return None
-    h = open(os.path.join(run_dir(), 'supervisor.lock'), 'a+')
-    try:
-        fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB); fcntl.flock(h, fcntl.LOCK_UN); return None     # free: no supervisor
-    except OSError: return st
-    finally: h.close()
+    return llmshare.supervisor()
 
 
 def hub_path(): return os.path.join(llmshare.SHARED, 'hub')
@@ -112,27 +105,46 @@ def write_plist(plist, path):
     with open(path, 'wb') as f: plistlib.dump(plist, f)
 
 
-def choose(cli, d):
+def choose(cli, d, supervisor_digest=None):
     """The path for release folder d. -> (path, words)."""
+    from . import supervisor
     name = os.path.basename(d)
-    if not cli._loaded(): return 'fresh', 'no gateway loaded: a fresh start'
+    if not cli._loaded():
+        if supervisor_state() or supervisor.registry(): return 'busy', 'a supervisor or worker is still running: retry install'
+        return 'fresh', 'no gateway loaded: a fresh start'
     h = health()
-    if h is None: return 'fresh', 'a LaunchAgent is loaded but no gateway answers: started again from the release'
-    if 'handoff' not in h: return 'migrate', f"the running gateway (pid {h.get('pid')}, {h.get('version')}) predates releases: the one-time migration"
+    sup = supervisor_state() or {}
+    if not h:
+        status = cli.supervisor_call('status', timeout=3) or {}
+        h = health('::1')
+        if not h:
+            worker = next((w for w in status.get('workers', []) if w.get('role') == 'serving'), None)
+            if not worker or worker.get('release') == name:
+                return 'busy', 'gateway loaded but its health is unconfirmed: serving workers left running; retry install'
+            h = dict(handoff=1)
+        if status.get('ok'): sup = status
+    if 'handoff' not in h:
+        if sup or supervisor.registry(): return 'busy', 'registered gateway and HTTP health disagree: retry install'
+        return 'migrate', f"the running gateway (pid {h.get('pid')}, {h.get('version')}) predates releases: the one-time migration"
     try: was = plistlib.load(open(cli.PLIST, 'rb'))
     except (OSError, ValueError): was = {}
     if was != cli._plist(): return 'plist', 'the LaunchAgent changed: the supervisor detaches, launchd starts it again, it adopts the workers'
-    sup = supervisor_state() or {}
-    info = json.load(open(os.path.join(d, 'RELEASE.json')))
-    if sup and info.get('supervisor') and sup.get('digest') != info.get('supervisor'):
-        return 'upgrade', f"the supervisor changes ({sup.get('digest')} to {info.get('supervisor')}): it hands over, its workers keep serving"
+    if supervisor_digest is None: supervisor_digest = json.load(open(os.path.join(d, 'RELEASE.json'))).get('supervisor')
+    if sup and supervisor_digest and sup.get('digest') != supervisor_digest:
+        return 'upgrade', f"the supervisor changes ({sup.get('digest')} to {supervisor_digest}): it hands over, its workers keep serving"
     if h.get('code') == name and h.get('role') == 'serving': return 'none', f'nothing to deploy: release {name} is serving'
     return 'deploy', f"a handoff to release {name}"
 
 
 def install_gateway(cli, wait=90, force=False, dry=False, say=None):
     """Build the release and put it in front of the clients by the path choose() picks. -> (exit code, words)."""
-    run_dir()
+    if dry:
+        from . import dash, supervisor
+        if llmshare._flock_test(os.path.join(llmshare.RUN, 'install.lock')): return 3, 'another install is in progress'
+        name = dash.deploy_digest(cli.HOME)
+        path, words = choose(cli, name, supervisor.supervisor_digest(cli.HOME))
+        _say(say, f'release {name}: {words}')
+        return (3, words) if path == 'busy' else (0, f'would take the {path} path (--dry: nothing changed)')
     lock = open(os.path.join(run_dir(), 'install.lock'), 'a+')
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -141,7 +153,7 @@ def install_gateway(cli, wait=90, force=False, dry=False, say=None):
         d = cli.build_release()
         path, words = choose(cli, d)
         _say(say, f'release {os.path.basename(d)}: {words}')
-        if dry: return 0, f'would take the {path} path (--dry: nothing changed)'
+        if path == 'busy': return 3, words
         if path == 'none': return 0, words
         if path == 'fresh': return fresh(cli, d, say)
         if path == 'migrate': return migrate(cli, d, wait, say)
@@ -160,10 +172,10 @@ def install_gateway(cli, wait=90, force=False, dry=False, say=None):
 
 def fresh(cli, d, say):
     uid = f'gui/{os.getuid()}'
+    if cli._loaded(): return 3, 'a gateway was loaded during install: retry for a handoff'
     legacy = link_hub(d)
     if legacy: _say(say, f'the old installed copy kept as {legacy}')
     write_plist(cli._plist(), cli.PLIST)
-    if cli._loaded(): cli._launchctl('bootout', f'{uid}/{cli.LABEL}')
     r = cli._launchctl('bootstrap', uid, cli.PLIST)
     h = serving(os.path.basename(d), READY_MAX)
     if not h: return 1, f"no worker serving release {os.path.basename(d)} within {READY_MAX} s: {(r.stderr or '').strip() or 'see gateway.log'}"

@@ -164,7 +164,7 @@ class Worker:
 
     def adopt(self):
         """The listeners the supervisor passed down, as this process's servers (none serves before go)."""
-        for key, e in self.listen.items():
+        for key, e in list(self.listen.items()):
             fd = int(e['fd'])
             s = socket.socket(fileno=fd)
             os.set_inheritable(fd, False)                                # never kept open by an lms or caffeinate child
@@ -175,7 +175,19 @@ class Worker:
             srv.socket.close(); srv.socket = s
             srv.server_address = s.getsockname()
             srv.server_name, srv.server_port = str(e['addr'][0]), int(e['addr'][1])
-            if e.get('link'): srv.hosts, srv.iface = frozenset(str(h).lower() for h in e.get('hosts') or []), e.get('iface')
+            if e.get('link'):
+                # Older workers could pass an address-bound socket even if its interface restriction had failed.
+                try:
+                    address = srv.server_address[0]
+                    if six and srv.server_address[3] and '%' not in address:
+                        address += '%' + socket.if_indextoname(srv.server_address[3])
+                    srv.iface = gateway.restrict_link(s, address)
+                except OSError as ex:
+                    srv.server_close(); self.drop_listener(key)
+                    errors.record('adopt peer listener: bind to its interface', ex)
+                    continue
+                e['iface'] = srv.iface
+                srv.hosts = frozenset(str(h).lower() for h in e.get('hosts') or [])
             self.servers[key] = srv
         gateway.SELF['listeners'] = self.keys_view()
 
@@ -250,7 +262,6 @@ class Worker:
             new = int(m.get('supervisor') or 0)
             if new and new != self.sup_pid:                              # a new supervisor adopted this worker: leases follow it
                 old, self.sup_pid = self.sup_pid, new
-                os.environ['LOCALMODELS_SUPERVISOR'] = str(new)
                 gateway.rekey(old, new); self.reg.update(supervisor=new)
             if m.get('run'): self.run_id = m['run']
         elif op == 'go':
@@ -265,6 +276,7 @@ class Worker:
 
     def go(self):
         for key, srv in self.servers.items():
+            if srv.link: continue                         # the link-listener role serves inherited sockets too
             th = threading.Thread(target=srv.serve_forever, kwargs=dict(poll_interval=0.5), daemon=True, name=f'serve {key}')
             th.start(); self.serving.append(srv)
         self.role = 'serving'; gateway.SELF['role'] = 'serving'
@@ -296,7 +308,7 @@ class Worker:
         elif name == 'memory-sampler': web.sampler(self.stop)
         elif name == 'link-listener':
             adopted = {k: s for k, s in self.servers.items() if self.listen.get(k, {}).get('link')}
-            gateway.listen_link(self.stop, adopted=adopted, hold=self.hold_listener, drop=lambda k: self.line.send('drop', key=k))
+            gateway.listen_link(self.stop, adopted=adopted, hold=self.hold_listener, drop=self.drop_listener)
 
     def drain(self):
         """Stop accepting (this process's copies close; the listeners stay open in the supervisor and the newer worker),
@@ -360,6 +372,12 @@ class Worker:
         self.listen[key] = dict(family='inet6' if srv.address_family == socket.AF_INET6 else 'inet', addr=list(srv.server_address[:2]),
                                 link=True, iface=srv.iface, hosts=sorted(srv.hosts))
         self.hold_listeners([(key, srv)])
+        gateway.SELF['listeners'] = self.keys_view()
+
+    def drop_listener(self, key):
+        self.servers.pop(key, None)
+        self.listen.pop(key, None)
+        self.line.send('drop', key=key)
         gateway.SELF['listeners'] = self.keys_view()
 
     def hold_listeners(self, items):

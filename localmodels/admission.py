@@ -38,7 +38,7 @@ until one has room (a reservation), so it is never starved. The gateway writes e
 marker (`ctx`), which recycle.plan adds to an instance's count, so a drain starts before the requests in flight carry
 the instance past its threshold.
 """
-import ctypes, ctypes.util, glob, json, os, re, subprocess, threading, time
+import ctypes, ctypes.util, glob, json, math, os, re, subprocess, threading, time
 
 from . import llmshare
 
@@ -53,10 +53,21 @@ OTHER_GPU = 2.0           # GiB of the GPU's limit other programs hold (the wind
 OTHERS = 16.0             # GiB other programs hold, when the engines' own footprints cannot be read
 INLINE = re.compile(rb'data:[\w/.+-]{1,80};base64,[A-Za-z0-9+/=]{2000,}')   # an image or file sent inline
 MODELS_DIR = os.path.expanduser(os.environ.get('LMSTUDIO_MODELS') or '~/.lmstudio/models')
-_ratio = {'at': 0.0, 'v': RATIO, 'n': 0}
-_free, _others = {'at': 0.0, 'v': None}, {'at': 0.0, 'v': None}
-_budgets, _shapes = {}, {}                                # copy -> (when, tokens), computed at most every 10 s; model -> per-token bytes
+_ratio = {'at': 0.0, 'v': RATIO}
+_others = {'at': 0.0, 'v': OTHERS}
+_sample, _checked = {}, 0.0
+_budgets, _shapes = {}, {}                                # copy -> (when, tokens, had fresh sample); model -> per-token bytes
 _lock = threading.Lock()
+
+
+@llmshare.on_state
+def _state_paths(root):
+    global SAMPLE, _sample, _checked
+    SAMPLE = os.path.join(root, 'run', 'admission.json')
+    _sample, _checked = {}, 0.0
+    _budgets.clear()
+    _ratio.update(at=0.0, v=RATIO)
+    _others.update(at=0.0, v=OTHERS)
 
 
 # ---------------------------------------------------------------- a request's size
@@ -67,20 +78,22 @@ def prompt_bytes(body):
     return len(INLINE.sub(b'x' * 4000, body)) if b';base64,' in body else len(body)
 
 
-def ratio():
+def measured_ratio(rows):
     """Bytes of request body per prompt token on this Mac: the lower quartile over its last 200 answered requests of 500
     prompt tokens or more (each row keeps both), read at most once a minute, so most estimates come out a little high,
     never low; RATIO until 20 such requests are on record."""
-    with _lock:
-        if time.time() - _ratio['at'] < 60: return _ratio['v']
-        _ratio['at'] = time.time()
-    rows = [r for r in llmshare.requests_log(6) if r.get('bytes') and (r.get('prompt_tokens') or 0) >= 500 and r.get('status') == 200][-200:]
-    v = RATIO
-    if len(rows) >= 20:
-        xs = sorted(r['bytes'] / r['prompt_tokens'] for r in rows)
-        v = max(1.5, min(8.0, xs[len(xs) // 4]))
-    with _lock: _ratio.update(v=round(v, 3), n=len(rows))
-    return _ratio['v']
+    if len(rows) < 20: return RATIO
+    xs = sorted(r['bytes'] / r['prompt_tokens'] for r in rows)
+    return round(max(1.5, min(8.0, xs[len(xs) // 4])), 3)
+
+
+def ratio():
+    return host_sample().get('ratio', RATIO)
+
+
+def ratio_sample(row):
+    return (row.get('status') == 200 and isinstance(row.get('bytes'), int) and row['bytes'] > 0
+            and isinstance(row.get('prompt_tokens'), int) and row['prompt_tokens'] >= 500)
 
 
 def estimate(body, j=None, window=0, answer=True):
@@ -169,32 +182,47 @@ def engines():
     return out
 
 
-def others_gib():
-    """What programs other than LM Studio's models hold on this Mac, in GiB: memory in use less the engines' footprints
-    (read at most every 10 s); OTHERS when no engine can be read."""
+def refresh_sample():
+    """The memory-sampler role owns the probes and log calibration. Publish one snapshot for all workers and clients."""
+    from . import models
+    global _sample, _checked
+    gpu = models.gpu()
+    used, total = models.memory(gpu.get('total_gb'))
+    if not total or not 0 <= used <= total: return {}
+    now = time.time()
+    if now - _others['at'] >= 10:
+        footprints = engines()
+        others = max(0.0, used - sum(footprints.values()) / 2**30) if footprints else OTHERS
+        _others.update(at=now, v=round(others, 1))
+    if now - _ratio['at'] >= 60:
+        rows = llmshare.recent_requests(200, 6, ratio_sample)
+        _ratio.update(at=now, v=measured_ratio(rows))
+    sample = dict(at=now, used=used, total=total, others=_others['v'], limit=gpu.get('limit_gb') or 0, ratio=_ratio['v'])
+    os.makedirs(os.path.dirname(SAMPLE), mode=0o700, exist_ok=True)
+    llmshare._write(SAMPLE, sample)
+    with _lock: _sample, _checked = sample, time.monotonic()
+    return sample
+
+
+def host_sample(max_age=5):
+    """The sampler's reading, or {} if unavailable. A display can request the last known reading with max_age=None."""
+    global _sample, _checked
     with _lock:
-        if time.time() - _others['at'] < 10 and _others['v'] is not None: return _others['v']
-        _others['at'] = time.time()
-    from . import dash
-    try:
-        used, _ = dash.memory()
-        e = engines()
-        v = max(0.0, used - sum(e.values()) / 2**30) if e else OTHERS
-    except Exception as x: v = OTHERS; llmshare._error('admission: memory of other programs', x)
-    with _lock: _others['v'] = round(v, 1)
-    return _others['v']
+        if time.monotonic() - _checked >= 1:
+            try:
+                with open(SAMPLE) as f: candidate = json.load(f)
+                if (isinstance(candidate, dict) and all(type(candidate.get(k)) in (int, float) and math.isfinite(candidate[k])
+                        for k in ('at', 'used', 'total', 'others', 'limit', 'ratio')) and 0 <= candidate['used'] <= candidate['total']
+                        and candidate['total'] > 0 and candidate['ratio'] > 0): _sample = candidate
+            except (OSError, ValueError, OverflowError): pass
+            _checked = time.monotonic()
+        age = time.time() - _sample.get('at', 0)
+        return _sample if age >= 0 and (max_age is None or age <= max_age) else {}
 
 
 def free_gib():
-    """Memory not held by programs on this Mac, in GiB (models.free_gb, read at most once a second), or None."""
-    with _lock:
-        if time.time() - _free['at'] < 1: return _free['v']
-        _free['at'] = time.time()
-    from . import models
-    try: v = models.free_gb()
-    except Exception as x: v = None; llmshare._error('admission: free memory', x)
-    with _lock: _free['v'] = v
-    return v
+    sample = host_sample()
+    return sample['total'] - sample['used'] if sample else None
 
 
 def headroom():
@@ -214,12 +242,13 @@ def default_budget(copy, rows=None, memory=None):
     row = next((r for r in rows if r['id'] == copy), None)
     if not row: return 0
     win, slots = int(row.get('context') or 65536), int(row.get('parallel') or 1)
-    if memory is None:
-        g = models.gpu()
-        memory = (g.get('total_gb') or models.mem_gb(), others_gib(), g.get('limit_gb') or 0)
-    total, others, limit = memory
     chat = llmshare.chat_rows(rows)                         # an embedding model takes no share (its engine, under 2 GiB, is in others)
     if row not in chat: return win * slots
+    if memory is None:
+        sample = host_sample()
+        if not sample: return min(LEAST, win * slots)
+        memory = sample['total'], sample['others'], sample['limit']
+    total, others, limit = memory
     n = max(1, len(chat))
     shares = [(total - others - headroom()) / n] if total else []
     if limit: shares.append((limit - OTHER_GPU) / n)
@@ -238,9 +267,10 @@ def budget(copy, rows=None):
     if isinstance(a, dict) and isinstance(a.get('tokens'), (int, float)) and a['tokens'] > 0: return int(a['tokens'])
     if rows is not None: return default_budget(copy, rows)
     hit = _budgets.get(copy)
-    if hit and time.time() - hit[0] < 10: return hit[1]
+    fresh = bool(host_sample())
+    if hit and time.time() - hit[0] < 10 and fresh == hit[2]: return hit[1]
     v = default_budget(copy)
-    _budgets[copy] = (time.time(), v)
+    _budgets[copy] = (time.time(), v, fresh)
     return v
 
 
@@ -264,7 +294,7 @@ def fits(copy, load, need):
     if b and load + need > b: return False
     if len(llmshare.chat_rows(llmshare.listed())) < 2: return True               # an engine alone reclaims its own cache within the GPU limit
     free = free_gib()
-    return free is None or free - need_gib(copy, need) >= headroom()
+    return free is not None and free - need_gib(copy, need) >= headroom()
 
 
 def why_waiting(copies, loads, need):
@@ -277,6 +307,7 @@ def why_waiting(copies, loads, need):
         b = budget(c)
         if b and load + need > b: return f'context budget: ~{need:,} tokens + {load:,} in flight > {b:,} on {c}'
         free, mine = free_gib(), need_gib(c, need)
+        if len(llmshare.chat_rows(llmshare.listed())) >= 2 and free is None: return 'waiting for a current memory sample'
         if len(llmshare.chat_rows(llmshare.listed())) > 1 and free is not None and free - mine < headroom():
             return f'memory headroom: {free:.1f} GiB free; ~{mine:.1f} GiB for this request would leave less than headroom_gb {headroom():g}'
     return None

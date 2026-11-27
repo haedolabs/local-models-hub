@@ -158,17 +158,22 @@ def gb(size):
     return float(m.group(1)) * {'KB': 1e-6, 'MB': 1e-3, 'GB': 1, 'TB': 1e3, 'B': 1e-9}[m.group(2)] if m else 0.0
 
 
-def free_gb():
-    """Memory not held by programs, in GB: the Mac's total less app memory, wired and compressed (as Activity Monitor
-    counts "Memory Used"; the file cache is free to take)."""
-    def sh(cmd):
-        try: return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
-        except (OSError, subprocess.SubprocessError): return ''
-    total = int(sh(['sysctl', '-n', 'hw.memsize']).strip() or 0)
-    vm = sh(['vm_stat']); page = int((re.search(r'page size of (\d+)', vm) or [0, 16384])[1])
+def memory(total=None):
+    """(Used, total) GiB as Activity Monitor counts memory, or (0, 0) if unavailable."""
+    total = total or mem_gb()
+    try: vm = subprocess.check_output(['vm_stat'], text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError): return 0, 0
+    if not total or 'Anonymous pages:' not in vm: return 0, 0
+    page = int((re.search(r'page size of (\d+)', vm) or [0, 16384])[1])
     get = lambda k: int((re.search(rf'{k}:\s+(\d+)', vm) or [0, 0])[1])
     held = get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')
-    return (total - held * page) / 2**30                   # what programs hold (models included), not the file cache
+    return held * page / 2**30, total
+
+
+def free_gb():
+    """GiB not held by programs, including reclaimable file cache."""
+    used, total = memory()
+    return total - used
 
 
 def room_for(f, size, room, rows=None):
@@ -724,7 +729,7 @@ def plan(ident, context=None):
     fams = llmshare.settings().get('families') or {}
     f = fams.get(llmshare.family(ident)) or {}
     want = llmshare.copy_ids(ident, f.get('copies', 1)) if f and llmshare.family(ident) == ident else [ident]
-    rows = llmshare.loaded(fresh=True)
+    rows = llmshare.loaded(fresh=True, force=True)
     if f.get('kind') == 'embedding':                        # loading the embedding model unloads nothing else
         context = context or f.get('context')
         return want, [r['id'] for r in rows if llmshare.family(r['id']) == llmshare.family(ident)
@@ -746,27 +751,33 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
         if not got: return 3, 'another swap is under way: try again in a moment'
         want, drop = plan(ident, context)
         if not llmshare.read_ok(): return 3, "LM Studio did not say which models it holds (lms ps failed): not swapping; try again in a moment"
-        why = llmshare.swap_blockers(drop)
-        if why: return 3, 'not now: ' + '; '.join(why) + '. Try again when it is done.'
-        have = {r['id'] for r in llmshare.loaded()}
-        add = [c for c in want if c not in have or c in drop]
-        if dry: return 0, f"would unload {', '.join(drop) or 'nothing'}; would load {', '.join(add) or 'nothing'}"
-        drop = sorted(drop, key=lambda i: llmshare.family(i) == i)   # <id>:N first: a bare id (a model key) is unambiguous once its siblings are gone
-        asked = list(drop)
-        for _ in range(2):                                   # what is still listed is unloaded again, once
-            for i in drop: unload(i)
-            now = _listed()
-            if now is None: break
-            drop = [i for i in drop if i in now]
-            if not drop: break
-        now = _listed()
-        if now is not None: crashes.unloaded_now([i for i in asked if i not in now])   # gone on purpose, not crashed
-        if now is not None: add = [c for c in want if c not in now or c in drop]   # a wanted one that went is loaded back
-        for c in add:
-            ok, out = load(key, c, context, parallel)
-            if not ok: return 1, f'could not load {c}: {out[-300:]}'
-        ensure_server()                                        # LM Studio may turn its server off when a model changes
-        llmshare.loaded(fresh=True)
-        crashes.swapped(ident)                                 # a person chose: no crashed model is waiting to come back
+        with llmshare.swap_guard(drop, loading=want) as why:
+            if why: return 3, 'not now: ' + '; '.join(why) + '. Try again when it is done.'
+            if dry:
+                have = {r['id'] for r in llmshare.loaded()}
+                add = [c for c in want if c not in have or c in drop]
+                return 0, f"would unload {', '.join(drop) or 'nothing'}; would load {', '.join(add) or 'nothing'}"
+            remaining = sorted(drop, key=lambda i: llmshare.family(i) == i)   # :N before a bare key
+            for _ in range(2):
+                for i in remaining: unload(i)
+                now = _listed()
+                if now is None: return 1, 'could not verify the loaded instances after unload'
+                gone = [i for i in remaining if i not in now]
+                if gone: crashes.unloaded_now(gone)
+                remaining = [i for i in remaining if i in now]
+                if not remaining: break
+            if remaining: return 1, f"could not unload {', '.join(remaining)}: still listed"
+            for c in want:
+                if c in now: continue
+                ok, out = load(key, c, context, parallel)
+                if not ok: return 1, f'could not load {c}: {out[-300:]}'
+            if not ensure_server(): return 1, 'LM Studio server unavailable after swap'
+            final = _listed()
+            if final is None: return 1, 'could not verify the loaded instances after swap'
+            missing, kept = set(want) - final, (set(drop) - set(want)) & final
+            if missing: return 1, f"not loaded after swap: {', '.join(sorted(missing))}"
+            if kept: return 1, f"still loaded after swap: {', '.join(sorted(kept))}"
+            llmshare.loaded(fresh=True, force=True)               # publish the new listing before admissions resume
+            crashes.swapped(ident)
     n = len(want)
     return 0, f"{ident} loaded" + (f" as {n} replicas" + (f", {n * parallel} slots" if parallel else '') if n > 1 else '')

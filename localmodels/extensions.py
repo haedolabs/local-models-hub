@@ -24,7 +24,7 @@ person presses its button (run(), POST /hub/extensions/run); without the gateway
             {"run": "<verb>", "confirm": "..."}      the manifest's command with that verb, if the manifest lists it
 Standard library only.
 """
-import json, os, re, subprocess, tempfile, threading, urllib.parse
+import collections, json, os, re, subprocess, tempfile, threading, urllib.error, urllib.parse, urllib.request
 
 from . import llmshare
 
@@ -39,22 +39,34 @@ LINES = 200                                              # at most this many lin
 
 def local(url):
     """Is this an http URL on this Mac (localhost or 127.0.0.1, any port)?"""
-    try: u = urllib.parse.urlsplit(str(url))
-    except ValueError: return False
-    return u.scheme == 'http' and u.hostname in ('localhost', '127.0.0.1')
+    return origin(url) is not None
 
 
 def origin(url):
-    u = urllib.parse.urlsplit(str(url))
-    return f'{u.scheme}://{u.netloc}'
+    if not isinstance(url, str) or re.search(r'[\s\\\x00-\x1f\x7f]', url): return None
+    try:
+        u = urllib.parse.urlsplit(url)
+        if u.scheme != 'http' or u.hostname not in ('localhost', '127.0.0.1') or u.username is not None or u.port == 0: return None
+        return f'http://{u.hostname}' + (f':{u.port}' if u.port not in (None, 80) else '')
+    except ValueError: return None
+
+
+class MenuRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not origin(newurl) or origin(newurl) != origin(req.full_url):
+            raise urllib.error.HTTPError(req.full_url, code, 'extension redirect to another origin refused', headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_menu_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), MenuRedirect())
 
 
 def validate(m):
     """A manifest's problems, in words ([] when it is sound)."""
     if not isinstance(m, dict): return ['not a JSON object']
     p = []
-    if m.get('extension') != VERSION: p.append(f'"extension" is {m.get("extension")!r}: this hub reads version {VERSION}')
-    if not isinstance(m.get('id'), str) or not ID.match(m['id']): p.append('"id": lower-case letters, digits, ".", "_" and "-", at most 64')
+    if isinstance(m.get('extension'), bool) or m.get('extension') != VERSION: p.append(f'"extension" is {m.get("extension")!r}: this hub reads version {VERSION}')
+    if not isinstance(m.get('id'), str) or not ID.fullmatch(m['id']): p.append('"id": lower-case letters, digits, ".", "_" and "-", at most 64')
     for k in ('name', 'title', 'version', 'maker'):
         if k in m and not isinstance(m[k], str): p.append(f'"{k}" is not text')
     if not isinstance(m.get('name'), str) or not m.get('name', '').strip(): p.append('"name" is missing')
@@ -63,7 +75,7 @@ def validate(m):
     if local(m.get('menu')) and m.get('open') and local(m['open']) and origin(m['open']) != origin(m['menu']):
         p.append('"open" is on another origin than "menu"')
     if m.get('token') is not None and not (isinstance(m['token'], str) and os.path.isabs(m['token'])): p.append('"token" must be an absolute file path')
-    if m.get('token_header') is not None and not (isinstance(m['token_header'], str) and HEADER.match(m['token_header'])):
+    if m.get('token_header') is not None and not (isinstance(m['token_header'], str) and HEADER.fullmatch(m['token_header'])):
         p.append('"token_header" must be an X- header name')
     run = m.get('run')
     if run is not None:
@@ -73,7 +85,7 @@ def validate(m):
             if not (isinstance(cmd, list) and cmd and all(isinstance(x, str) and x for x in cmd) and os.path.isabs(cmd[0])):
                 p.append('"run.command": a list of words, the first an absolute path to a program')
             if not (isinstance(env, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())): p.append('"run.env": names to text')
-            if not (isinstance(verbs, list) and verbs and all(isinstance(v, str) and VERB.match(v) for v in verbs)):
+            if not (isinstance(verbs, list) and verbs and all(isinstance(v, str) and VERB.fullmatch(v) for v in verbs)):
                 p.append('"run.verbs": a list of lower-case words, the only arguments the app may add to the command')
     return p
 
@@ -150,6 +162,7 @@ def register(m):
 
 def unregister(ext_id):
     """Delete an extension's manifest. -> whether there was one."""
+    if not isinstance(ext_id, str) or not ID.fullmatch(ext_id): return False
     try: os.remove(path(ext_id)); return True
     except FileNotFoundError: return False
 
@@ -165,13 +178,18 @@ def load():
         probs = validate(m)
         if isinstance(m, dict) and m.get('id') and f != f"{m['id']}.json": probs.append(f'the file is named {f}, its id is {m["id"]}')
         out.append(dict(file=f, manifest=m, problems=probs))
+    ids = collections.Counter(x['manifest']['id'] for x in out if isinstance(x['manifest'], dict) and isinstance(x['manifest'].get('id'), str))
+    for x in out:
+        m = x['manifest']
+        if isinstance(m, dict) and isinstance(m.get('id'), str) and ids[m['id']] > 1: x['problems'].append('duplicate extension id')
     return out
 
 
 def fetch_menu(m, timeout=3.0):
     """GET the extension's menu. -> (menu, None) or (None, why not)."""
+    if not local(m.get('menu')): return None, 'invalid extension menu URL'
     try:
-        with llmshare.urlopen(m['menu'], timeout=timeout) as r: return json.load(r), None
+        with _menu_opener.open(m['menu'], timeout=timeout) as r: return json.load(r), None
     except (OSError, ValueError) as e: return None, f'{type(e).__name__}: {e}'
 
 
@@ -205,9 +223,9 @@ def run(ext_id, verb, wait=30.0):
     """Run an extension's command with one of the verbs its manifest lists, as the menu-bar app does on a click (the
     dashboard's Start): its environment added to the gateway's, in a session of its own (so it outlives the gateway),
     waited for up to `wait` seconds. -> (HTTP code, answer)."""
-    m = next((x['manifest'] for x in load() if isinstance(x['manifest'], dict) and x['manifest'].get('id') == ext_id), None)
-    if m is None: return 404, dict(error=f'no extension {ext_id!r} ({DIR})')
-    probs = validate(m)
+    entry = next((x for x in load() if isinstance(x['manifest'], dict) and x['manifest'].get('id') == ext_id), None)
+    if entry is None: return 404, dict(error=f'no extension {ext_id!r} ({DIR})')
+    m, probs = entry['manifest'], entry['problems']
     if probs: return 409, dict(error='its manifest is not sound: ' + '; '.join(probs))
     r = m.get('run') or {}
     if verb not in (r.get('verbs') or []):
@@ -221,8 +239,10 @@ def run(ext_id, verb, wait=30.0):
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as e: out.close(); return 500, dict(error=f'{r["command"][0]}: {e.strerror or e}')
         _runs[ext_id] = p
-    try: code = p.wait(wait)
-    except subprocess.TimeoutExpired: return 202, dict(ok=True, note=f'{verb} still running after {wait:g} s')
-    out.seek(0); words = out.read()[-4000:].decode('utf-8', 'replace').strip(); out.close()
+    with out:
+        try: code = p.wait(wait)
+        except subprocess.TimeoutExpired: return 202, dict(ok=True, note=f'{verb} still running after {wait:g} s')
+        out.seek(max(0, out.seek(0, os.SEEK_END) - 4000))
+        words = out.read(4000).decode('utf-8', 'replace').strip()
     if code: return 502, dict(ok=False, error=f'{m["name"]} {verb} exited {code}' + (f': {words[-300:]}' if words else ''), output=words)
     return 200, dict(ok=True, output=words)

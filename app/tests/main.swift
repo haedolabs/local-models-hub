@@ -1,7 +1,7 @@
 // The menu-bar app's state logic (app/Glance.swift) against fixture snapshots: the icon, the menu's lines and actions,
-// and the notifications; and its menu kept in place across polls (app/Menu.swift), with real menu items. Built and run by
-// `localmodels check` when the Command Line Tools are present:
-//   swiftc app/Glance.swift app/Menu.swift app/tests/main.swift -o <tmp> && <tmp>
+// and the notifications; its menu across polls (app/Menu.swift); and extension redirects and child output
+// (app/ExtensionIO.swift). Built and run by `localmodels check` when the Command Line Tools are present:
+//   swiftc app/Glance.swift app/Menu.swift app/ExtensionIO.swift app/tests/main.swift -o <tmp> && <tmp>
 import AppKit
 
 var results: [Bool] = []
@@ -101,7 +101,41 @@ t("refused: a menu on another machine", readExtension(Data(#"{"extension": 1, "i
 t("refused: an id with capitals", readExtension(Data(#"{"extension": 1, "id": "A.b", "name": "A", "menu": "http://localhost:1/m"}"#.utf8)) == nil)
 t("refused: not JSON", readExtension(Data("nope".utf8)) == nil && readExtension(nil) == nil)
 let offsite = readExtension(Data(#"{"extension": 1, "id": "a.b", "name": "A", "menu": "http://localhost:1/m", "open": "http://example.com/"}"#.utf8))
-t("a page on another origin is dropped, the extension kept", offsite != nil && offsite!.open.isEmpty)
+t("a manifest with a page on another origin is refused", offsite == nil)
+let fixtureFile = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("manifest-fixtures.json")
+let manifestFixtures = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureFile)) as! [[String: Any]]
+for fixture in manifestFixtures {
+    var base: [String: Any] = ["extension": 1, "id": "fixture", "name": "Fixture", "menu": "http://localhost/menu"]
+    base.merge(fixture["fields"] as! [String: Any]) { _, field in field }
+    t("shared manifest: \(fixture["name"]!)", (readManifest(base) != nil) == (fixture["valid"] as! Bool))
+}
+
+let redirects = ExtensionRedirect()
+let session = URLSession(configuration: .ephemeral, delegate: redirects, delegateQueue: nil)
+let startURL = URL(string: "http://localhost:9411/start")!
+for method in ["GET", "POST"] {
+    var initial = URLRequest(url: startURL)
+    initial.httpMethod = method
+    let task = session.dataTask(with: initial)
+    let response = HTTPURLResponse(url: startURL, statusCode: 307, httpVersion: nil, headerFields: nil)!
+    for port in [9411, 9412] {
+        var next = initial; next.url = URL(string: "http://localhost:\(port)/next")
+        redirects.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: next) { follow in
+            t("\(method) follows a redirect only on the extension's original port", (follow != nil) == (port == 9411))
+        }
+    }
+    task.cancel()
+}
+session.invalidateAndCancel()
+
+let child = Process(), finished = DispatchSemaphore(value: 0)
+child.executableURL = URL(fileURLWithPath: "/bin/sh")
+child.arguments = ["-c", "head -c 262144 /dev/zero; echo finished >&2"]
+var tail = "", status: Int32 = -1
+try ExtensionOutput().run(child) { code, words in status = code; tail = words; finished.signal() }
+let exited = finished.wait(timeout: .now() + 10) == .success
+if !exited && child.isRunning { child.terminate() }
+t("a verbose extension exits and its final diagnostic fits in 4 KiB", exited && status == 0 && tail.utf8.count == 4096 && tail.hasSuffix("finished\n"))
 
 let menuJSON = #"{"menu": 1, "summary": "3 of 8 items ready", "alerts": [{"title": "Something is due tomorrow", "action": {"open": "/due"}}],"#
     + #" "lines": [{"title": "A status line"}, {"title": "Open the report", "action": {"open": "/report"}, "indent": 1},"#

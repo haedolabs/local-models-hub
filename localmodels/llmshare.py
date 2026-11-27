@@ -44,7 +44,7 @@ The rules every project follows:
 """
 import contextlib, fcntl, glob, itertools, json, os, re, shutil, subprocess, threading, time, urllib.error, urllib.request
 
-STATE_PROTOCOL = 1     # the shared state's format: slot paths; the names and fields of marks, leases, registry rows, roles,
+STATE_PROTOCOL = 2     # slot and family-swap locks; the names and fields of marks, leases, registry rows, roles,
                        # peer slots and listing.json; keeper.json keys; link.json. Gateways of two protocols never serve at once.
 _on_state = []         # what use_state() repoints: this module's paths, then every module's that registered with on_state()
 
@@ -470,6 +470,32 @@ def swapping(wait=120):
 
 
 @contextlib.contextmanager
+def family_access(models, exclusive=False, wait=False):
+    """A swap reserves the affected families through verification. Admission takes a shared lock while publishing
+    a lease or taking a slot; once published, either is visible to the swap's final blocker check."""
+    directory = os.path.join(RUN, 'families')
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        for name in sorted({_safe(family(m)) for m in models}):
+            handle = stack.enter_context(open(os.path.join(directory, name + '.lock'), 'a+'))
+            mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            try: fcntl.flock(handle, mode if wait else mode | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+        yield True
+
+
+@contextlib.contextmanager
+def swap_guard(models, loading=()):
+    """The blocker check and the mutation it permits are one operation with respect to admission."""
+    with family_access(set(models) | set(loading), exclusive=True) as reserved:
+        why = swap_blockers(models)
+        if not reserved and not why: why = ['a request or model change is acquiring this family']
+        yield why
+
+
+@contextlib.contextmanager
 def flocked(path):
     """An exclusive lock on path for the length of the block: every process that changes the same shared file takes it."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -832,14 +858,16 @@ def _take(models):
 def _take_slot(m, need=0):
     """One free slot of a local copy, or None; need: the context written into it (slot_load)."""
     d = _slot_dir(m)
-    for i in range(parallel_of(m)):
-        h = open(os.path.join(d, f'slot-{i}.lock'), 'a+')
-        try: fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError: h.close(); continue
-        if need:
-            try: h.seek(0); h.truncate(); h.write(str(int(need))); h.flush()
-            except OSError as e: _error('slot: write its context', e)
-        return h
+    with family_access([m]) as available:
+        if not available: return None
+        for i in range(parallel_of(m)):
+            h = open(os.path.join(d, f'slot-{i}.lock'), 'a+')
+            try: fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError: h.close(); continue
+            if need:
+                try: h.seek(0); h.truncate(); h.write(str(int(need))); h.flush()
+                except OSError as e: _error('slot: write its context', e)
+            return h
     return None
 
 
@@ -898,7 +926,7 @@ def load_here(copies=None):
 
 
 @contextlib.contextmanager
-def slot_any(models, wait=3600, kind='other', since=None, publish=None, need=0, fits=None, waiting=None):
+def slot_any(models, wait=3600, kind='other', since=None, publish=None, need=0, fits=None, waiting=None, cancelled=None):
     """Hold one prediction slot on the first of these models that has one free: a model's copies, in order, so the first
     copy's slots fill before the second's (two on each measured slower than four on one). models: a list, or a function
     that gives the list each time it is tried, so a copy that comes back or is being drained counts at once. Waiters in
@@ -920,6 +948,7 @@ def slot_any(models, wait=3600, kind='other', since=None, publish=None, need=0, 
     until, held, got, shown, said = t0 + wait, None, None, None, None
     try:
         while held is None:
+            if cancelled and cancelled(): raise ConnectionAbortedError('client closed the connection while queued')
             cands = list(pick() or [])
             if fits is None: room = cands
             else:
@@ -1060,7 +1089,7 @@ def lease(project, models, kind='other', **info):
 
     def beat():
         while not stop.wait(BEAT): held.save()
-    held.save()
+    with family_access(rec['models'], wait=True): held.save()
     th = threading.Thread(target=beat, daemon=True); th.start()
     try: yield held
     finally:
@@ -1121,8 +1150,8 @@ def swap_blockers(models):
     does not count against itself (a run may swap its own model); the hub's leases for other programs always count."""
     ms, why, seen = set(models or []), [], set()
     fams = {family(m) for m in ms}                        # a run on one copy may be sent to any copy of it next
-    loaded(fresh=True)
-    if not _ps['ok']:
+    rows = loaded(fresh=True, force=True)
+    if not read_ok():
         return ["lms ps failed, so the loaded models are unknown; retry shortly"]
     for d in sorted(leases(), key=lambda d: d.get('since', 0)):
         hit = sorted({m for m in d.get('models') or [] if family(m) in fams})
@@ -1134,8 +1163,11 @@ def swap_blockers(models):
         what = 'requests via the gateway' if d.get('via') == 'hub' and d.get('kind') == 'other' else f"a {d.get('kind')}"
         why.append(f"{what} in the {d.get('project')} project{' on ' + str(d['from']) if d.get('from') else ''} (since {since}) is using {', '.join(hit)}")
     if not why:
-        for r in loaded():
-            if r['id'] in ms and r['state'] in ('GENERATING', 'PROCESSING'):
+        busy = busy_slots()
+        for r in rows:
+            if family(r['id']) not in fams: continue
+            if busy.get(_safe(r['id'])): why.append(f"a prediction slot on {r['id']} is in use")
+            elif r['state'] in ('GENERATING', 'PROCESSING'):
                 why.append(f"{r['id']} is generating now (LM Studio's chat or another client, outside the gateway)")
     if why: _note('swap refused', ','.join(sorted(ms)))
     return why
@@ -1252,6 +1284,37 @@ def requests_log(hours=1.0, tail=4_000_000):
     """The hub's request records from the last `hours` hours (read from the end of the log, as far back as needed)."""
     since = time.time() - hours * 3600
     return _tail(REQUESTS + '.1', since, tail) + _tail(REQUESTS, since, tail)
+
+
+def recent_requests(n, hours, qualifies=None):
+    """Up to n matching records, newest first. Read only the blocks needed, including the previous file on rollover."""
+    if n <= 0: return []
+    since, out, seen = time.time() - hours * 3600, [], set()
+    for path in (REQUESTS, REQUESTS + '.1'):
+        try: f = open(path, 'rb')
+        except OSError: continue
+        with f:
+            identity = os.fstat(f.fileno())
+            key = identity.st_dev, identity.st_ino
+            if key in seen: continue                  # the current file rotated while being read
+            seen.add(key)
+            pos, rest = f.seek(0, os.SEEK_END), b''
+            while pos:
+                size = min(pos, 16384)
+                pos -= size
+                f.seek(pos)
+                lines = (f.read(size) + rest).split(b'\n')
+                rest = lines.pop(0) if pos else b''
+                for line in reversed(lines):
+                    if not line: continue
+                    try: r = json.loads(line)
+                    except ValueError: continue
+                    if not isinstance(r, dict) or not isinstance(r.get('at'), (int, float)): continue
+                    if r['at'] < since: return out
+                    if qualifies and not qualifies(r): continue
+                    out.append(r)
+                    if len(out) == n: return out
+    return out
 
 
 def by_project(rows):

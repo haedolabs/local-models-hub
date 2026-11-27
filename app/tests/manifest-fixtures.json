@@ -1,0 +1,16 @@
+[
+  {"name": "minimal manifest", "fields": {}, "valid": true},
+  {"name": "explicit default port", "fields": {"open": "http://LOCALHOST:80/page"}, "valid": true},
+  {"name": "wrong port", "fields": {"open": "http://localhost:81/page"}, "valid": false},
+  {"name": "out of range port", "fields": {"menu": "http://localhost:65536/menu"}, "valid": false},
+  {"name": "boolean version", "fields": {"extension": true}, "valid": false},
+  {"name": "fractional version", "fields": {"extension": 1.5}, "valid": false},
+  {"name": "blank name", "fields": {"name": "\n"}, "valid": false},
+  {"name": "optional text supplied as a number", "fields": {"maker": 1}, "valid": false},
+  {"name": "invalid token header", "fields": {"token_header": "X-Test\n"}, "valid": false},
+  {"name": "relative token path", "fields": {"token": "example.token"}, "valid": false},
+  {"name": "empty argument", "fields": {"run": {"command": ["/usr/bin/true", ""], "verbs": ["start"]}}, "valid": false},
+  {"name": "invalid verb among valid verbs", "fields": {"run": {"command": ["/usr/bin/true"], "verbs": ["start", "Save"]}}, "valid": false},
+  {"name": "non-text environment", "fields": {"run": {"command": ["/usr/bin/true"], "verbs": ["start"], "env": {"N": 1}}}, "valid": false},
+  {"name": "optional run absent", "fields": {"run": null}, "valid": true}
+]

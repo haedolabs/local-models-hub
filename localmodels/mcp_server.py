@@ -9,7 +9,8 @@ Tools: status, guide, ask, batch, job_status, name, swap_check. ask and batch ru
 tools that only read the session's own project folder; they run as their own process (a session that ends does not
 stop them) and go through the hub like everything else.
 """
-import concurrent.futures as cf, json, os, re, shutil, subprocess, sys, threading, time, traceback
+import collections, concurrent.futures as cf, hashlib, json, os, re, shutil, subprocess, sys, threading, time, traceback
+from typing import NamedTuple
 
 from . import HOME, VERSION, agent, dash, llmshare, whois
 
@@ -136,19 +137,41 @@ def guide(section=None):
 
 
 def _inside(p, d):
-    """p is d or inside it, compared without regard to capitals (macOS volumes ignore them, and realpath keeps them as given)."""
-    return p.lower() == d.lower() or p.lower().startswith(d.lower().rstrip(os.sep) + os.sep)
+    """Both paths resolved; let the filesystem decide whether differently spelled ancestors are the same directory."""
+    if os.path.commonpath([p, d]) == d: return True
+    try:
+        while p != os.path.dirname(p):
+            if os.path.samefile(p, d): return True
+            p = os.path.dirname(p)
+    except OSError: pass
+    return False
+
+
+class Project(NamedTuple):
+    checkout: str
+    main: str
+
+    @property
+    def namespace(self):
+        return 'project-' + hashlib.sha256(os.fsencode(self.main)).hexdigest()[:32]
+
+
+def _project(path):
+    """A checkout (allowed files) and its main worktree (shared job identity). Outside Git, use only this directory."""
+    path = os.path.realpath(path)
+    try:
+        def git(*args):
+            return subprocess.check_output(['git', '-C', path, *args], stderr=subprocess.DEVNULL, timeout=5)
+        checkout = os.path.realpath(os.fsdecode(git('rev-parse', '--show-toplevel')).rstrip('\n'))
+        first = git('worktree', 'list', '--porcelain', '-z').split(b'\0\0', 1)[0].split(b'\0')
+        if first[0].startswith(b'worktree ') and b'bare' not in first:
+            return Project(checkout, os.path.realpath(os.fsdecode(first[0][9:])))
+        return Project(checkout, checkout)
+    except (OSError, subprocess.SubprocessError): return Project(path, path)
 
 
 def _session_folder():
-    """The session's project folder: its working folder, a worktree's main checkout instead of the worktree, or the
-    first folder under ~/Documents (or another of whois.ROOTS) that holds it."""
-    path = os.path.realpath(os.environ.get('PWD') or os.getcwd())
-    path = re.split(r'/\.claude/worktrees/|/\.worktrees/', path)[0]
-    for r in whois.ROOTS:
-        r = os.path.realpath(r)
-        if _inside(path, r) and path.lower() != r.lower(): return os.path.join(r, path[len(r) + 1:].split(os.sep)[0])
-    return path
+    return _project(os.environ.get('PWD') or os.getcwd())
 
 
 def _root(folder=None, within=None):
@@ -163,8 +186,8 @@ def _root(folder=None, within=None):
         return None, f'{root} is not a project folder (it must be inside your home folder, not ~/Library)'
     if root[len(home) + 1:].split(os.sep)[0].startswith('.'):
         return None, f'{root} is under a dot-folder of the home folder ({root[len(home) + 1:].split(os.sep)[0]}): not a project folder'
-    if within and not _inside(root, within):
-        return None, (f"{root} is outside this session's project folder ({within}): the MCP tools read only the session's own project "
+    if within and not (_inside(root, within.checkout) or _inside(root, within.main)):
+        return None, (f"{root} is outside this session's project folder ({within.checkout}): the MCP tools read only the session's own project "
                       '(from a terminal, localmodels ask --dir names any project folder)')
     return root, None
 
@@ -176,53 +199,91 @@ def start(kind, jobs, parallel=1, folder=None, read_files=True, within=None, run
     if err: raise ValueError(err)
     m, err = agent.loaded_model()
     if err: raise ValueError(err)
-    project = whois.project_of(within or root) or os.path.basename(within or root)
-    d = agent.new_dir(os.path.join(AGENTS, llmshare._safe(project)), kind)
+    scope = within or _project(root)
+    project = whois.project_of(scope.main) or os.path.basename(scope.main)
+    d = agent.new_dir(os.path.join(AGENTS, scope.namespace), kind)
     jobs = agent.unique_labels([dict(j, label=j.get('label') or f'{kind}-{i + 1}') for i, j in enumerate(jobs)])
-    json.dump(dict(project=project, root=root, model=m['id'], parallel=parallel, kind=kind, read_files=read_files, jobs=jobs,
+    json.dump(dict(project=project, project_root=scope.main, root=root, model=m['id'], parallel=parallel, kind=kind, read_files=read_files, jobs=jobs, labels_assigned=True,
                    **({'run': str(run)[:80], 'phase': str(phase or 'all')[:60]} if run else {})),
               open(os.path.join(d, 'jobs.json'), 'w'), indent=1)
     py = shutil.which('python3') or sys.executable
     p = subprocess.Popen([py, os.path.join(HOME, 'bin', 'localmodels'), 'agent-run', d], cwd=root, start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=open(os.path.join(d, 'run.log'), 'w'), stderr=subprocess.STDOUT)
     json.dump(dict(pid=p.pid, started=time.time()), open(os.path.join(d, 'runner.json'), 'w'))
-    return f'{llmshare._safe(project)}/{os.path.basename(d)}', d
+    return f'{scope.namespace}/{os.path.basename(d)}', d
 
 
-def job_status(job, label=None, results=False, cap=200_000):
-    d = os.path.realpath(os.path.join(AGENTS, job or ''))
-    if not d.startswith(os.path.realpath(AGENTS) + os.sep) or not os.path.isdir(d): return dict(ok=False, error=f'no job {job!r}')
+def job_status(job, label=None, results=False, cap=200_000, within=None):
+    missing = dict(ok=False, error=f'no job {job!r} in this project')
+    match = re.fullmatch(r'([A-Za-z0-9._-]+)/(\d{8}-\d{6}-(?:ask|batch)(?:-\d+)?)', job or '')
+    if not match or match[1] in ('.', '..'): return missing
+    if within:
+        legacy = llmshare._safe(whois.project_of(within.main) or os.path.basename(within.main))
+        if match[1] not in (within.namespace, legacy): return missing
+    d = os.path.join(os.path.realpath(AGENTS), *match.groups())
+    if os.path.realpath(d) != d or not os.path.isdir(d): return missing
+    try:
+        with os.scandir(d) as files:
+            if any(f.is_symlink() for f in files): return missing
+        with open(os.path.join(d, 'jobs.json')) as f: spec = json.load(f)
+    except (OSError, ValueError): return missing
+    if not isinstance(spec, dict) or not isinstance(spec.get('jobs'), list): return missing
+    if within:
+        saved = spec.get('project_root')
+        if saved is None:
+            root = spec.get('root')
+            if not isinstance(root, str) or not os.path.isabs(root) or not os.path.isdir(root): return missing
+            saved = _project(root).main
+        try:
+            if not isinstance(saved, str) or not os.path.isabs(saved) or not os.path.samefile(saved, within.main): return missing
+        except (OSError, ValueError): return missing
     b = dash.batch(d) or {}
-    try: spec = json.load(open(os.path.join(d, 'jobs.json')))
-    except (OSError, ValueError): spec = {}
     out = dict(ok=True, job=job, done=b.get('done', 0), of=len(spec.get('jobs', [])), running=[(x['job'], x.get('step')) for x in b.get('now', [])])
     finished = os.path.exists(os.path.join(d, 'summary.json'))
     out['finished'] = finished
-    try: tail = open(os.path.join(d, 'run.log')).read()[-600:]
-    except OSError: tail = ''
     if not finished:
+        try:
+            with open(os.path.join(d, 'run.log'), 'rb') as f:
+                f.seek(max(0, f.seek(0, os.SEEK_END) - 2400))
+                tail = f.read().decode('utf-8', 'replace')[-600:]
+        except OSError: tail = ''
         try: runner = json.load(open(os.path.join(d, 'runner.json')))
         except (OSError, ValueError): runner = {}
         if runner.get('pid') and not llmshare._alive(runner['pid']):
             out['problem'] = 'the runner is gone without finishing' + (f': {tail}' if tail else '')
         elif tail and 'Traceback' in tail: out['problem'] = tail
     rows, size = [], 0
-    for j in spec.get('jobs', []):
-        if label and j['label'] != label: continue
-        try: r = json.load(open(os.path.join(d, j['label'] + '.json')))
+    labels = [j.get('label') for j in spec['jobs'] if isinstance(j, dict)]
+    if not spec.get('labels_assigned'):
+        # Older detached runners normalized the specification a second time. Their plan names the actual files.
+        try:
+            with open(os.path.join(d, 'plan.json')) as f: plan = json.load(f)
+            if isinstance(plan, dict) and isinstance(plan.get('jobs'), list): labels = plan['jobs']
+        except (OSError, ValueError): pass
+    labels = [s for s in labels if isinstance(s, str) and agent.label(s) == s]
+    copies = collections.Counter(s.lower() for s in labels)
+    for s in labels:
+        if label and s != label: continue
+        if copies[s.lower()] > 1 or s.lower() in agent.JOB_FILES:
+            rows.append(dict(label=s, ok=False, error='the original batch reused this filename; its result is ambiguous'))
+            continue
+        try:
+            with open(os.path.join(d, s + '.json')) as f: r = json.load(f)
         except (OSError, ValueError):
-            if finished or label: rows.append(dict(label=j['label'], ok=False, error='no result'))
+            if finished or label: rows.append(dict(label=s, ok=False, error='no result'))
             continue
         u = r.get('usage') or {}
-        line = dict(label=r.get('label'), ok=r.get('ok'), seconds=r.get('seconds'), error=r.get('error'),
+        line = dict(label=s, ok=r.get('ok'), seconds=r.get('seconds'), error=r.get('error'),
                     answer_chars=len(r.get('answer') or ''), result_chars=len(json.dumps(r.get('result'))) if r.get('result') is not None else 0,
                     **({'empty_answers': u['empty']} if u.get('empty') else {}), **({'retries': u['retries']} if u.get('retries') else {}))
         if results or label:
-            ans, res = (r.get('answer') or '')[:6000], r.get('result')
+            ans, res = r.get('answer') or '', r.get('result')
+            if not label and len(ans) > 6000:
+                ans, line['note'] = ans[:6000], 'truncated; ask for this label alone'
             if size + len(ans) + (len(json.dumps(res)) if res is not None else 0) > cap and not label: line['note'] = 'left out: the reply is full; ask for this label alone'
             else:
                 line.update(answer=ans or None, result=res); size += len(ans) + (len(json.dumps(res)) if res is not None else 0)
-        rows.append({k: v for k, v in line.items() if v not in (None, '', 0) or k in ('ok',)})
+        rows.append({k: v for k, v in line.items() if k in ('ok', 'result') or v not in (None, '', 0)})
     if rows: out['results' if (results or label) else 'jobs'] = rows
     return out
 
@@ -249,10 +310,7 @@ def call(name, a):
         why = llmshare.swap_blockers(models)
         return dict(ok=True, models=models, blockers=why, safe=not why)
     if name == 'job_status':
-        job, mine = str(a.get('job') or ''), _session_folder()
-        own = llmshare._safe(whois.project_of(mine) or os.path.basename(mine))
-        if job.split('/')[0] != own: return dict(ok=False, error=f'no job {job!r} in this project ({own}): job_status reads only the jobs this project started')
-        return job_status(job, a.get('label'), bool(a.get('results')))
+        return job_status(str(a.get('job') or ''), a.get('label'), bool(a.get('results')), within=_session_folder())
     if name == 'name': return name_project(a.get('name'), a.get('formerly') or [], a.get('private'))
     if name in ('ask', 'batch'):
         if name == 'ask':
@@ -262,7 +320,8 @@ def call(name, a):
             jobs = [j for j in a.get('jobs') or [] if isinstance(j, dict) and j.get('prompt')]
             if not jobs: return dict(ok=False, error='no jobs with a prompt')
         at_once = llmshare.at_once() or llmshare.settings().get('batch_at_once', 8)
-        try: job, d = start(name, jobs, int(a.get('parallel') or (1 if name == 'ask' else at_once)), a.get('folder'), a.get('read_files', True), within=_session_folder(),
+        scope = _session_folder()
+        try: job, d = start(name, jobs, int(a.get('parallel') or (1 if name == 'ask' else at_once)), a.get('folder'), a.get('read_files', True), within=scope,
                                run=a.get('run') if name == 'batch' else None, phase=a.get('phase'))
         except (ValueError, TypeError) as e: return dict(ok=False, error=str(e))
         if name == 'batch': return dict(ok=True, job=job, jobs=len(jobs), note='follow it with job_status')
@@ -270,7 +329,7 @@ def call(name, a):
         while time.time() - t0 < wait:
             if os.path.exists(os.path.join(d, 'summary.json')): break
             time.sleep(1)
-        st = job_status(job, label='ask')
+        st = job_status(job, label='ask', within=scope)
         if st.get('finished'):
             r = (st.get('results') or [{}])[0]
             return dict(ok=bool(r.get('ok')), job=job, answer=r.get('answer'), result=r.get('result'), error=r.get('error'), seconds=r.get('seconds'))
@@ -287,7 +346,7 @@ def run_folder(d):
     kind = 'ask' if spec.get('kind') == 'ask' else 'batch'
     summary, _, _ = agent.batch(spec['jobs'], spec['model'], defs, lambda n, a, job: files.call(n, a), spec['project'],
                                 spec.get('parallel', 1), out_dir=d, quiet=True, by='claude' if os.environ.get('CLAUDECODE') == '1' else None, kind=kind,
-                                run=spec.get('run'), phase=spec.get('phase'))
+                                run=spec.get('run'), phase=spec.get('phase'), labels_assigned=spec.get('labels_assigned', False))
     print(f"{summary['ok']} of {summary['jobs']} ok in {summary['seconds']} s")
     return 0 if summary['ok'] == summary['jobs'] else 1
 

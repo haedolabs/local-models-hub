@@ -10,6 +10,8 @@ import ctypes, os, re, subprocess, threading, time
 
 HOME = os.path.expanduser('~')
 ROOTS = [os.path.join(HOME, d) for d in ('Documents', 'Projects', 'Developer', 'Code', 'code', 'src', 'GitHub', 'repos')]
+# Sessions can report the logical path; the kernel and Git can report the same folder by its physical path.
+ROOTS = list(dict.fromkeys(ROOTS + [os.path.realpath(r) for r in ROOTS]))
 LSOF = '/usr/sbin/lsof' if os.path.exists('/usr/sbin/lsof') else 'lsof'
 try:
     _libc = ctypes.CDLL(None)

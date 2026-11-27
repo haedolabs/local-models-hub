@@ -159,7 +159,7 @@ def test_recycle():
 def test_admission(box):
     print("admission by context size: a request's size, an instance's budget, who fits")
     from localmodels import admission, models
-    real = llmshare.settings, admission.MODELS_DIR, admission.free_gib, llmshare.requests_log
+    real = llmshare.settings, admission.MODELS_DIR, admission.free_gib
     fam = {B: dict(key=B, copies=2, context=65536, parallel=4, recycle=False)}
     llmshare.settings = lambda: dict(families=fam, batch_at_once=8, headroom_gb=8)
     admission._ratio.update(at=time.time() + 3600, v=3.0)
@@ -172,14 +172,8 @@ def test_admission(box):
     img = b'{"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,' + b'A' * 500000 + b'"}}]}'
     t('an image sent inline counts what a model reads of it, not its encoding', admission.prompt_bytes(img) < 4200, admission.prompt_bytes(img))
     rows_ = [dict(at=time.time() - 60, status=200, prompt_tokens=10000, bytes=32000)] * 20 + [dict(at=time.time() - 60, status=200, prompt_tokens=10000, bytes=44000)] * 20
-    llmshare.requests_log = lambda hours=1.0, tail=0: list(rows_)
-    admission._ratio.update(at=0.0)
-    r1 = admission.ratio()
-    llmshare.requests_log = lambda hours=1.0, tail=0: list(rows_[:15])
-    admission._ratio.update(at=0.0)
-    r2 = admission.ratio()
+    r1, r2 = admission.measured_ratio(rows_), admission.measured_ratio(rows_[:15])
     t("bytes per token from this Mac's own requests: the lower quartile, so estimates err high; 3.0 until 20 are on record", r1 == 3.2 and r2 == 3.0, (r1, r2))
-    llmshare.requests_log = real[3]
     admission._ratio.update(at=time.time() + 3600, v=3.0)
 
     qwen = dict(text_config=dict(num_hidden_layers=40, num_attention_heads=16, num_key_value_heads=2, head_dim=256, hidden_size=2048,
@@ -232,8 +226,37 @@ def test_admission(box):
     llmshare.listed = real_listed
     marks = [dict(copy=C2, state='answering', ctx=7000), dict(copy=C2, state='answering', ctx=3000), dict(copy=C2, state='queued', ctx=9000), dict(copy=B, state='answering')]
     t('the context in flight per instance, from the in-flight markers: answering requests only', admission.in_flight(marks) == {C2: 10000}, admission.in_flight(marks))
-    llmshare.settings, admission.MODELS_DIR, admission.free_gib, _ = real
+    llmshare.settings, admission.MODELS_DIR, admission.free_gib = real
     admission._ratio.update(at=0.0, v=admission.RATIO); admission._budgets.clear(); admission._shapes.clear()
+
+
+def test_admission_sample(box):
+    from unittest.mock import patch
+    from localmodels import admission, dash, models, peers
+    import subprocess
+    rows = [row(B), row(C2)]
+    with patch.object(admission, 'SAMPLE', os.path.join(box, 'sample.json')), patch.object(admission, '_sample', {}), \
+         patch.object(admission, '_checked', 0), patch.dict(admission._ratio, at=0), patch.dict(admission._others, at=0), \
+         patch.object(llmshare, 'listed', return_value=rows), patch.object(llmshare, 'settings', return_value={}):
+        with patch.object(models, 'memory', return_value=(64.0, 128.0)), patch.object(models, 'gpu', return_value={'limit_gb': 100}), \
+             patch.object(admission, 'engines', return_value={}), patch.object(llmshare, 'recent_requests', return_value=[]):
+            sample = admission.refresh_sample()
+        admission._sample, admission._checked = {}, 0         # another worker reads the published sample
+        with patch.object(subprocess, 'Popen', side_effect=AssertionError('unexpected admission probe')), patch.object(llmshare, 'loaded', return_value=[]), \
+             patch.object(models, 'gpu', return_value={}), patch.object(dash, 'soc', return_value={}), patch.object(dash, 'sh', return_value=''):
+            # On macOS Python 3.9 the monotonic clock starts with the process. The first disk read can be one tick away.
+            t('a busy replica takes a fitting request when the shared sample is read, without a host probe',
+              _sandbox.until(lambda: admission.fits(C2, 5000, 5000) and admission.host_sample() == sample, 2))
+            peer, mac = peers.report()['memory'], dash.mac()
+            t('the dashboard and the peer use admission’s memory reading and timestamp',
+              peer == dict(at=mac['memory_at'], total=mac['total'], used=mac['used']) and peer['at'] == sample['at'])
+            stale_at = time.time() - 10
+            llmshare._write(admission.SAMPLE, dict(sample, at=stale_at)); admission._checked = 0
+            t('a stale reading leaves idle replicas usable and busy siblings waiting for memory',
+              admission.fits(C2, 0, 5000) and not admission.fits(C2, 5000, 5000)
+              and 'current memory sample' in admission.why_waiting([C2], {C2: 5000}, 5000) and peers.report()['memory'] is None)
+            t('the dashboard keeps the timestamp of the last reading when the sampler is late', dash.mac()['memory_at'] == stale_at)
+    admission._budgets.clear()
 
 
 def test_listing(box):
@@ -241,10 +264,11 @@ def test_listing(box):
     import stat
     from localmodels import llmshare as L
     script, data = os.path.join(box, 'lms'), os.path.join(box, 'ps.out')
-    open(script, 'w').write('#!/bin/sh\nsleep "$(cat ' + box + '/sleep 2>/dev/null || echo 0)"\ncat ' + data + '\nexit "$(cat ' + box + '/rc 2>/dev/null || echo 0)"\n')
+    hang, fail = os.path.join(box, 'ps.hang'), os.path.join(box, 'ps.fail')
+    open(script, 'w').write(f'#!/bin/sh\n[ -f "{hang}" ] && exec /bin/sleep 30\n[ -f "{fail}" ] && exit 1\nexec /bin/cat "{data}"\n')
     os.chmod(script, stat.S_IRWXU)
     real = L.LMS, L.PS_TIMEOUT, dict(L._ps)
-    L.LMS, L.PS_TIMEOUT = script, 1
+    L.LMS = script
     L._ps.update(at=0.0, rows=[], ok=False, good_at=0.0, tried=0.0)
     js = [dict(identifier=B, modelKey=B, status='processingPrompt', sizeBytes=40 * 2**30, contextLength=65536, parallel=4, queued=1, type='llm'),
           dict(identifier=C2, modelKey=B, status='idle', sizeBytes=40 * 2**30, contextLength=65536, parallel=4, queued=0, type='llm')]
@@ -268,16 +292,20 @@ def test_listing(box):
                           f'{B}   {B}   PROCESSINGPROMPT   37.75 GB   65536   4   LM Studio   Local\n{C2}   {B}   IDLE   37.75 GB   65536   4   LM Studio   Local\n')
     rows = L.loaded(fresh=True, force=True)
     t('the text table (an older lms): the same, any upper-case status kept', [r['id'] for r in rows] == [B, C2] and rows[0]['parallel'] == 4 and L.read_ok(), rows)
-    open(box + '/sleep', 'w').write('3')
-    t0 = time.time(); rows = L.loaded(fresh=True, force=True)
-    t('a listing that hangs: the last good one stands, marked unsure', [r['id'] for r in rows] == [B, C2] and not L.read_ok() and L.listing_age() < 60 and time.time() - t0 < 5)
-    open(box + '/sleep', 'w').write('0'); open(box + '/rc', 'w').write('1')
+    open(hang, 'w').close()
+    L.PS_TIMEOUT = 1
+    t0 = time.monotonic(); rows = L.loaded(fresh=True, force=True)
+    t('a listing that hangs: the last good one stands, marked unsure', [r['id'] for r in rows] == [B, C2] and not L.read_ok() and L.listing_age() < 60 and time.monotonic() - t0 < 5)
+    L.PS_TIMEOUT = real[1]
+    os.remove(hang); open(fail, 'w').close()
     rows = L.loaded(fresh=True, force=True)
     t('a listing that fails: the same', [r['id'] for r in rows] == [B, C2] and not L.read_ok())
-    open(box + '/rc', 'w').write('0'); open(data, 'w').write(json.dumps(js[:1]))
+    os.remove(fail); open(data, 'w').write(json.dumps(js[:1]))
     rows = L.loaded(fresh=True, force=True)
     t('a good listing again: taken', [r['id'] for r in rows] == [B] and L.read_ok())
-    t('between looks nobody waits: a thread that is not asking for a fresh look gets the cache at once', L.loaded() is not None and time.time() - t0 < 20)
+    from unittest.mock import patch
+    with patch.object(L, '_lms_ps', side_effect=AssertionError('unexpected model probe')):
+        t('between looks nobody waits: a thread that is not asking for a fresh look gets the cache at once', L.loaded() == rows)
     L.LMS, L.PS_TIMEOUT = real[0], real[1]; L._ps.update(real[2])
 
 
@@ -490,6 +518,14 @@ def test_embedding(box):
         O = 'other/model'; api['ids'] = {B: 65536, C2: 65536, E: 2048}; unloads.clear(); loads.clear()
         code, words = models.use(O, context=8192)
         t('a swap to another model unloads the chat family, never the embedding family', code == 0 and set(unloads) == {B, C2} and E in api['ids'], (unloads, api['ids']))
+        api['ids'][B] = 65536
+        from unittest.mock import patch
+        with patch.object(models, 'unload', return_value=(False, 'busy')):
+            code, words = models.use(O, context=8192)
+        t('a failed removal is reported even if the target is already loaded', code == 1 and B in words)
+        with patch.object(models, 'ensure_server', return_value=False):
+            code, words = models.use(O, context=8192)
+        t('a swap cannot succeed if the server did not restart', code == 1 and 'server' in words)
 
         api['ids'] = {B: 65536, C2: 65536, E: 2048}; loads.clear(); reset(time.time() - 600); models.keep()   # seen loaded
         n0 = len([r for r in crashes.records(1) if r.get('event') == 'crash' and r.get('family') == E])
@@ -704,14 +740,32 @@ def test_install_dry(box):
     real = cli.PLIST, L.MODELS, L.LMS
     cli.PLIST, L.MODELS = os.path.join(box, 'agent.plist'), os.path.join(box, 'settings.json')
     out = io.StringIO()
-    with contextlib.redirect_stdout(out): code = cli.install(dry=True)
+    from unittest.mock import patch
+    from localmodels import deploy, models
+    catalog = [dict(type='embedding', modelKey='embedding/one')]
+    for listing in (catalog, catalog + [dict(type='llm', modelKey='chat/one', sizeBytes=2**30)]):
+        with patch.object(cli, '_fitted', return_value=models.first_settings(listing, 32)), patch.object(cli, '_loaded', return_value=False):
+            before = sorted(os.path.relpath(os.path.join(d, f), box) for d, ds, fs in os.walk(box) for f in ds + fs)
+            with contextlib.redirect_stdout(out): code = cli.install(dry=True)
+            after = sorted(os.path.relpath(os.path.join(d, f), box) for d, ds, fs in os.walk(box) for f in ds + fs)
+            t('the embedding install plan writes no files or directories', code == 0 and before == after and 'embedding/one' in out.getvalue())
+            with patch.object(cli, 'sandboxed', return_value=None), patch.object(cli, 'LOGS', box), \
+                 patch.object(deploy, 'install_gateway', return_value=(3, 'sandbox stop')) as start, contextlib.redirect_stdout(out):
+                code = cli.install()
+            t('a fresh embedding install writes usable settings and reaches gateway setup', start.called and code == 3
+              and 'embedding/one' in json.load(open(L.MODELS))['families'])
+            os.remove(L.MODELS)
+    with contextlib.redirect_stdout(out), patch.object(cli, '_loaded', return_value=False): code = cli.install(dry=True)
+    with L.flocked(os.path.join(L.RUN, 'install.lock')), patch.object(cli, '_loaded', return_value=False), contextlib.redirect_stdout(out):
+        busy = cli.install(dry=True)
+    t('dry install reports the held install lock and propagates the planning failure', busy == 3 and 'another install is in progress' in out.getvalue(), busy)
     words = out.getvalue()
     t('a dry run: the plan in words, exit 0, nothing written', code == 0 and words.count('would') >= 4 and 'nothing written' in words and not os.path.exists(cli.PLIST) and not os.path.exists(L.MODELS), words[:120])
     out = io.StringIO()
     with contextlib.redirect_stdout(out): cli.install(dry=True, no_claude=True)
     t('--no-claude: no registration and no signpost line in the plan', 'register nothing' in out.getvalue())
     t('the plan names the Claude Code hook', 'hook' in words, words[-300:])
-    cmd = 'python3 "/x y/bin/localmodels" notice'
+    cmd = f'python3 "{os.path.join(cli.INSTALLED, "bin", "localmodels")}" notice'
     other = dict(hooks=dict(UserPromptSubmit=[dict(hooks=[dict(type='command', command='echo mine')])]), model='opus')
     once = cli.with_hook(json.loads(json.dumps(other)), cmd)
     twice = cli.with_hook(json.loads(json.dumps(once)), cmd)
@@ -720,6 +774,11 @@ def test_install_dry(box):
       and all(any(h['command'] == cmd for e in once['hooks'][ev] for h in e['hooks']) for ev in ('SessionStart', 'UserPromptSubmit')), once)
     gone = cli.with_hook(json.loads(json.dumps(once)), cmd, add=False)
     t('uninstall takes out only the hub\'s hook', gone['hooks'].get('UserPromptSubmit') == other['hooks']['UserPromptSubmit'] and 'SessionStart' not in gone['hooks'], gone)
+    companion = dict(type='command', command='echo localmodels notice')
+    mixed = dict(hooks=dict(SessionStart=[dict(matcher='startup', hooks=[dict(type='command', command=cmd), companion])]))
+    for add in (False, True):
+        kept = cli.with_hook(json.loads(json.dumps(mixed)), cmd, add)['hooks']['SessionStart']
+        t('a companion command keeps its matcher through install and uninstall', kept[0] == dict(matcher='startup', hooks=[companion]))
     import subprocess
     real_inst, cli.INSTALLED = cli.INSTALLED, os.path.join(box, 'no-installed-copy')
     r = subprocess.run(['/bin/sh', '-c', cli.hook_command()], capture_output=True, text=True)
@@ -1265,6 +1324,16 @@ def test_privacy_check(box):
     t('it says what it read: the commits not on origin, so many lines, files and messages',
       r['status'] == 'hits' and r['since'] == 'origin' and r['lines'] == 4 and r['files'] == 1 and r['commits'] == 1, {k: r[k] for k in ('status', 'since', 'lines', 'files', 'commits')})
     t('no word list: it says the check was skipped, never a silent pass', cli.private_check(repo, os.path.join(box, 'none.txt'))['status'] == 'skipped')
+    from unittest.mock import patch
+    import contextlib, io
+    suites = [(name, True, 'passed') for name in cli.TESTS]
+    with patch.object(cli, '_git', side_effect=lambda *a: '' if a[0] == 'status' else 'main'), patch.object(cli, 'preflight', return_value=None), \
+         patch.object(cli, 'run_tests', return_value=suites), patch.object(cli, 'stamp') as stamp:
+        with patch.object(cli.shutil, 'which', return_value=None), contextlib.redirect_stdout(io.StringIO()): code = cli.publish([])
+        t('publish stops before the stamp when plugin validation cannot run', code == 1 and not stamp.called)
+        with patch.object(cli.shutil, 'which', return_value='/validator'), patch.object(cli.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+             patch.object(cli, 'PRIVATE_WORDS', os.path.join(box, 'none.txt')), contextlib.redirect_stdout(io.StringIO()): code = cli.publish([])
+        t('publish stops before the stamp when the privacy check was skipped', code == 1 and not stamp.called)
 
     print('publish: a word stays in the commit that added it; a later commit does not clear it')
     g('reset', '-q', '--hard', 'origin/main')
@@ -1397,6 +1466,9 @@ def test_secret_check(box):
         tip = g('rev-parse', 'HEAD').strip()
         line = lambda lsha, rsha: f'refs/heads/main {lsha} refs/heads/main {rsha}\n'
         t('a clean fast-forward push goes', cli.prepush(['origin'], line(tip, base)) == 0)
+        cli.PRIVATE_WORDS = os.path.join(box, 'absent-list')
+        try: t('a missing private word list stops a push', cli.prepush(['origin'], line(tip, base)) == 1)
+        finally: cli.PRIVATE_WORDS = words
         commit({'d.txt': 'the zephyr notes\n'})
         t('a private word in the push stops it', cli.prepush(['origin'], line(g('rev-parse', 'HEAD').strip(), base)) == 1)
         g('reset', '-q', '--hard', 'origin/main'); commit({'e.txt': f'{token}\n'})
@@ -1934,11 +2006,14 @@ def test_web_state(box):
     open(web.MEMORY, 'a').write(json.dumps([round(now - 5), 51.0]) + '\n')
     web.load_tail()
     t('memory.jsonl: a gateway taking the sampler role adds only the rows newer than its own last one', n1 == 3 and len(web._mem) == 4, (n1, len(web._mem)))
-    stop, real = threading.Event(), web.dash.pool
-    web.dash.pool = lambda: dict(hosts=[dict(name='here', used=40.0, total=128.0)])
-    th = threading.Thread(target=web.sampler, args=(stop,)); th.start(); time.sleep(0.3)
-    t0 = time.time(); stop.set(); th.join(5)
-    web.dash.pool = real
+    from unittest.mock import patch
+    stop, sampled = threading.Event(), threading.Event()
+    def pool(sample):
+        sampled.set()
+        return dict(hosts=[sample])
+    with patch.object(web.admission, 'refresh_sample', return_value=dict(at=time.time(), used=40.0, total=128.0)), patch.object(web.dash, 'pool', pool):
+        th = threading.Thread(target=web.sampler, args=(stop,)); th.start(); sampled.wait(2)
+        t0 = time.time(); stop.set(); th.join(5)
     t('the sampler samples at once, then returns as soon as it is stopped (not 15 s later)', not th.is_alive() and time.time() - t0 < 1 and web._mem[-1][1] == 40.0, web._mem[-1])
     web._mem.clear()
 
@@ -2013,6 +2088,7 @@ def main():
         test_recycle()
         test_affinity()
         test_admission(box)
+        test_admission_sample(box)
         test_listing(box)
         test_server_probe(box)
         test_unload(box)

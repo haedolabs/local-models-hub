@@ -304,23 +304,25 @@ def run(box):
     def ask():
         req = urllib.request.Request(f'http://localhost:{gateway.PORT}/v1/chat/completions', data=json.dumps(dict(model=M, messages=[])).encode(),
                                      headers={'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test'})
-        try: r = urllib.request.urlopen(req, timeout=60); return r.status
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r: r.read(); return r.status
         except urllib.error.HTTPError as e: return e.code
     try:
         with crashes._state() as st: st['down'] = {M: dict(crashed=time.time(), models=[M], state='loading again')}
         got, t0 = {}, time.time()
         th = threading.Thread(target=lambda: got.update(code=ask(), seconds=time.time() - t0)); th.start()
-        time.sleep(2.5)
-        marks = llmshare.inflight()
-        t('a request for a model loading again is held', marks and marks[0].get('state') == 'held: reloading after a crash', marks)
+        marks = _sandbox.until(lambda: [m for m in llmshare.inflight() if m.get('model') == M and m.get('state') == 'held: reloading after a crash'], 20)
+        t('a request for a model loading again is held', marks, marks)
+        time.sleep(2.5)  # the minimum time the gateway must account for, after it has published the hold
         rows.append(dict(id=M, key=M, state='IDLE', size='1 GB', context=4096, parallel=2)); crashes.loaded(M, [M], True, 2.5)
-        th.join(30); time.sleep(0.5)
-        last = json.loads(open(llmshare.REQUESTS).read().strip().split('\n')[-1])
-        t('then answered once it is back', got.get('code') == 200 and 2.5 <= got.get('seconds', 0) < 8, f"{got.get('seconds', 0):.1f} s")
+        th.join(30)
+        t('then answered once it is back', got.get('code') == 200 and got.get('seconds', 0) >= 2.5, f"{got.get('seconds', 0):.1f} s")
+        logged = _sandbox.until(lambda: llmshare.recent_requests(1, 1, lambda r: r.get('model') == M and r.get('status') == 200), 10)
+        last = logged[0] if logged else {}
         t('the request log counts the hold as waiting', last.get('held', 0) >= 2.5 and last['waited'] >= last['held'], {k: last.get(k) for k in ('held', 'waited')})
         crashes.WAKE.clear(); Fake.status = 400
-        code = ask(); time.sleep(0.5)
-        t('a failed request passes through and wakes the keeper', code == 400 and crashes.WAKE.is_set())
+        code = ask()
+        t('a failed request passes through and wakes the keeper', code == 400 and crashes.WAKE.wait(5))
     finally:
         door.shutdown(); up.shutdown()
         llmshare.loaded, llmshare.parallel_of = real

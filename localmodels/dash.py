@@ -387,11 +387,9 @@ def top(n=6):
 
 def memory():
     """This host's memory in GiB: (used, total), used as Activity Monitor's "Memory Used". A peer reports the same figure."""
-    total = every('memsize', 86400, lambda: int(sh(['sysctl', '-n', 'hw.memsize']).strip() or 0))
-    vm = sh(['vm_stat']); page = int((re.search(r'page size of (\d+)', vm) or [0, 16384])[1])
-    get = lambda kk: int((re.search(rf'{kk}:\s+(\d+)', vm) or [0, 0])[1])
-    used = (get('Anonymous pages') - get('Pages purgeable') + get('Pages wired down') + get('Pages occupied by compressor')) * page
-    return used / 2**30, total / 2**30
+    from . import admission, models
+    sample = admission.host_sample(max_age=None)
+    return (sample['used'], sample['total']) if sample else models.memory()
 
 
 _cpu = {'lib': None, 'prev': None}
@@ -435,11 +433,13 @@ def soc():
 
 
 def mac():
-    used, total = memory()
+    from . import admission, models
+    sample = admission.host_sample(max_age=None)
+    used, total = (sample['used'], sample['total']) if sample else models.memory()
     load = sh(['sysctl', '-n', 'vm.loadavg']).strip('{} \n').split()[:3]
     try: st = os.statvfs('/System/Volumes/Data'); free = st.f_bavail * st.f_frsize / 1e9
     except OSError: free = 0
-    return dict(used=used, total=total, load=load, free=free)
+    return dict(used=used, total=total, load=load, free=free, memory_at=sample.get('at'))
 
 
 def pool(m=None, ps=None):
@@ -463,9 +463,10 @@ def snapshot():
             extra[title] = [dict(kind='note', what=f'could not read: {e}', since=time.time())]
             from . import errors; errors.record(f'dash: {title}', e)
     from . import peers
+    local, remote = mac(), peers.view()
     return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
-                last_hour=last_hour(), top=every('top', 5, top), mac=mac(), extra=extra, crashes=every('crashes', 5, crash_view),
-                maintenance=maint.view(), switching=maint.switching(), peers=peers.view(), pool=pool())
+                last_hour=last_hour(), top=every('top', 5, top), mac=local, extra=extra, crashes=every('crashes', 5, crash_view),
+                maintenance=maint.view(), switching=maint.switching(), peers=remote, pool=pool(local, remote))
 
 
 def crash_view():

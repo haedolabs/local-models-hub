@@ -733,9 +733,25 @@ def with_hook(settings, cmd, add=True):
     """Claude Code's settings with the hub's hook added for SessionStart and UserPromptSubmit (once), or taken out; the
     person's own hooks and settings are left as they are."""
     hooks = settings.setdefault('hooks', {})
+    from shlex import split
+    def hub_command(h):
+        if not isinstance(h, dict) or h.get('type') != 'command': return False
+        text = h.get('command')
+        if not isinstance(text, str): return False
+        if text == cmd: return True
+        try: args = split(text)
+        except ValueError: return False
+        if len(args) == 10 and args[:2] == ['[', '-f'] and args[2] == args[6] and args[3:5] == [']', '&&'] and args[-2:] == ['||', 'true']:
+            args = args[5:8]
+        return (len(args) == 3 and re.fullmatch(r'python3(?:\.\d+)?', os.path.basename(args[0])) is not None
+                and args[1] == os.path.join(INSTALLED, 'bin', 'localmodels') and args[2] == 'notice')
     for ev in HOOK_EVENTS:
-        kept = [e for e in hooks.get(ev, []) if not any('localmodels' in h.get('command', '') and ' notice' in h.get('command', '')   # either form
-                                                      for h in e.get('hooks', []))]
+        kept = []
+        for group in hooks.get(ev, []):
+            actions = group.get('hooks', [])
+            left = [h for h in actions if not hub_command(h)]
+            if left == actions: kept.append(group)
+            elif left: kept.append(dict(group, hooks=left))
         if add: kept.append(dict(hooks=[dict(type='command', command=cmd, timeout=5)]))
         if kept: hooks[ev] = kept
         else: hooks.pop(ev, None)
@@ -770,8 +786,12 @@ def _fitted():
 
 def _fitted_words(s):
     if not s.get('families'): return 'no model managed yet: ' + s.get('why', '')
-    return '; '.join(f"{k}: {f['copies']} replica{'' if f['copies'] == 1 else 's'} × {f['parallel']} slots, context {f['context']:,}"
-                     for k, f in s['families'].items())
+    words = []
+    for key, f in s['families'].items():
+        if f.get('kind') == 'embedding': layout = 'embedding model'
+        else: layout = f"{f['copies']} replica{'' if f['copies'] == 1 else 's'} × {f['parallel']} slots"
+        words.append(f'{key}: {layout}' + (f", context {f['context']:,}" if f.get('context') else ''))
+    return '; '.join(words)
 
 
 def sandboxed():
@@ -801,7 +821,7 @@ def install(wait=90, plugin=False, dry=False, no_claude=False, force=False):
         if retire_loader(dry=True): print(retire_loader(dry=True))
         print(f"would write the pre-push hook in {os.path.join(HOME, '.git', 'hooks')} (the privacy and secrets checks on every push)")
         print('nothing written (--dry)')
-        return 0
+        return code
     os.makedirs(LOGS, exist_ok=True)
     if not os.path.exists(llmshare.MODELS):
         os.makedirs(llmshare.SHARED, exist_ok=True); fitted = _fitted()
@@ -1302,7 +1322,7 @@ def app_tests():
     with tempfile.TemporaryDirectory(prefix='localmodels-app-') as d:
         exe = os.path.join(d, 'tests')
         try:
-            b = subprocess.run([swiftc(), '-swift-version', '5', *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'tests/main.swift')), '-o', exe],
+            b = subprocess.run([swiftc(), '-swift-version', '5', *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'ExtensionIO.swift', 'tests/main.swift')), '-o', exe],
                                capture_output=True, text=True, timeout=300)
             if b.returncode: return (name, False, 'build failed: ' + (b.stderr.strip().split('\n') or ['?'])[0][:300])
             p = subprocess.run([exe], capture_output=True, text=True, timeout=60)
@@ -1352,7 +1372,7 @@ def app_cmd(a):
         app = os.path.join(stage, 'Local Models Hub.app'); macos, res = os.path.join(app, 'Contents', 'MacOS'), os.path.join(app, 'Contents', 'Resources')
         os.makedirs(macos); os.makedirs(res)
         b = subprocess.run([sc, '-O', '-swift-version', '5', '-target', f'{os.uname().machine}-apple-macos13.0',
-                            *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'main.swift')), '-o', os.path.join(macos, APP_EXE)],
+                            *(os.path.join(HOME, 'app', f) for f in ('Glance.swift', 'Menu.swift', 'ExtensionIO.swift', 'main.swift')), '-o', os.path.join(macos, APP_EXE)],
                            capture_output=True, text=True, timeout=600)
         if b.returncode: print('menu-bar app: build failed:\n' + b.stderr.strip()[-1500:]); return 1
         icon = subprocess.run(['sips', '-s', 'format', 'icns', os.path.join(HOME, 'brand', 'logo-1024.png'), '--out', os.path.join(res, 'AppIcon.icns')],
@@ -1456,19 +1476,27 @@ def check():
         t("instance manager polls every 20 s (crashes, replicas, recycles)", seen < 90, f'last look {seen:.0f} s ago')
     me = whois.identity(os.getpid())
     t('whois identifies the client process', me.get('project') is not None, f"{me.get('project')} · {me.get('app')}")
-    loaded = [r['id'] for r in rows]
+    loaded = [r['id'] for r in llmshare.chat_rows(rows)]
     busy = sum(llmshare.busy_slots().values())
     if loaded and llmshare.hub_up() and busy < llmshare.at_once():
-        t0 = time.time()
+        step = f'gateway check {os.getpid()}-{time.monotonic_ns()}'
+        body = dict(model=loaded[0], messages=[{'role': 'user', 'content': 'Say OK.'}], max_tokens=5)
+        req = urllib.request.Request(llmshare.HUB + '/v1/chat/completions', data=json.dumps(body).encode(),
+                                     headers={'Content-Type': 'application/json', 'X-Project': 'local-models', 'X-Kind': 'test', 'X-Step': step, 'X-Timeout': '300'})
         try:
-            r = llmshare.post('/v1/chat/completions', dict(model=loaded[0], messages=[{'role': 'user', 'content': 'Say OK.'}], max_tokens=5), 'local-models', 'test', 300)
-            got = bool(r.get('choices'))
-        except OSError as e: got = False
-        time.sleep(0.3)
-        mine = [d for d in llmshare.requests_log(0.5) if d.get('at', 0) >= t0 and d.get('project') == 'local-models' and d.get('kind') == 'test']
-        t('test request through the gateway completed and logged', got and bool(mine),
-          f"{mine[-1].get('project')} · {mine[-1].get('kind')} · {mine[-1].get('seconds')} s" + (f" (queued {mine[-1].get('waited')} s)" if (mine[-1].get('waited') or 0) > 2 else '')
-          if mine else 'nothing logged')
+            with llmshare.urlopen(req, timeout=300) as reply: got = bool(json.load(reply).get('choices'))
+            note = 'response had no choices' if not got else 'request completed but no matching log record appeared'
+        except (OSError, ValueError) as e: got, note = False, str(e)
+        mine = []
+        end = time.monotonic() + 10
+        while got and not mine:
+            mine = llmshare.recent_requests(1, 0.5, lambda d: d.get('step') == step and d.get('project') == 'local-models' and d.get('kind') == 'test')
+            if mine or time.monotonic() >= end: break
+            time.sleep(0.1)
+        if mine:
+            row = mine[0]
+            note = f"{row['project']} · {row['kind']} · {row.get('seconds')} s" + (f" (queued {row['waited']} s)" if (row.get('waited') or 0) > 2 else '')
+        t('test request through the gateway completed and logged', got and bool(mine), note)
     else: print('  skip test request (no model loaded, gateway down, or every slot busy)')
     p = subprocess.run([PY, os.path.join(HOME, 'bin', 'localmodels'), 'mcp'], input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
                        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n', capture_output=True, text=True, timeout=30)
@@ -1696,6 +1724,7 @@ def prepush(a, stdin=None):
             pc = private_check(repo, PRIVATE_WORDS, tip=tip, remote=remote)
             sc = secret_check(repo, tip=tip, remote=remote)
         except RuntimeError as e: why.append(f'could not read what the push sends: {e}'); continue
+        if pc['status'] == 'skipped': why.append(f'private word list unavailable at {PRIVATE_WORDS}: privacy check skipped')
         why += [f'private word: {w}: {t}' for w, t in pc['hits'][:20]]
         if sc['hits']: why += secret_words(sc)
     if why:
@@ -1791,8 +1820,11 @@ def publish(a):
     why = preflight(HOME, want, VERSION, branch)
     if why: print(f'nothing published: {why}'); return 2
     print('1. the sandbox tests:')
+    suites = run_tests()
+    missing = set(TESTS) - {name for name, _, _ in suites}
+    if missing: print('   not run: ' + ', '.join(sorted(missing)) + '; nothing published'); return 1
     bad = False
-    for name, good, note in run_tests():
+    for name, good, note in suites:
         print(f"   {'ok  ' if good else 'FAIL'} {name}: {note}"); bad = bad or not good
     if bad: print('   fix the tests first; nothing published'); return 1
     print('2. the plugin check:')
@@ -1804,13 +1836,13 @@ def publish(a):
             for line in (r.stdout + r.stderr).strip().split('\n')[-12:]: print('   ' + line)
             print('   fix the plugin first; nothing published'); return 1
         print('   claude plugin validate: passed' + (' with warnings' if 'warning' in (r.stdout + r.stderr).lower() else ''))
-    else: print('   the claude command is not on PATH: not checked')
+    else: print('   the claude command is not on PATH: plugin not checked; nothing published'); return 1
     print('3. the privacy check:')
     try: pc = private_check(HOME, PRIVATE_WORDS, tip=head)
     except RuntimeError as e: print(f'   could not read what the push sends ({e}); nothing published'); return 1
     if pc['status'] == 'skipped':
         print(f'   no private word list at {PRIVATE_WORDS}: not checked (one word or pattern a line, `allow: <pattern>` for what may')
-        print('   appear, # for notes; then every release is read against it before anything is pushed)')
+        print('   appear, # for notes); nothing published'); return 1
     elif pc['status'] == 'hits':
         for where, text in pc['hits'][:30]: print(f'   {where}: {text}')
         if len(pc['hits']) > 30: print(f"   ... and {len(pc['hits']) - 30} more")

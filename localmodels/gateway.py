@@ -82,7 +82,9 @@ _start = {'at': 0.0, 'since': time.time(), 'lock': threading.Lock()}
 _conns = {'n': 0, 'lock': threading.Lock()}   # connections this process accepted and has not finished: a drain ends at 0
 _internal = {'n': 0}         # internal errors (a 500 the gateway gave): a release on probation goes back after three
 GENERATION = os.environ.get('LOCALMODELS_GEN') or None     # this worker's generation under the supervisor (None: a gateway on its own)
-REQUEST_LINE_TIMEOUT = 30    # seconds a connection may take to send its request line (an idle preconnect is closed; a request never)
+REQUEST_LINE_TIMEOUT = 30    # idle seconds for the request line and headers
+UPLOAD_IDLE = 60             # between reads of a request body; generation has its own timeouts
+BODY_LIMIT = 64_000_000      # decoded bytes, for both fixed-length and chunked uploads
 SELF = {'role': None, 'release': None, 'listeners': {}}    # what this worker is, for /hub/health (worker.py fills it)
 
 
@@ -129,16 +131,16 @@ def log(rec):
     llmshare._append(llmshare.REQUESTS, dict(rec, hub=os.getpid(), **({'gen': GENERATION} if GENERATION else {})), roll_at=LOG_MAX)
 
 
-def touch(pid, project, kind, model, who, delta, front=None):
+def begin_lease(pid, project, kind, model, who, front=None):
     """The hub's lease for a program that sends it requests: written at each request, refreshed while one is in flight,
     and left to age out two minutes after the last. front: the peer Mac that sent it over the link (one lease per front
     and project, so a swap here is refused while a front's batch uses the model)."""
-    path = llmshare.hub_lease_path(project, pid, front)       # this gateway's own file: two gateways never share one
-    if not path: return
     with _lock:
-        e = _live.setdefault(path, dict(n=0, rec=dict(v=llmshare.VERSION, project=project, pid=pid, models=[], kind=kind, hub_pid=os.getpid(),
+        holder = holder_pid(pid)
+        path = llmshare.hub_lease_path(project, holder, front)
+        e = _live.setdefault(path, dict(n=0, path=path, rec=dict(v=llmshare.VERSION, project=project, pid=holder, models=[], kind=kind, hub_pid=os.getpid(),
                                                        since=time.time(), via='hub', app=who.get('app'), **({'from': front} if front else {}))))
-        e['n'] = max(0, e['n'] + delta)
+        e['n'] += 1
         rec = e['rec']
         if model and model not in rec['models']: rec['models'].append(model)
         for k in ('session', 'host_session'):
@@ -147,6 +149,16 @@ def touch(pid, project, kind, model, who, delta, front=None):
         rec['beat'] = time.time()
         try:
             os.makedirs(llmshare.LEASES, exist_ok=True); llmshare._write(path, rec)
+        except OSError: pass
+        return e
+
+
+def end_lease(entry):
+    """Release the entry acquired by this request, even when adoption moved its file."""
+    with _lock:
+        entry['n'] -= 1
+        entry['rec']['beat'] = time.time()
+        try: llmshare._write(entry['path'], entry['rec'])
         except OSError: pass
 
 
@@ -178,14 +190,15 @@ def rekey(old, new):
     """A new supervisor adopted this worker: the hub leases held under the old supervisor's pid move to the new one's
     (the new file written, the old one removed), so no lease names a process that is gone."""
     with _lock:
+        os.environ['LOCALMODELS_SUPERVISOR'] = str(new)
         for path, e in list(_live.items()):
             if e['rec'].get('pid') != old: continue
             npath = llmshare.hub_lease_path(e['rec'].get('project'), new, e['rec'].get('from'))
             if not npath: continue
-            e['rec'] = dict(e['rec'], pid=new)
+            e['rec'], e['path'] = dict(e['rec'], pid=new), npath
             _live[npath] = _live.pop(path)
             try: llmshare._write(npath, e['rec'])
-            except OSError as ex: errors.record('hub lease: re-key', ex)
+            except OSError as ex: errors.record('hub lease: re-key', ex); continue
             try: os.remove(path)
             except OSError: pass
 
@@ -226,6 +239,49 @@ def dialect(route):
     if route.endswith('/responses'): return 'responses'
     if route.startswith('/api/'): return 'native'
     return 'openai'
+
+
+def rename_model(obj, api, rename):
+    """Substitute the requested id in this protocol's metadata only. Return whether serialization is needed."""
+    if not rename or not isinstance(obj, dict): return False
+    fields = [(obj, 'model')]
+    if api == 'anthropic': fields.append((obj.get('message'), 'model'))
+    elif api == 'responses': fields.append((obj.get('response'), 'model'))
+    elif api == 'native': fields.extend([(obj, 'model_instance_id'), (obj.get('result'), 'model_instance_id')])
+    changed = False
+    for parent, key in fields:
+        if isinstance(parent, dict) and parent.get(key) == rename[0]:
+            parent[key], changed = rename[1], True
+    return changed
+
+
+def stream_lines(resp, api, rename):
+    """Forward SSE frames, joining multi-line data before inspecting model metadata. Preserve untouched frames."""
+    def lines():
+        while True:
+            try: line = resp.readline()
+            except (http.client.HTTPException, OSError): return
+            if not line: return
+            yield line
+    if not rename:
+        yield from lines()
+        return
+    frame = []
+    for line in lines():
+        if line not in (b'\n', b'\r\n'):
+            frame.append(line)
+            continue
+        parts = [s[5:].lstrip(b' ').rstrip(b'\r\n') for s in frame if s.startswith(b'data:')]
+        if parts:
+            try: obj = json.loads(b'\n'.join(parts))
+            except ValueError: obj = None
+            if rename_model(obj, api, rename):
+                frame = [s for s in frame if not s.startswith(b'data:')]
+                frame.append(b'data: ' + json.dumps(obj, separators=(',', ':')).encode() + line)
+        yield from frame
+        yield line
+        frame.clear()
+    yield from frame
 
 
 def counts(obj):
@@ -325,6 +381,12 @@ class Upstream:
 
 
 # ---------------------------------------------------------------- the door
+class InputError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
 class Door(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     server_version = f'localmodels-hub/{VERSION}'
@@ -338,9 +400,9 @@ class Door(http.server.BaseHTTPRequestHandler):
         super().setup()
 
     def parse_request(self):
-        """The request line has arrived: from here on nothing is timed out (a slow body, a long stream)."""
+        ok = super().parse_request()
         self.connection.settimeout(None)
-        return super().parse_request()
+        return ok
 
     def end_headers(self):
         try:                                                 # every answer says when maintenance is announced or on
@@ -385,21 +447,44 @@ class Door(http.server.BaseHTTPRequestHandler):
 
     def _body(self):
         """The request body: by Content-Length, or chunked (some HTTP libraries send it so)."""
-        if 'chunked' in (self.headers.get('Transfer-Encoding') or '').lower():
-            out = bytearray()
-            while True:
-                line = self.rfile.readline(65537)
-                try: size = int(line.split(b';')[0].strip() or b'0', 16)
-                except ValueError: break
-                if size <= 0:
-                    while self.rfile.readline(65537) not in (b'\r\n', b'\n', b''): pass
-                    break
-                out += self.rfile.read(size); self.rfile.readline(3)
-                if len(out) > 64_000_000: break
-            return bytes(out)
-        try: n = int(self.headers.get('Content-Length') or 0)
-        except ValueError: n = 0
-        return self.rfile.read(n) if n > 0 else b''
+        lengths = self.headers.get_all('Content-Length', [])
+        encodings = self.headers.get_all('Transfer-Encoding', [])
+        self.connection.settimeout(UPLOAD_IDLE)
+        try:
+            if encodings:
+                if lengths or [e.lower().strip() for e in encodings] != ['chunked']: raise InputError(400, 'invalid transfer encoding')
+                return self._chunks()
+            if not lengths: return b''
+            if len(lengths) != 1 or not re.fullmatch(r'[0-9]+', lengths[0]): raise InputError(400, 'invalid Content-Length')
+            digits = lengths[0].lstrip('0') or '0'
+            if len(digits) > len(str(BODY_LIMIT)) or int(digits) > BODY_LIMIT: raise InputError(413, 'request body too large')
+            n = int(digits)
+            data = self.rfile.read(n)
+            if len(data) != n: raise InputError(400, 'incomplete request body')
+            return data
+        except socket.timeout: raise InputError(408, 'request body timed out')
+        finally: self.connection.settimeout(None)
+
+    def _chunks(self):
+        out = bytearray()
+        while True:
+            line = self.rfile.readline(65537)
+            size = line.partition(b';')[0].rstrip(b'\r\n')
+            if len(line) > 65536 or not line.endswith(b'\r\n') or not re.fullmatch(rb'[0-9a-fA-F]+', size):
+                raise InputError(400, 'invalid chunk size')
+            n = int(size, 16)
+            if len(out) + n > BODY_LIMIT: raise InputError(413, 'request body too large')
+            if not n: break
+            data = self.rfile.read(n)
+            if len(data) != n or self.rfile.read(2) != b'\r\n': raise InputError(400, 'incomplete chunk')
+            out.extend(data)
+        total = 0
+        while total < 65536:
+            line = self.rfile.readline(65537 - total)
+            if line == b'\r\n': return bytes(out)
+            if not line.endswith(b'\r\n') or b':' not in line: break
+            total += len(line)
+        raise InputError(400, 'invalid chunk trailers')
 
     def do_GET(self): self.any('GET')
     def do_POST(self): self.any('POST')
@@ -409,6 +494,7 @@ class Door(http.server.BaseHTTPRequestHandler):
 
     def any(self, method):
         try: self._any(method)
+        except InputError as e: self.close_connection = True; self._send(e.status, dict(error=str(e)))
         except (BrokenPipeError, ConnectionResetError): pass
         except Exception as e:                               # never a bare reset: the client gets an answer, the error record the reason
             errors.record(f"{method} {self.path.split('?')[0]}", e); _internal['n'] += 1
@@ -433,17 +519,25 @@ class Door(http.server.BaseHTTPRequestHandler):
         route = route.lower()
         self._dialect = dialect(route)
         if method == 'POST' and SWAP.search(route):
-            names = [str(j[k]) for k in ('model', 'identifier', 'instance_id') if j.get(k)]
-            why = llmshare.swap_blockers(names or [r['id'] for r in llmshare.loaded(fresh=True)])
-            if why: return self._send(409, dict(error='swap refused: ' + '; '.join(why) + '. Retry when it finishes.'))
+            return self._swap(path, body, j, route.endswith('/unload'))
         if method == 'POST' and GEN.search(route): return self.generate(path, body, j, project)
-        if method == 'POST' and route.endswith('/unload'):            # gone on purpose: the watcher must not read it as a crash
-            before = _listed()
-            self.forward(method, path, body, False)
-            after = _listed()
-            if before is not None and after is not None and before - after: crashes.unloaded_now(sorted(before - after))
-            return
         return self.forward(method, path, body, False)
+
+    def _swap(self, path, body, j, unloading):
+        with llmshare.swapping(wait=0) as got:
+            if not got: return self._send(409, dict(error='another model change is in progress'))
+            names = {str(j[k]) for k in ('model', 'identifier', 'instance_id') if j.get(k)}
+            rows = llmshare.loaded(fresh=True, force=True)
+            if not llmshare.read_ok(): return self._send(409, dict(error='swap refused: the loaded instances could not be read'))
+            targets = names | {r['id'] for r in rows if not names or r.get('key') in names}
+            with llmshare.swap_guard(targets) as why:
+                if why: return self._send(409, dict(error='swap refused: ' + '; '.join(why) + '. Retry when it finishes.'))
+                before = _listed() if unloading else None
+                self.forward('POST', path, body, False)
+                if before:
+                    after = _listed()
+                    if after is not None and before - after: crashes.unloaded_now(sorted(before - after))
+                llmshare.loaded(fresh=True, force=True)
 
     def _switch_on_now(self):
         if not maint.switched_off(): return self._send(200, dict(ok=True, note='not switched off', maintenance=maint.view()))
@@ -545,10 +639,15 @@ class Door(http.server.BaseHTTPRequestHandler):
         except ValueError: xt = 0
         until = t0 + 0.9 * min(86400.0, max(5.0, xt)) if xt > 0 else None     # the program's own budget: never wait past it
         code, usage, waited, chosen, held, note, tries, peer = 0, {}, 0.0, model, 0.0, None, 0, None
-        holder = holder_pid(pid)
+        lease = None
         mark, need, room, prefer = None, 0, [None], None   # what the finally reads, whatever fails before the request goes out
-        touch(holder, project, kind, model, who, +1, front)
         try:                                               # from the lease on: the finally always releases it and the marker
+            with llmshare.family_access([model]) as available:
+                if not available:
+                    note = 'model swap in progress'
+                    code, _ = self._send(503, dict(error=note), retry_after=1)
+                    return
+                lease = begin_lease(pid, project, kind, model, who, front)
             n = next(_n)
             mark = os.path.join(llmshare.INFLIGHT, f'{os.getpid()}-{n}.json')
             rec = dict(hub_pid=os.getpid(), pid=pid, project=project, session=who.get('session'), host_session=who.get('host_session'),
@@ -602,7 +701,8 @@ class Door(http.server.BaseHTTPRequestHandler):
                     rec.update(state='queued', copy=None); mark_write(mark, rec)     # queued again after a hold or a resend
                     prefer = affinity.preferred(akey)
                     with llmshare.slot_any(lambda: affinity.order(akey, self._candidates(model, skip, kind)), wait=max(1.0, min(3600.0, until - time.time())) if until else 3600,
-                                           kind=kind, since=t0, publish=publish, need=need, fits=admission.fits, waiting=waiting) as (chosen, w):
+                                           kind=kind, since=t0, publish=publish, need=need, fits=admission.fits, waiting=waiting,
+                                           cancelled=lambda: client_gone(self.connection)) as (chosen, w):
                         waited += w
                         if client_gone(self.connection): code, note = 499, 'client closed the connection while queued'; break
                         m = maint.refusing()
@@ -641,12 +741,14 @@ class Door(http.server.BaseHTTPRequestHandler):
                         time.sleep(1)
                 if note and not self._sent and code != 499:
                     code, _ = self._send(503, dict(error=f'no response from the model ({note}); the instance manager is reloading it; retry in {RETRY_AFTER} s'), retry_after=RETRY_AFTER)
+        except ConnectionAbortedError as e:
+            code, note, waited = 499, str(e), max(0.0, time.time() - t0 - held)
         except TimeoutError as e:
             waited = max(0.0, time.time() - t0 - held)                     # the row says what it waited, not that it answered
             code, _ = self._send(503, dict(error=str(e) + ('; the client X-Timeout budget expired' if until else '')), retry_after=60); note = 'slot wait timed out'
         finally:
             if mark: mark_done(mark)
-            touch(holder, project, kind, model, who, -1, front)
+            if lease: end_lease(lease)
             if code >= 400 and code != 499 and note != 'maintenance' and not peers.split(chosen)[1]: crashes.nudge()   # maybe the model crashed: the keeper looks at once
             p, c = _usage(usage)
             log(dict(at=round(time.time(), 1), project=project, session=who.get('session'), host_session=who.get('host_session'),
@@ -666,7 +768,6 @@ class Door(http.server.BaseHTTPRequestHandler):
         slot in time): nothing reached the program, so the door sends it again here. copy: the instance on this Mac that
         answers it; once the watchdog marks it stalled, the request is cut (self._stall says so): before any byte reached
         the program, generate sends it again; a stream already under way ends with an error event."""
-        a, b = (f'"{rename[0]}"'.encode(), f'"{rename[1]}"'.encode()) if rename else (None, None)
         headers = {k: v for k, v in self.headers.items() if k.lower() in PASS}
         if method in ('POST', 'PUT'): headers['Content-Length'] = str(len(body))
         name, target = (peers.split(peer)[1], None) if peer else (None, None)
@@ -743,11 +844,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                 self.send_response(code); self.send_header('Content-Type', ctype); self.send_header('Cache-Control', 'no-cache')
                 self.end_headers(); self._sent = True
                 whole = failed = False
-                while True:
-                    try: line = resp.readline()
-                    except (http.client.HTTPException, OSError): line = None   # LM Studio's end broke off
-                    if not line: break
-                    if a: line = line.replace(a, b)
+                for line in stream_lines(resp, self._dialect, rename):
                     self.wfile.write(line)
                     if line.startswith(b'data: [DONE]'): whole = True
                     elif line.startswith(b'event: '):
@@ -771,9 +868,11 @@ class Door(http.server.BaseHTTPRequestHandler):
                 self.wfile.flush()
                 return code, usage, None
             data = resp.read()
-            if a: data = data.replace(a, b)
-            if len(data) < 20_000_000:                                    # the counts sit at the top level or one deep
-                try: usage = counts(json.loads(data))
+            if rename or len(data) < 20_000_000:
+                try:
+                    obj = json.loads(data)
+                    usage = counts(obj)
+                    if rename_model(obj, self._dialect, rename): data = json.dumps(obj, separators=(',', ':')).encode()
                 except ValueError: pass
             self.send_response(code); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(data)))
             self.end_headers(); self.wfile.write(data); self._sent = True
@@ -876,6 +975,7 @@ class Door(http.server.BaseHTTPRequestHandler):
                 errors.record(f"dashboard: {str(j.get('where') or '?')[:60]}", words=str(j.get('error') or 'error')[:300],
                               trace=str(j.get('stack') or '')[:800], source='dashboard')
                 return self._send(200, dict(ok=True))
+        except InputError: raise
         except Exception as e:
             errors.record(f'{method} {route}', e); _internal['n'] += 1
             return self._send(500, dict(error=f'{type(e).__name__}: {e}'))
@@ -917,6 +1017,13 @@ class LinkServer6(LinkServer):
     address_family = socket.AF_INET6
 
 
+def restrict_link(sock, address):
+    iface = peers.interface_of(address)
+    if not iface: raise OSError(f'no interface holds {address}')
+    peers.bind_interface(sock, iface)
+    return iface
+
+
 def link_server(address, port):
     """A listener on this address only, bound to the interface that holds it (IP_BOUND_IF), so a packet for it that
     arrives on another interface is not answered: bind and listen back to back (HTTPServer.server_bind would look up the
@@ -925,13 +1032,7 @@ def link_server(address, port):
     srv = (LinkServer6 if six else LinkServer)((address, port), Door, bind_and_activate=False)
     try:
         srv.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.iface = peers.interface_of(address)
-        if srv.iface:
-            try:
-                idx = socket.if_nametoindex(srv.iface)
-                if six: srv.socket.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
-                else: srv.socket.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
-            except OSError as e: errors.record('link listener: bind to its interface', e)
+        srv.iface = restrict_link(srv.socket, address)
         srv.socket.bind((address, port))
         srv.socket.listen(srv.request_queue_size)
         srv.socket.setblocking(False)
@@ -981,6 +1082,7 @@ def listen_link(stop=None, adopted=None, hold=None, drop=None):
             for k in [k for k in owned if k != key]:           # no longer wanted: retired, its backlog answered
                 if drop: drop(k)
                 srv = owned.pop(k)
+                if cur == k: cur = None
                 if k in served: retire(srv); served.discard(k)
                 else: srv.server_close()
                 print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} gateway: link listener on {k[5:]} stopped", flush=True)

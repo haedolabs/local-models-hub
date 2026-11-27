@@ -66,6 +66,7 @@ def run(box):
     r = agent.run_job(dict(label='a', prompt='say fine'), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
     t('a 503 with Retry-After: waits that long and asks again', r['ok'] and r['answer'] == 'fine' and r['usage']['retries'] == 1 and len(s.calls) == 2 and time.time() - t0 >= 1, (r.get('error'), len(s.calls)))
     t('every request names its step for the dash (X-Step)', s.calls[0]['headers'].get('X-Step', '').startswith('a: '), s.calls[0]['headers'])
+    t('a retry step includes the status but no upstream diagnostic', '503' in s.calls[1]['headers']['X-Step'] and 'did not answer' not in s.calls[1]['headers']['X-Step'])
     posted = []
     llmshare.hub_post = lambda path, body=None, timeout=5: posted.append((path, body))
     s = Script([dict(content='one'), dict(content='two')]); agent.post = s
@@ -133,6 +134,20 @@ def run(box):
       'items': {'type': 'object', 'properties': {'k': {'enum': ['x', 'y']}}}}}}) and not agent.valid({'n': True}, {'type': 'object', 'properties': {'n': {'type': 'integer'}}}))
 
     print('the agent engine: a batch')
+    labels = agent.unique_labels([dict(label=x) for x in ('doc', 'doc', 'doc-2', 'DOC', 'SUMMARY', 'q'*80, 'q'*80)])
+    names = [j['label'].lower() for j in labels]
+    t('final job filenames are unique on macOS, bounded and stable when read from a saved batch',
+      len(set(names)) == len(names) and 'summary' not in names and max(map(len, names)) <= 80 and agent.unique_labels(labels) == labels)
+    for schema, value in [({'type': 'integer', 'maximum': 10}, '11'),
+                          ({'type': 'object', 'additionalProperties': False}, '{"extra":1}'),
+                          ({'type': 'object'}, '[{"nested": true}]'),
+                          ({'type': 'object', 'dependentRequired': {'a': ['b']}}, '{"a":1}')]:
+        agent.post = Script([dict(content='found'), http_error(400, 'format unavailable'), dict(content=value)])
+        r = agent.run_job(dict(label='bounded', prompt='extract', schema=schema), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+        t('plain JSON cannot succeed with violated or unchecked constraints', not r['ok'] and r.get('result') is None)
+    agent.post = Script([dict(content='found'), http_error(400, 'format unavailable'), dict(content='null')])
+    r = agent.run_job(dict(label='nullable', prompt='extract', schema={'type': ['string', 'null']}), 'm', NO_TOOLS, NO_CALL, 'test', logs=logs)
+    t('a nullable schema accepts a literal JSON null on fallback', r['ok'] and r['result'] is None)
     t('labels are made distinct', [j['label'] for j in agent.unique_labels([dict(label='a'), dict(label='a'), dict(label='b/c')])] == ['a', 'a-2', 'b-c'])
     s = Script([dict(content='one'), dict(content='two'), dict(content='three')]); agent.post = s
     boom = lambda job: (_ for _ in ()).throw(RuntimeError('boom')) if job['label'] == 'bad' else []

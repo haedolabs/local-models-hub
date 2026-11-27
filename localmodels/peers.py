@@ -11,7 +11,7 @@ local models off and on (POST /hub/off, /hub/on), which the front sends with `lo
   report()      what a peer tells a front (GET /hub/peer): each family loaded there with its copies, its slots, how many
                 are busy and how many of those a front's requests hold, its fingerprint, its maintenance, its keeper's
                 warnings. Never content.
-  LINK          the front's side, in the door: it looks at each peer every 2 s (backoff from 2 s to a minute when one
+  LINK          the front's side, in the door: it looks at each peer every 2 s (backoff from 2 s to 10 s when one
                 does not answer; a refused token is not tried again until the token or the settings change, or 5
                 minutes pass; a peer in maintenance is skipped until its window ends). A family a peer has loaded with
                 the same fingerprint counts as one more copy, with the slots the peer has free for this Mac: local slots
@@ -197,15 +197,19 @@ def loopback(host):
 
 
 # ---------------------------------------------------------------- the network
-def interfaces(text=None):
-    """{interface: [(IPv4 address, prefix length)]}, from `ifconfig` (interfaces with no IPv4 address left out)."""
+def interfaces(text=None, ipv6=False):
+    """{interface: [(address, prefix length)]} from ifconfig, for IPv4 by default or IPv6."""
     text = _sh(['ifconfig']) if text is None else text
     out, cur = {}, None
     for line in text.split('\n'):
         m = re.match(r'^([A-Za-z0-9]+): flags=', line)
         if m: cur = m.group(1); out.setdefault(cur, []); continue
-        m = re.match(r'^\s+inet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-fA-F]+)', line)
-        if m and cur: out[cur].append((m.group(1), bin(int(m.group(2), 16)).count('1')))
+        if ipv6:
+            m = re.match(r'^\s+inet6 ([\da-fA-F:]+)(?:%\S+)? prefixlen (\d+)', line)
+            if m and cur: out[cur].append((m.group(1), int(m.group(2))))
+        else:
+            m = re.match(r'^\s+inet (\d+\.\d+\.\d+\.\d+) netmask (0x[0-9a-fA-F]+)', line)
+            if m and cur: out[cur].append((m.group(1), bin(int(m.group(2), 16)).count('1')))
     return {k: v for k, v in out.items() if v}
 
 
@@ -213,8 +217,10 @@ def interface_of(address, text=None):
     """The interface that holds this address (an IPv6 one names it: fe80::1%bridge0), or None."""
     address = str(address)
     if '%' in address: return address.split('%', 1)[1]
-    for name, addrs in interfaces(text).items():
-        if any(a == address for a, _ in addrs): return name
+    try: ip = ipaddress.ip_address(address)
+    except ValueError: return None
+    for name, addrs in interfaces(text, ipv6=ip.version == 6).items():
+        if any(ipaddress.ip_address(a) == ip for a, _ in addrs): return name
     return None
 
 
@@ -240,6 +246,13 @@ def on_link(host, text=None):
                   'or a routed address): nothing is sent to it'), None
 
 
+def bind_interface(sock, iface):
+    """Restrict a peer socket to its interface before accepting or sending any requests."""
+    idx = socket.if_nametoindex(iface)
+    if sock.family == socket.AF_INET6: sock.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
+    else: sock.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+
+
 class LinkConnection(http.client.HTTPConnection):
     """An HTTP connection to a peer's door that leaves only through the interface the peer is on (IP_BOUND_IF, from this
     Mac's address there), so with the link down nothing takes another route; with no such interface it is never opened
@@ -251,9 +264,7 @@ class LinkConnection(http.client.HTTPConnection):
         info = socket.getaddrinfo(addr, self.port, fam, socket.SOCK_STREAM)[0]
         s = socket.socket(info[0], info[1], info[2])
         try:
-            idx = socket.if_nametoindex(iface)
-            if fam == socket.AF_INET6: s.setsockopt(socket.IPPROTO_IPV6, getattr(socket, 'IPV6_BOUND_IF', 125), idx)
-            else: s.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_BOUND_IF', 25), idx)
+            bind_interface(s, iface)
             if src: s.bind((src, 0))
             s.settimeout(self.timeout)
             s.connect(info[4])
@@ -547,8 +558,8 @@ def report(front=None):
             if w: keeper['warnings'].append(f'{base}: {w}')
     for base, w in recycle.held_back().items(): keeper['warnings'].append(f'{base}: {w}')
     from . import dash
-    try: used, total = dash.every('memory', 10, dash.memory); mem = dict(used=round(used, 1), total=round(total, 1))   # the front's memory pool (read every 10 s, not every poll)
-    except Exception as e: mem = None; errors.record('peer report: memory', e)
+    sample = admission.host_sample()
+    mem = dict(used=round(sample['used'], 1), total=round(sample['total'], 1), at=sample['at']) if sample else None
     try: chip = {k: v for k, v in dash.every('soc', 2, dash.soc).items() if k != 'cpu'}   # the front shows this host's chip at work
     except Exception as e: chip = None; errors.record('peer report: soc', e)
     return dict(hub='local-models', version=VERSION, name=me(), time=round(time.time(), 1), maintenance=maint.view(), switching=maint.switching(),

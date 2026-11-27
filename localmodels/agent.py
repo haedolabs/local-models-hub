@@ -211,44 +211,73 @@ def answer(m):
     return re.sub(r'<think>.*?</think>', '', m.get('content') or '', flags=re.S).strip()
 
 
-def json_from(text, kind=None):
+def json_from(text, kind=None, missing=None):
     """The JSON in a model's answer: the whole text (a code fence stripped), else the first object or list in it that
     parses, so words before or after it do no harm. kind ('object' or 'array', the schema's): only that kind."""
     t = re.sub(r'^\s*```(?:json)?\s*|\s*```\s*$', '', (text or '').strip())
-    want = {'object': dict, 'array': list}.get(kind, (dict, list))
+    want = dict if kind == 'object' else list if kind == 'array' else (dict, list)
     try:
         v = json.loads(t)
-        if kind not in ('object', 'array') or isinstance(v, want): return v
+        return v if kind not in ('object', 'array') or isinstance(v, want) else missing
     except ValueError: pass
     dec = json.JSONDecoder()
     for m in list(re.finditer(r'[\[{]', t))[:400]:
         try: v = dec.raw_decode(t, m.start())[0]
         except ValueError: continue
         if isinstance(v, want): return v
-    return None
+    return missing
 
 
 def _is(v, kind):
     if kind == 'integer': return (isinstance(v, int) or isinstance(v, float) and v.is_integer()) and not isinstance(v, bool)
     if kind == 'number': return isinstance(v, (int, float)) and not isinstance(v, bool)
     t = {'object': dict, 'array': list, 'string': str, 'boolean': bool, 'null': type(None)}.get(kind)
-    return isinstance(v, t) if t else True
+    return isinstance(v, t) if t else False
+
+
+_SCHEMA_KEYS = set('type required properties additionalProperties items enum const minItems maxItems minimum maximum '
+                   'exclusiveMinimum exclusiveMaximum minLength maxLength title description default examples'.split())
+
+
+def unchecked(schema):
+    """First keyword the plain-JSON fallback cannot enforce, including in optional properties."""
+    if isinstance(schema, bool): return None
+    if not isinstance(schema, dict): return 'invalid schema'
+    for key in schema:
+        if key not in _SCHEMA_KEYS: return key
+    subs = list((schema.get('properties') or {}).values())
+    subs.extend(schema[k] for k in ('items', 'additionalProperties') if k in schema)
+    return next((why for sub in subs if (why := unchecked(sub)) is not None), None)
+
+
+def _equal(a, b):
+    """JSON equality: booleans are not numbers, including inside arrays and objects."""
+    if isinstance(a, bool) != isinstance(b, bool): return False
+    if isinstance(a, dict): return isinstance(b, dict) and a.keys() == b.keys() and all(_equal(v, b[k]) for k, v in a.items())
+    if isinstance(a, list): return isinstance(b, list) and len(a) == len(b) and all(_equal(x, y) for x, y in zip(a, b))
+    return a == b
 
 
 def valid(obj, schema):
-    """obj matches the schema, all the way down: type, required, properties, items, enum, const, minItems and maxItems
-    (what strict mode enforces; a plain answer, asked without it, is held to the same)."""
-    if not isinstance(schema, dict): return True
-    if 'enum' in schema and obj not in schema['enum']: return False
-    if 'const' in schema and obj != schema['const']: return False
+    """Check types, object fields, array items, enum/const, and numeric and length bounds recursively.
+    Plain-JSON callers also check unchecked() before accepting an answer."""
+    if not isinstance(schema, dict): return schema is True
+    if 'enum' in schema and not any(_equal(obj, x) for x in schema['enum']): return False
+    if 'const' in schema and not _equal(obj, schema['const']): return False
     ty = schema.get('type')
     if ty is not None and not any(_is(obj, k) for k in (ty if isinstance(ty, list) else [ty])): return False
     if isinstance(obj, dict):
         if not all(k in obj for k in schema.get('required') or []): return False
-        if not all(valid(obj[k], sub) for k, sub in (schema.get('properties') or {}).items() if k in obj): return False
+        props, extra = schema.get('properties') or {}, schema.get('additionalProperties', True)
+        if not all(valid(v, props.get(k, extra)) for k, v in obj.items()): return False
     if isinstance(obj, list):
         if len(obj) < int(schema.get('minItems') or 0) or ('maxItems' in schema and len(obj) > int(schema['maxItems'])): return False
-        if isinstance(schema.get('items'), dict) and not all(valid(x, schema['items']) for x in obj): return False
+        if 'items' in schema and not all(valid(x, schema['items']) for x in obj): return False
+    if _is(obj, 'number'):
+        if not schema.get('minimum', obj) <= obj <= schema.get('maximum', obj): return False
+        if 'exclusiveMinimum' in schema and obj <= schema['exclusiveMinimum']: return False
+        if 'exclusiveMaximum' in schema and obj >= schema['exclusiveMaximum']: return False
+    if isinstance(obj, str) and not schema.get('minLength', 0) <= len(obj) <= schema.get('maxLength', len(obj)): return False
     return True
 
 
@@ -286,14 +315,28 @@ def trim(msgs, cap=HISTORY_CAP):
 def label(s): return re.sub(r'[^A-Za-z0-9._-]+', '-', str(s or 'job'))[:80]
 
 
+JOB_FILES = {'summary', 'plan', 'jobs', 'runner', 'run'}
+
+
 def unique_labels(jobs):
     """The jobs' labels made safe and distinct (two jobs with the same label would overwrite each other's result)."""
-    seen, out = {}, []
-    for j in jobs:
-        base = label(j.get('label'))
-        if base in ('summary', 'plan', 'jobs', 'runner', 'run'): base += '-job'   # the batch's own files
-        n = seen.get(base, 0) + 1; seen[base] = n
-        out.append(dict(j, label=base if n == 1 else f'{base[:75]}-{n}'))
+    used = set(JOB_FILES)
+    bases = [label(j.get('label')) for j in jobs]
+    bases = [b + '-job' if b.lower() in used else b for b in bases]
+    reserved = {b.lower() for b in bases}
+    out, counts = [], {}
+    for j, base in zip(jobs, bases):
+        key, name = base.lower(), base
+        if key in used:
+            n = counts.get(key, 1)
+            while True:
+                n += 1
+                suffix = f'-{n}'
+                name = base[:80-len(suffix)] + suffix
+                if name.lower() not in used and name.lower() not in reserved: break
+            counts[key] = n
+        used.add(name.lower())
+        out.append(dict(j, label=name))
     return out
 
 
@@ -341,11 +384,12 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
             more = (headers() if callable(headers) else headers) or {}
             try: r = post('/v1/chat/completions', req, project, kind, headers={**more, 'X-Step': f'{lab}: {now_step[0]}'[:120]}); break
             except Exception as e:                       # not recorded: a failed request is retried or raised to the job, whose log holds it
-                again, pause, what = transient(e)
+                again, pause, _ = transient(e)
                 if not again or time.time() - t_first >= wait_down: raise
                 pause = pause or RETRY_WAITS[min(k, len(RETRY_WAITS) - 1)]; k += 1
                 usage['retries'] += 1
-                step(f'request failed ({what[:60]}): retrying in {pause} s')
+                status = f'HTTP {e.code}' if isinstance(e, urllib.error.HTTPError) else 'connection failed'
+                step(f'{status}: retry {k} in {pause} s')
                 time.sleep(pause)
         u = r.get('usage') or {}
         usage['prompt'] += u.get('prompt_tokens') or 0; usage['completion'] += u.get('completion_tokens') or 0
@@ -401,43 +445,50 @@ def run_job(job, model, defs, call, project, log_dir=None, logs=None, extra=None
                 usage['cut'] = 1; m = ask(dict(messages=msgs, max_tokens=2 * int(job.get('max_tokens') or 4000)))
             final = answer(m)
             msgs.append({'role': 'assistant', 'content': final})
-        result = None
-        if job.get('schema'):
+        missing = object()                                 # JSON null is a result; a parse failure is not
+        result = missing
+        if job.get('schema') is not None:
             step('writing its answer')
             ask_json = msgs + [{'role': 'user', 'content': 'Now give that answer as one JSON object matching this schema, '
                                 'and nothing else:\n' + json.dumps(job['schema'])}]
             think = True if job.get('think_schema') else False          # measured: a strict schema with thinking on answers empty
             tokens, empties, grown, modes = int(job.get('max_tokens') or 4000), 0, False, ['schema', 'plain']
-            schema, last_err, strict, kept = (nonempty(job['schema']) if job.get('nonempty') else job['schema']), None, True, None
+            schema = nonempty(job['schema']) if job.get('nonempty') and isinstance(job['schema'], dict) else job['schema']
+            last_err, strict, kept = None, True, missing
             usage['trimmed'] += trim(ask_json, cap())
             while modes and len(ask_json) < len(msgs) + 8:
                 mode = modes[0]
                 body = dict(messages=ask_json, max_tokens=tokens)
                 if mode == 'schema' and strict: body['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'result', 'strict': True, 'schema': schema}}
+                else:
+                    unsupported = unchecked(schema)
+                    if unsupported is not None:
+                        if kept is not missing: result = kept; break
+                        raise ValueError(f'plain JSON cannot validate the schema keyword {unsupported!r}')
                 try: m = ask(body, think=think)
                 except urllib.error.HTTPError as e:
                     last_err = (e.code, err_text(e)); modes.pop(0); continue
-                kind = job['schema'].get('type')
-                obj = json_from(m.get('content'), kind)                      # LM Studio may put it in either
-                if obj is None: obj = json_from(m.get('reasoning_content'), kind)
-                if obj is None and m.get('_finish') == 'length' and not grown:                # cut off: once more with room
+                kind = schema.get('type') if isinstance(schema, dict) else None
+                obj = json_from(m.get('content'), kind, missing)              # LM Studio may put it in either
+                if obj is missing: obj = json_from(m.get('reasoning_content'), kind, missing)
+                if obj is missing and m.get('_finish') == 'length' and not grown:             # cut off: once more with room
                     grown, tokens = True, tokens * 2; usage['cut'] = usage.get('cut', 0) + 1; continue
-                if obj is not None and valid(obj, job['schema']):
+                if obj is not missing and valid(obj, schema):
                     if empty(obj) and empties < int(job.get('retry_empty', 1)):
                         empties += 1; usage['empty'] += 1; kept, strict = obj, False         # once more without the grammar: that answer stands
                         ask_json = ask_json + [{'role': 'assistant', 'content': json.dumps(obj)},
                                                {'role': 'user', 'content': 'That answer lists nothing. Look again at what you found and list every item, as the schema asks.'}]
                         continue
                     result = obj; break
-                if obj is not None: usage['invalid'] = usage.get('invalid', 0) + 1           # JSON, but not the schema's shape
-                if kept is not None: result = kept; break                                     # the plain ask gave nothing usable: the empty answer stands
+                if obj is not missing: usage['invalid'] = usage.get('invalid', 0) + 1        # JSON, but not the schema's shape
+                if kept is not missing: result = kept; break                                  # the plain ask gave nothing usable: the empty answer stands
                 modes.pop(0)
-            if result is None and last_err:
+            if result is missing and last_err:
                 code_, body_ = last_err
                 big = re.search(r'context|token|length|exceed', body_, re.I) or usage['peak_prompt'] > 0.8 * ctx
                 out['error'] = (f"the conversation outgrew the model's {ctx:,}-token context (load it with more, or ask for less): {body_}" if big
                                 else f'HTTP {code_} from LM Studio on the answer as JSON: {body_}')
-        out.update(ok=bool(final or result) and (not job.get('schema') or result is not None), answer=final, result=result)
+        out.update(ok=bool(final) if job.get('schema') is None else result is not missing, answer=final, result=None if result is missing else result)
     except urllib.error.HTTPError as e:
         body = err_text(e)
         big = re.search(r'context|token|length|exceed', body, re.I) or usage['peak_prompt'] > 0.8 * ctx
@@ -489,7 +540,7 @@ def new_dir(logs, kind):
 
 
 def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None, extra=None, quiet=False, system=SYSTEM,
-          words=step_words, by=None, kind='batch', run=None, phase=None):
+          words=step_words, by=None, kind='batch', run=None, phase=None, labels_assigned=False):
     """Run jobs side by side (as many as LM Studio answers at once), holding a lease the dash reads its progress from.
     Asks the hub for fresh copies first (a copy far along its band is recycled before the work starts). run and phase:
     this batch is that phase of that run (its size declared to the hub, each request counted in it; plan_run declares
@@ -497,7 +548,7 @@ def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None,
     logs = logs or os.path.expanduser('~/Library/Logs/LocalModels/agents')
     out_dir = out_dir or new_dir(logs, 'batch')
     os.makedirs(out_dir, exist_ok=True)
-    jobs = unique_labels(jobs)
+    if not labels_assigned: jobs = unique_labels(jobs)    # a detached runner already has the final labels in jobs.json
     json.dump(dict(model=model, parallel=parallel, started=time.time(), jobs=[j['label'] for j in jobs], project=project, pid=os.getpid(),
                    by=by or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you'), **({'run': run, 'phase': phase or 'all'} if run else {})),
               open(os.path.join(out_dir, 'plan.json'), 'w'))

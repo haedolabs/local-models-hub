@@ -42,6 +42,10 @@ class Fake(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     def do_GET(self):
+        if self.path in ('/same', '/different'):
+            self.send_response(302)
+            self.send_header('Location', '/api/menu' if self.path == '/same' else f'http://127.0.0.1:{PORT}/api/menu')
+            self.end_headers(); return
         b = json.dumps(SERVED['menu']).encode()
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b)))
         self.end_headers(); self.wfile.write(b)
@@ -63,6 +67,11 @@ print('extensions: manifests, menus, actions')
 
 t('the folder is the sandbox\'s, never the live state', ex.DIR.startswith(os.environ['LOCALMODELS_STATE']), ex.DIR)
 t('a sound manifest has no problems', ex.validate(manifest()) == [], ex.validate(manifest()))
+fixtures = os.path.join(os.path.dirname(ex.__file__), '..', 'app', 'tests', 'manifest-fixtures.json')
+for example in json.load(open(fixtures)):
+    m = dict(extension=1, id='fixture', name='Fixture', menu='http://localhost/menu')
+    m.update(example['fields'])
+    t('shared manifest: ' + example['name'], (not ex.validate(m)) == example['valid'])
 for name, m, word in [('another protocol version', manifest(extension=2), '"extension"'),
                       ('an id with capitals', manifest(id='Example'), '"id"'),
                       ('no name', manifest(name=''), '"name"'),
@@ -89,6 +98,9 @@ open(os.path.join(ex.DIR, 'broken.json'), 'w').write('{not json')
 by = {x['file']: x for x in ex.load()}
 t('a file named apart from its id is a problem', any('its id is not.other' in x for x in by['other.json']['problems']), by['other.json']['problems'])
 t('an unreadable file is a problem, not a crash', by['broken.json']['manifest'] is None and by['broken.json']['problems'], by['broken.json'])
+t('a mismatched manifest cannot run a verb', ex.run('not.other', 'start')[0] == 409)
+open(os.path.join(ex.DIR, 'other.json'), 'w').write(json.dumps(manifest()))
+t('duplicate ids are absent from the launcher and cannot run either command', not ex.view() and ex.run('example.first', 'start')[0] == 409)
 os.remove(os.path.join(ex.DIR, 'other.json')); os.remove(os.path.join(ex.DIR, 'broken.json'))
 
 m = manifest()
@@ -110,6 +122,9 @@ for name, menu, word in [('another menu version', dict(MENU, menu=2), '"menu"'),
 
 menu, why = ex.fetch_menu(m)
 t('the served menu is read', menu == MENU and why is None, why)
+t('the menu follows a redirect on its own origin', ex.fetch_menu(manifest(menu=BASE + '/same')) == (MENU, None))
+menu, why = ex.fetch_menu(manifest(menu=BASE + '/different'))
+t('the menu reader refuses an origin change before the next request', menu is None and 'redirect to another origin refused' in (why or ''))
 gone, why = ex.fetch_menu(manifest(menu=f'http://localhost:{free_port()}/api/menu'), timeout=1)
 t('a menu that does not answer says why', gone is None and why, why)
 
