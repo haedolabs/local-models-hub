@@ -1,9 +1,9 @@
 # Using local models through the hub
 
 ## Now
-- One LM Studio on this Mac is shared by every project and every Claude Code session through this hub. The rules live here, once; other projects get a signpost to this file.
+- Projects, Claude Code sessions, and OpenCode sessions share LM Studio through this hub. The rules live here, once; other projects get a signpost to this file.
 - **Send requests to `http://localhost:1235/v1`**, the hub's gateway: the same API as LM Studio's (`/v1/chat/completions`, `/v1/models`, `/api/v0/models`, …). Never directly to LM Studio's port 1234.
-- **Attribution is automatic.** The gateway derives your project from the client process's working folder and your Claude Code session from Claude Code's own ids. There is nothing to register.
+- **Attribution is automatic.** The gateway derives your project from the client process's working folder and its Claude Code or OpenCode session from the inherited session ID.
 - **A family of replicas is one model.** With the default settings `qwen/qwen3.6-35b-a3b` runs as two replicas of 4 slots each: request it as one model and the gateway picks the replica. **A batch should keep as many requests in flight as the loaded replicas have slots** (the `status` tool and `localmodels` report the number, `at_once`: 0 while this Mac's models are switched off and requests get `503`, the peers' slots alone while switched off to peers only); the gateway queues the rest.
 - **Bulk reading jobs go to local agents** (the `local-models` MCP tools `ask` and `batch`, or `localmodels ask`), not to multi-agent Claude workflows. Treat their answers as leads to verify, not verdicts.
 - **Submit a [durable batch](#durable-batches)** to keep embeddings or extraction running after your client exits. Keep the returned job ID. The model is pinned; the default is local execution.
@@ -30,7 +30,7 @@
 ## Request attribution (optional)
 - **The levels: project, run, phase, item.** The *project* is who is using the models (shown on every screen); a *run* (`X-Run`) is one named piece of work inside a project, shown as one bar with its finish time; a *phase* (`X-Phase`, or the phase in `X-Step: extract files 8 of 360`) is one stage of a run, done before the next; an *item* is one unit of a phase (a document checked, a record extracted), however many requests it takes. "Call this project research" sets the project's name (the `name` tool, below), not `X-Run`.
 - **A project names itself once:** the `local-models` MCP tool `name` (`name="research"`, `formerly=["lab"]` for an `X-Project` its scripts used to send, `private=true` to hide its session titles). It covers the project's folder and every name listed, for past requests too, on every screen at once; no restart. From a terminal: `localmodels name project <as seen> <shown>`.
-- Nothing is required. The project is the first folder under `~/Documents` (or `~/Projects`, `~/Developer`, …) that the client process runs in, so a worktree counts as its project. The Claude Code session comes from the ids Claude Code sets in every shell and tool it starts.
+- The project is the first folder under `~/Documents` (or `~/Projects`, `~/Developer`, …) that the client process runs in, so a worktree counts as its project. Claude Code tools inherit `CLAUDE_CODE_SESSION_ID` or `CLAUDE_CODE_HOST_SESSION_ID`; OpenCode tools inherit `OPENCODE_SESSION_ID`. The dashboard lists both clients' recent sessions even if they have not used a local model.
 - To set the project explicitly: header `X-Project: <name>`, or a path prefix (`http://localhost:1235/p/<name>/v1`, for apps that only accept a base URL).
 - Request kind: header `X-Kind:` `batch`, `chat` (a user is waiting), `ask`, `eval`, `test` or `other`. The dashboard shows it, and `chat` and `ask` take priority when slots are scarce.
 - Purpose: header `X-Step: reading chapter 3` (a few words). The dashboard shows it next to the request; the local agents set it themselves.
@@ -71,14 +71,14 @@ with llmshare.lease('<project>', [model], 'batch', log_dir=folder) as run:   # l
     reply = llmshare.post('/v1/chat/completions', body, '<project>', 'batch')
 ```
 
-- A lease holds the project name, the model ids, a kind and the Claude Code session if there is one. Never a prompt, a file name or any content.
+- A lease holds the project name, model IDs, a kind, and the coding session ID if there is one. Never a prompt, a file name, or any content.
 
 ## Display names
 - **Every screen shows the names the operator sets:** the dashboard, `localmodels`, `localmodels log`, the terminal dash and the `status` tool. The hub records what a client or folder calls itself (`X-Project`, else its folder); `~/Library/Application Support/LocalModels/names.json` maps that to the display name at read time, so a new name applies to all history.
 - `localmodels name` lists every project as recorded and as displayed, with the runs (`X-Run`), phases (`X-Phase`, or the phase in `X-Step`) and scripts it has used. Then:
   - `localmodels name project <as seen> <shown>`: the display name of a project on every screen. Several recorded names can display as one, e.g. a folder and the `X-Project` its scripts send.
   - `localmodels name batch <project> <as seen> <shown>`: a display name for one of its batches, jobs or scripts.
-  - `localmodels name private <project>` (and `public`): the screens show only the names set for it, with no Claude Code session titles ("a Claude Code session" instead) and no unlabeled scripts, free-text steps or batch names. A count such as `8 of 360` stays.
+  - `localmodels name private <project>` (and `public`): the screens show only the names set for it. Session titles become "a Claude Code session" or "an OpenCode session". Unlabeled scripts, free-text steps, and batch names are hidden. A count such as `8 of 360` stays.
   - `localmodels name forget <project> [<as seen>]`: drop one label, or the whole entry.
 - A client can still name itself and its batch (`X-Project`, `X-Run`); the operator's names apply on top.
 
@@ -283,7 +283,7 @@ Both clients ignore manifests with duplicate IDs or mismatched filenames. Menu r
 - The gateway listens on loopback only (127.0.0.1 and ::1) and rejects browser requests from other web pages (`Host`, `Origin` and `Sec-Fetch-Site` checks: from a browser, only the dashboard's own requests, an address typed in, and a link that opens the dashboard page; programs send none of these headers and are unaffected). A host that serves as a peer also binds a link listener on its Thunderbolt Bridge address: token required; inference endpoints, the model list, its peer report, and switching its local models off and on only (*Peers*).
 
 ## Screenshots and demos
-- `localmodels present on [for 2h] [show a,b]`: screenshot mode. Every screen (the dashboard, `localmodels`, the terminal dash, the MCP status) shows the projects named by their names (the demo's three and `local-models` by default) and every other project as "other", private: no script names, free-text steps or batch names, only counts such as "8 of 360". No Claude Code session title shows anywhere (each reads "a Claude Code session"), and the error banner keeps its count without the details. It ends by itself; `localmodels present off` ends it sooner.
+- `localmodels present on [for 2h] [show a,b]`: screenshot mode. Every screen (the dashboard, `localmodels`, the terminal dash, the MCP status) shows the projects named by their names (the demo's three and `local-models` by default) and every other project as "other", private: no script names, free-text steps or batch names, only counts such as "8 of 360". Both clients' session titles are hidden, including for kept projects. The error banner keeps its count without the details. It ends by itself; `localmodels present off` ends it sooner.
 - `localmodels demo [--minutes 60] [--dry]`: a synthetic workload through the gateway on the loaded models. Three generic projects (`research`: a consistency check of stock records; `evals`: grading arithmetic answers; `docs`: summaries of planning notes) run batches over records the hub makes up, so no file is read and nothing is about a person. It sends enough requests at once to fill every slot, this Mac's and its peers', plus two waiting; each batch shows its progress and finish time, sized to end at the time given. Real GPU, memory, throughput, slots and recycles; nothing kept but the request log.
 - Together, for pictures of the hub at work: `localmodels present on for 2h`, `localmodels demo --minutes 60`, then near its end `localmodels pictures` (the README's set into `docs/`, or `--out <folder>`; `--dry` lists them). It refuses outside screenshot mode, uses a temporary Chrome profile, and measures Chrome's window frame on each run, since headless Chrome lays a page out shorter than its window and resizes it just before the shot.
 

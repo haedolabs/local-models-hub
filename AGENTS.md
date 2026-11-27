@@ -1,6 +1,6 @@
 # local-models hub
 
-A gateway on `localhost:1235` in front of LM Studio, shared by every project and every Claude Code session on the Mac: admission control across all clients, per-request attribution by project and session, model replicas kept loaded, crash reloads and pre-emptive recycling, read-only local agents, and one dashboard. The repo is also a Claude Code plugin and its own marketplace. The guide for clients is [GUIDE.md](GUIDE.md); the overview is [README.md](README.md).
+A gateway on `localhost:1235` in front of LM Studio, shared by projects and coding sessions on the Mac: admission control across all clients, per-request attribution by project and session, model replicas kept loaded, crash reloads and pre-emptive recycling, read-only local agents, and one dashboard. The repo is also a Claude Code plugin and its own marketplace. The guide for clients is [GUIDE.md](GUIDE.md); the overview is [README.md](README.md).
 
 ## Layout
 - `localmodels/gateway.py` — the gateway: attributes each request, acquires a slot, forwards to LM Studio, logs one line, holds and resends across a crash.
@@ -15,7 +15,7 @@ A gateway on `localhost:1235` in front of LM Studio, shared by every project and
 - `localmodels/agent.py` — local agents: the tool loop, read-only file tools, JSON answers, retries.
 - `localmodels/mcp_server.py` — the MCP tools and job entry points. File scope follows the Git checkout or session directory; worktrees share their main checkout's job namespace.
 - `localmodels/batches.py` — durable batch submission, pinned inference, private SQLite outcomes by `custom_id`, and the serving worker's batch recovery role. `python3 tests/test_batches.py --acceptance` runs the two 10,000-item interruption tests against sandbox gateways.
-- `localmodels/whois.py`, `sessions.py` — who is behind a connection; every Claude Code session on the Mac.
+- `localmodels/whois.py`, `sessions.py` — who is behind a connection; recent Claude Code and OpenCode sessions on the Mac.
 - `localmodels/web.py`, `dash.html`, `dash.py` — the dashboard and the terminal dash.
 - `localmodels/names.py`, `errors.py`, `demo.py`, `pictures.py`, `icon.py` — display names and screenshot mode; the error recorder; the synthetic workload of `localmodels demo`; the README's pictures (`localmodels pictures`, screenshot mode only); the icon (a chip: sapphire die, off-white pins) as PNG and SVG; `python3 -m localmodels.icon` writes `brand/` and `docs/icon.png`.
 - `localmodels/cli.py`, `bin/localmodels` — the command.

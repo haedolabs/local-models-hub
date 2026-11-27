@@ -1688,7 +1688,7 @@ def test_run_plans(box):
 
 
 def test_sessions(box):
-    print("Claude Code's records: of subagents and workflows, only how many; never a description or an agent's label")
+    print('Claude Code and OpenCode: session activity, attribution, subagent counts, and title privacy')
     from localmodels import sessions
     real = sessions.CLAUDE, sessions.DESKTOP
     sessions.CLAUDE, sessions.DESKTOP = os.path.join(box, 'claude-projects'), os.path.join(box, 'claude-desktop')
@@ -1704,6 +1704,64 @@ def test_sessions(box):
     finally: sessions.CLAUDE, sessions.DESKTOP = real
     t('a session with one subagent and a workflow of two agents, one done: the counts, and no free text',
       r and r[0]['subagents'] == 1 and r[0]['workflows'][0]['running'] == 1 and r[0]['workflows'][0]['agents'] == 2 and 'secret' not in json.dumps(r), r)
+
+    import sqlite3
+    from contextlib import closing
+    from unittest.mock import patch
+    from localmodels import cli, dash, mcp_server, names, web, whois
+    path = os.path.join(box, 'OpenCode #1.db')
+    now = int(time.time() * 1000)
+    def stamp(age): return None if age is None else now - age * 1000
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute('create table project (id text primary key, worktree text)')
+        db.execute("insert into project values ('repo', '/projects/demo')")
+        db.execute('create table session_v2 (id text primary key, parent_id text, directory text, title text, model text, '
+                   'time_updated integer, time_busy integer, time_idle integer, time_archived integer, project_id text)')
+        for key, parent, updated, busy, idle, archived in (
+                ('busy', None, 0, 300, 400, None), ('idle', None, 1, 20, 2, None),
+                ('child', 'ses_busy', 1, 20, None, None), ('finished-child', 'ses_busy', 1, 20, 1, None),
+                ('archived', None, 1, 2, 1, now), ('yesterday', None, 1, 86410, 86400, None)):
+            db.execute('insert into session_v2 values (?,?,?,?,?,?,?,?,?,?)', ('ses_' + key, parent, '/projects/demo', 'title ' + key,
+                       '{"id":"model"}', stamp(updated), stamp(busy), stamp(idle), archived, None))
+        db.execute("update session_v2 set directory = '/worktrees/feature-copy', project_id = 'repo' where id = 'ses_busy'")
+    with patch.object(sessions, 'CLAUDE', os.path.dirname(os.path.dirname(sdir))), patch.dict(os.environ, OPENCODE_DB=path), patch.dict(dash._cache, clear=True):
+        cs = sessions.recent()
+        t('Claude Code and OpenCode share a newest-first list; archived, old, and child sessions are not separate rows',
+          {(c['id'], c.get('source')) for c in cs} == {('sid1', 'Claude Code'), ('ses_busy', 'OpenCode'), ('ses_idle', 'OpenCode')}
+          and [c['last'] for c in cs] == sorted((c['last'] for c in cs), reverse=True))
+        oc = {c['id']: c for c in cs if c.get('source') == 'OpenCode'}
+        t('OpenCode uses its busy and idle times, groups worktrees by project, counts working subagents, and reads no child titles',
+          oc and oc['ses_busy']['working'] and oc['ses_busy']['subagents'] == 1 and not oc['ses_idle']['working']
+          and oc['ses_busy']['project'] == oc['ses_idle']['project'] == 'demo' and oc['ses_busy']['model'] == 'model' and 'title child' not in json.dumps(cs))
+        t('a longer session window includes older OpenCode sessions', 'ses_yesterday' in {c['id'] for c in sessions.recent(72)})
+        t('the old Claude-only reader and new running rows distinguish the clients',
+          [c['id'] for c in dash.claude()] == ['sid1'] and
+          {r['kind'] for r in dash.running(dict(sessions=cs, users=[])) if not r.get('idle')} == {'claude', 'opencode'})
+        t('an OpenCode request resolves its session title', sessions.title_of('ses_busy') == 'title busy')
+        t('the gateway at login inherits the same OpenCode database location', cli._plist()['EnvironmentVariables']['OPENCODE_DB'] == path)
+        with patch.object(whois, 'args_env', return_value=(['tool'], {'OPENCODE_SESSION_ID': 'ses_busy'})), \
+             patch.object(whois, 'cwd_of', return_value='/projects/demo'), patch.dict(os.environ, {'OPENCODE_SESSION_ID': 'ses_busy'}, clear=True):
+            t('OpenCode tools and leases carry the same session ID', whois.identity(987654)['session'] == llmshare.me().get('session') == 'ses_busy')
+        with patch.dict(os.environ, OPENCODE_SESSION_ID='ses_child', CLAUDE_CODE_SESSION_ID='', CLAUDE_CODE_HOST_SESSION_ID=''), llmshare.lease('demo', [B], 'ask'):
+            snap, mcp = web._snapshot(), mcp_server.status()
+            t("a subagent using a model marks its parent's dashboard row and preserves the Claude-only field",
+              [c['id'] for c in snap['sessions'] if c['uses']] == ['ses_busy'] and [c['id'] for c in snap['claude']] == ['sid1'])
+            t('MCP reports both session counts and attributes an OpenCode lease to OpenCode alone',
+              mcp['opencode_sessions'] == dict(working=1, idle=1) and mcp['claude_sessions'] == dict(working=1, idle=0)
+              and any(r.get('opencode_session') == 'title busy' and not r.get('claude_session') for r in mcp['using_now']))
+        record = dict(project='another-project', session='ses_child', at=time.time())
+        with patch.object(llmshare, 'recent_requests', return_value=[record]):
+            row = web.recent(1)[0]
+            t('a recent request from a subagent identifies its client and root session', row.get('session_source') == 'OpenCode' and row['title'] == 'title busy')
+        with patch.object(names, 'private', side_effect=lambda project: project == 'demo'), patch.object(llmshare, 'recent_requests', return_value=[record]):
+            t('private OpenCode projects hide session titles on both session and client rows',
+              names.session(oc['ses_busy'])['title'] == 'an OpenCode session' and sessions.title_of('ses_busy') is None and web.recent(1)[0]['title'] is None)
+        with patch.object(names, 'presenting', return_value={'keep': ['demo']}):
+            t('screenshot mode also hides OpenCode titles for kept projects',
+              names.session(oc['ses_busy'])['title'] == 'an OpenCode session' and sessions.title_of('ses_busy') is None)
+        with patch.dict(os.environ, OPENCODE_DB=path + '.absent'):
+            t('a Mac without OpenCode still lists Claude and creates no database',
+              [c['id'] for c in sessions.recent()] == ['sid1'] and not os.path.exists(path + '.absent'))
 
 
 def test_names(box):

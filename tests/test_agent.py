@@ -151,11 +151,14 @@ def run(box):
     t('labels are made distinct', [j['label'] for j in agent.unique_labels([dict(label='a'), dict(label='a'), dict(label='b/c')])] == ['a', 'a-2', 'b-c'])
     s = Script([dict(content='one'), dict(content='two'), dict(content='three')]); agent.post = s
     boom = lambda job: (_ for _ in ()).throw(RuntimeError('boom')) if job['label'] == 'bad' else []
-    summary, d, results = agent.batch([dict(label='good', prompt='x'), dict(label='bad', prompt='y')], 'm', boom, NO_CALL, 'test', parallel=2, logs=logs, quiet=True)
+    from unittest.mock import patch
+    with patch.dict(os.environ, OPENCODE_SESSION_ID='ses_batch', CLAUDE_CODE_SESSION_ID='', CLAUDE_CODE_HOST_SESSION_ID=''):
+        summary, d, results = agent.batch([dict(label='good', prompt='x'), dict(label='bad', prompt='y')], 'm', boom, NO_CALL, 'test', parallel=2, logs=logs, quiet=True)
     t('one job that raises never takes the batch down: summary.json written, the other job fine', summary['jobs'] == 2 and summary['done'] == 2 and summary['ok'] == 1
       and os.path.exists(os.path.join(d, 'summary.json')) and any('boom' in (r.get('error') or '') for r in results), summary)
     plan = json.load(open(os.path.join(d, 'plan.json')))
     t("the batch's plan records the runner's pid", plan.get('pid') == os.getpid())
+    t('an agent batch started by OpenCode records that client', plan.get('by') == 'opencode')
 
     print('the agent engine: cut answers, context errors, settings that must hold')
     s = Script([dict(content='', finish='length', reasoning=3999), dict(content='the whole answer')]); agent.post = s

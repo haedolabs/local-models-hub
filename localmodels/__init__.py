@@ -1,4 +1,4 @@
-"""localmodels - the local-models hub: one LM Studio on this Mac, shared by every project and Claude Code session.
+"""localmodels - the local-models hub: one LM Studio on this Mac, shared by every project and coding session.
 
 The instructions for any project live in GUIDE.md at the root of this repo; the code:
   llmshare    the sharing rules (slot locks with interactive priority, leases, swap checks) and the shared state's readers
@@ -8,8 +8,8 @@ The instructions for any project live in GUIDE.md at the root of this repo; the 
   crashes     engine crash detection from LM Studio's logs, the crash record, reloads
   recycle     pre-emptive recycling: an instance reloaded before the token count at which the engine has crashed
   peers       other Macs' gateways as more replicas of a family, over the Thunderbolt Bridge
-  whois       which project, Claude session and process is behind a connection
-  sessions    every Claude Code session on this Mac, by project
+  whois       which project, coding session, and process is behind a connection
+  sessions    recent Claude Code and OpenCode sessions on this Mac, by project
   agent       local agents: one well-defined job on the loaded model, with tools that only read
   batches     durable submission, pinned inference, and project-scoped results
   dash        the terminal dashboard; web and dash.html, the web dashboard the gateway serves

@@ -1,5 +1,5 @@
-"""dash - the live console of the local models: who is using them, by project and Claude Code session, every Claude Code
-session on this Mac, and how busy the Mac is. Reads only.
+"""dash - the live console of the local models: who is using them, by project and coding session, recent sessions
+on this Mac, and how busy the Mac is. Reads only.
 
   localmodels dash             live, every second, in the terminal (Ctrl-C to stop)
   localmodels dash --once      one look
@@ -9,8 +9,8 @@ session on this Mac, and how busy the Mac is. Reads only.
 LM STUDIO      server state, gateway state, each loaded instance: generating or idle, slots, memory, tokens processed
                since load against the recycle threshold, instances down or being recycled, peer replicas
 CLIENTS        every process with a request in flight or a lease held, by project: via the gateway or direct to LM
-               Studio, its Claude Code session, current step, batch and job progress, local agent jobs
-CLAUDE CODE    every Claude Code session of the last three hours, by project: working or idle, subagents, workflows
+               Studio, its coding session, current step, batch and job progress, local agent jobs
+SESSIONS       Claude Code and OpenCode sessions of the last three hours, by project: working or idle, subagents, workflows
 LAST HOUR      requests through the gateway by project: count, tokens, time queued
 THE MAC        the programs using the most processor and memory; the bar: time, memory, load, free disk
 """
@@ -304,7 +304,8 @@ def users(shown=True):
     out = []
     for r in rows.values():
         if not r['project']: r['project'] = '?'
-        r['title'] = sessions.title_of(r['session'], r['host_session'])
+        r['session_source'] = sessions.source_of(r['session'], r['host_session'])
+        r['session_root'], r['title'] = sessions.root_title(r['session'], r['host_session'])
         out.append(r)
     models = lmstudio()['models']
     busy = [m['id'] for m in models if m['state'] in ('GENERATING', 'PROCESSING')]
@@ -359,8 +360,18 @@ def _hub_pid():
     return h.get('pid') if isinstance(h, dict) else None
 
 
+def recent_sessions(hours=3, users=None):
+    raw = every(('sessions', hours), 3, lambda: sessions.recent(hours))
+    cs = [names.session(c) for c in raw]
+    if users is not None:
+        using = {u[k] for u in users for k in ('session', 'host_session', 'session_root') if u.get(k)}
+        for c in cs: c['uses'] = c['id'] in using or c.get('host') in using
+    return cs
+
+
 def claude(hours=3):
-    return every('sessions', 3, lambda: [names.session(c) for c in sessions.recent(hours)])
+    """Claude-only view for existing dashboard clients."""
+    return sessions.by_source(recent_sessions(hours))['Claude Code']
 
 
 def last_hour():
@@ -463,8 +474,9 @@ def snapshot():
             extra[title] = [dict(kind='note', what=f'could not read: {e}', since=time.time())]
             from . import errors; errors.record(f'dash: {title}', e)
     from . import peers
-    local, remote = mac(), peers.view()
-    return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=users(), claude=claude(),
+    local, remote, clients = mac(), peers.view(), users()
+    cs = recent_sessions(users=clients)
+    return dict(time=time.strftime('%H:%M:%S'), door=door(), lmstudio=lmstudio(), users=clients, sessions=cs, claude=sessions.by_source(cs)['Claude Code'],
                 last_hour=last_hour(), top=every('top', 5, top), mac=local, extra=extra, crashes=every('crashes', 5, crash_view),
                 maintenance=maint.view(), switching=maint.switching(), peers=remote, pool=pool(local, remote))
 
@@ -483,27 +495,30 @@ def kind_words(r):
 
 
 def running(s=None):
-    """What is running, in rows for another program's own page: Claude Code sessions (kind
-    claude) and every program using a local model, with a batch's agents under it."""
+    """What is running for another program's page: coding sessions (kind claude or opencode)
+    and every program using a local model, with a batch's agents under it."""
     s = s or snapshot()
-    rows, work = [], [c for c in s['claude'] if c['working']]
-    for c in work:
+    rows, cs = [], s.get('sessions', s.get('claude', []))
+    for c in cs:
+        if not c['working']: continue
         extra = (f" · {c['subagents']} subagent{'s' if c['subagents'] != 1 else ''}" if c['subagents'] else '') + \
                 ''.join(f" · workflow {w['finished']} of {w['agents']} done" for w in c['workflows'] if w['live'] and w['running'])
-        rows.append(dict(kind='claude', what=f"{c['project']} · {c['title'][:40]}{extra}", since=c['last'], pct=None, left=None))
-    if not work:
-        rows.append(dict(kind='claude', what=f"Claude Code: idle ({len(s['claude'])} session{'s' if len(s['claude']) != 1 else ''} in the last 3 hours)",
+        rows.append(dict(kind=sessions.SOURCES[c.get('source', 'Claude Code')], what=f"{c['project']} · {c['title'][:40]}{extra}", since=c['last'], pct=None, left=None))
+    for source, group in sessions.by_source(cs).items():
+        if any(c['working'] for c in group): continue
+        rows.append(dict(kind=sessions.SOURCES[source], what=f"{source}: idle ({len(group)} session{'s' if len(group) != 1 else ''} in the last 3 hours)",
                          since=time.time(), pct=None, left=None, idle=True))
     for r in s['users']:
         b = r.get('batch') or {}
+        by = sessions.SOURCES.get(sessions.source_of(r.get('session'), r.get('host_session')))
         state = 'direct to LM Studio' if r['direct'] and not r['answering'] else \
             f"{r['answering']} active" + (f", {r['waiting']} queued" if r['waiting'] else '') if r['answering'] or r['waiting'] else 'idle (lease held)'
         what = f"{r['project']}: {kind_words(r)} on {', '.join(short(m) for m in r['models'][:2]) or 'a model'} · {state}" + (f" · {r['step']}" if r.get('step') else '')
         rows.append(dict(kind=r.get('kind') if r.get('kind') in ('batch', 'chat') else 'local', what=what, since=r['since'],
-                         pct=b.get('pct'), left=b.get('left'), by='claude' if r.get('session') or r.get('host_session') else None))
+                         pct=b.get('pct'), left=b.get('left'), by=by))
         for j in b.get('now', []):
             rows.append(dict(kind='agent', what=j['job'] + (f" · {j['step']}" if j.get('step') else ''), since=j['since'], pct=j['pct'], left=j['left'],
-                             by='claude' if r.get('session') else None))
+                             by=by))
     for title, xs in (s.get('extra') or {}).items(): rows += xs
     return rows
 
@@ -579,7 +594,8 @@ def show(s, w=80, h=24):
             if not p or not p.get('total'): continue
             fin = k(f" → {time.strftime('%H:%M', time.localtime(p['finish']))}", 'c') if p.get('finish') else ''
             lines.append(f"    {k(word.ljust(5), 'B')} {prog(p.get('pct'), p.get('left'), r['since'])} {p['done']}/{p['total']}{fin} {k((p.get('name') or '')[:24], 'd')}")
-        who = k('← Claude', 'm', 'B') + (f" · {r['title']}" if r.get('title') else '') if (r.get('session') or r.get('host_session')) else \
+        source = sessions.source_of(r.get('session'), r.get('host_session'))
+        who = k(f'← {source}', 'm', 'B') + (f" · {r['title']}" if r.get('title') else '') if source else \
             k(f"← {r['app']}", 'd') if r.get('app') else ''
         flag = k(' ⚠ direct to LM Studio', 'r') if r['direct'] and r.get('via') != 'hub' else ''
         step = k(f" · {r['step'][:30]}", 'd') if r.get('step') and not lines else ''
@@ -589,8 +605,8 @@ def show(s, w=80, h=24):
             L.append(f"    {k('agent', 'y')} {(j['job'] + (' · ' + j['step'] if j.get('step') else ''))[:44]:<44} {prog(j['pct'], j['left'], j['since'])}")
     if not L: L.append('  ' + k('no active clients', 'd'))
     sections.append(['clients', L, 1])
-    # Claude Code, every project
-    cs = s['claude']
+    # Coding sessions, every project
+    cs = s.get('sessions', s.get('claude', []))
     work = [c for c in cs if c['working']]
     uses = {r.get('session') for r in s['users'] if r.get('session')}
     L = [f"  {k(str(len(work)) + ' working', 'm', 'B') if work else k('none working', 'd')}"
@@ -600,14 +616,14 @@ def show(s, w=80, h=24):
         st = k('working'.ljust(9), 'm', 'B') if c['working'] else k(f"idle {ago(c['last'])}".ljust(9), 'd')
         bits = (f" · {c['subagents']} subagent{'s' if c['subagents'] != 1 else ''}" if c['subagents'] else '') + \
                ''.join(f" · workflow {x['finished']}/{x['agents']}" for x in c['workflows'] if x['live'] and x['running']) + \
-               (k(' · uses a local model', 'y') if c['id'] in uses else '')
-        L.append(f"  {k(c['project'][:14].ljust(14), 'B')} {st} {c['title'][:36]}{bits}")
-    sections.append(['claude code', L, 1])
+                (k(' · uses a local model', 'y') if c.get('uses', c['id'] in uses) else '')
+        L.append(f"  {k(c['project'][:14].ljust(14), 'B')} {c.get('source', 'Claude Code'):<11} {st} {c['title'][:36]}{bits}")
+    sections.append(['Claude Code and OpenCode sessions', L, 1])
     # another program's own rows
     for title, xs in (s.get('extra') or {}).items():
         if not xs: continue
         L = [f"  {k(x.get('kind', '').ljust(6), 'c', 'B')} {x['what'][:40]:<40} {prog(x.get('pct'), x.get('left'), x.get('since') or time.time())}"
-             + (k(f" ← {x['by']}", 'm' if x.get('by') == 'claude' else 'd') if x.get('by') else '') for x in xs]
+             + (k(f" ← {x['by']}", 'm' if x.get('by') in sessions.SOURCES.values() else 'd') if x.get('by') else '') for x in xs]
         sections.append([title, L, 1])
     # the last hour, through the hub
     lh = s['last_hour']

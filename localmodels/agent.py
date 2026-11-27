@@ -23,7 +23,7 @@ for up to "wait_down" seconds in all, so a crash in the night costs a job minute
 """
 import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, threading, time, urllib.error
 
-from . import llmshare
+from . import llmshare, sessions
 
 RESULT_CAP, HISTORY_CAP = 8000, 80000                 # characters: one tool result, the whole conversation (~20k tokens)
 CHARS_PER_TOKEN, CONTEXT_SHARE = 3.5, 0.8             # measured: about 3.6 characters a token (recalibrated from each
@@ -560,8 +560,9 @@ def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None,
     out_dir = out_dir or new_dir(logs, 'batch')
     os.makedirs(out_dir, exist_ok=True)
     if not labels_assigned: jobs = unique_labels(jobs)    # a detached runner already has the final labels in jobs.json
+    source = sessions.source_of(**llmshare.me())
     json.dump(dict(model=model, parallel=parallel, started=time.time(), jobs=[j['label'] for j in jobs], project=project, pid=os.getpid(),
-                   by=by or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you'), **({'run': run, 'phase': phase or 'all'} if run else {})),
+                   by=by or sessions.SOURCES.get(source) or ('claude' if os.environ.get('CLAUDECODE') == '1' else 'you'), **({'run': run, 'phase': phase or 'all'} if run else {})),
               open(os.path.join(out_dir, 'plan.json'), 'w'))
     if kind == 'batch' and len(jobs) > 1: llmshare.hub_post('/hub/recycle', dict(model=model))
     t0, results = time.time(), []

@@ -1,12 +1,13 @@
-"""whois - which project, Claude Code session and program is behind a connection to the hub or to LM Studio.
+"""whois - which project, coding session, and program is behind a connection to the hub or to LM Studio.
 
 Nobody has to report: the hub looks at the program on the other end of each connection. Its folder names the project
-(the first folder under ~/Documents, ~/Projects or ~/Developer, or the folder itself), and Claude Code puts the
-session's id in every shell it runs, so a program Claude started carries it. Reads only process facts (folder,
+(the first folder under ~/Documents, ~/Projects or ~/Developer, or the folder itself), and a tool started by Claude
+Code or OpenCode inherits the session ID. Reads only process facts (folder,
 program name, those two ids), never what a program sends. macOS has the calls for all of it; elsewhere the hub still
 runs, naming programs only by what they say in their headers.
 """
 import ctypes, os, re, subprocess, threading, time
+from . import llmshare
 
 HOME = os.path.expanduser('~')
 ROOTS = [os.path.join(HOME, d) for d in ('Documents', 'Projects', 'Developer', 'Code', 'code', 'src', 'GitHub', 'repos')]
@@ -107,8 +108,8 @@ def identity(pid):
     if hit and time.time() - hit[0] < KEEP: return hit[1]
     argv, env = args_env(pid) if pid else ([], {})
     folder = cwd_of(pid) if pid else None
-    me = dict(pid=pid, folder=folder, project=project_of(folder), app=_app(argv), session=env.get('CLAUDE_CODE_SESSION_ID'),
-              host_session=env.get('CLAUDE_CODE_HOST_SESSION_ID'),
+    ids = llmshare.me(env)
+    me = dict(pid=pid, folder=folder, project=project_of(folder), app=_app(argv), session=ids.get('session'), host_session=ids.get('host_session'),
               claude=env.get('CLAUDECODE') == '1' or bool(env.get('CLAUDE_CODE_HOST_SESSION_ID')))
     up = pid
     for _ in range(12):                                   # Apple's own programs (curl, zsh) hide their environment from
@@ -116,8 +117,7 @@ def identity(pid):
         up = parent_of(up) if up else 0
         if up <= 1: break
         a2, e2 = args_env(up)
-        me['session'] = me['session'] or e2.get('CLAUDE_CODE_SESSION_ID')
-        me['host_session'] = me['host_session'] or e2.get('CLAUDE_CODE_HOST_SESSION_ID')
+        if not (me['session'] or me['host_session']): me.update(llmshare.me(e2))
         me['claude'] = me['claude'] or bool(e2.get('CLAUDE_CODE_HOST_SESSION_ID')) or os.path.basename(a2[0] if a2 else '') == 'claude'
         if not me['project']: me['project'] = project_of(cwd_of(up))
     if not me['project']: me['project'] = me['app'] if me['app'] != '?' else None

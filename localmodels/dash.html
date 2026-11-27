@@ -209,6 +209,10 @@ svg text { font: 11px "Libre Franklin", system-ui, -apple-system, "Segoe UI", sa
 .band .bar > div { position: absolute; left: 0; top: 0; height: 100%; border-radius: 2px; background: var(--s1); }
 .band .bar > i { position: absolute; top: calc(-2px * var(--mk, 1)); width: 1px; height: calc(8px * var(--mk, 1)); background: var(--axis); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#sessions table { table-layout: fixed; }
+#sessions th:first-child { width: 82px; }
+#sessions th:nth-child(2) { width: 22%; }
+#sessions th:last-child { width: 75px; }
 th { text-align: left; font-weight: 500; color: var(--ink-2); font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 td { padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 tr:last-child td { border-bottom: 0; }
@@ -287,7 +291,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
     <div class="card tile"><div class="label">Requests</div><div class="value" id="k-req">–</div><div class="foot" id="k-req-f"></div></div>
     <div class="card tile"><div class="label">Memory used</div><div class="value" id="k-mem">–</div><div class="meter"><div id="k-mem-m" style="width:0"></div></div><div class="foot" id="k-mem-f" style="margin-top:4px"></div></div>
     <div class="card tile soc" id="soc-tile"><div class="label">SoC load</div><div class="socbody"><div class="pkg"><div class="die"><div class="cores cpu" id="k-soc-cpu"></div><div class="cores gpu" id="k-soc-gpu"></div></div></div><div class="socnums"><div class="value" id="k-soc">–</div><div class="minor" id="k-soc-c"></div><div class="foot" id="k-soc-f"></div></div></div></div>
-    <div class="card tile"><div class="label">Claude Code sessions</div><div class="value" id="k-cc">–</div><div class="foot" id="k-cc-f"></div></div>
+    <div class="card tile"><div class="label">Coding sessions</div><div class="value" id="k-cc">–</div><div class="minor" id="k-session-sources"></div><div class="foot" id="k-cc-f"></div></div>
   </section>
 
   <section class="row a">
@@ -307,7 +311,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
 
   <section class="row c">
     <article class="card"><h2>Clients</h2><div class="hint">requests in flight or a lease held (2 min idle); run progress and finish estimates</div><div class="body" id="users"></div></article>
-    <article class="card"><h2>Claude Code sessions</h2><div class="hint">sessions active in the last 3 h, newest first</div><div class="body" id="claude"></div></article>
+    <article class="card"><h2>Coding sessions</h2><div class="hint" id="session-counts">Claude Code and OpenCode · last 3 h, newest first</div><div class="body" id="sessions"></div></article>
     <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
 
@@ -711,10 +715,12 @@ function renderNow() {
   $('k-mem-f').replaceChildren(...(P.hosts.length > 1
     ? P.hosts.flatMap((h, i) => [i ? ' · ' : '', el('span', {style: hue(fill(h)) ? `color:${hue(fill(h))}` : ''}, `${h.name} ${Math.round(h.used)}/${Math.round(h.total)}`)])
     : [(share > 0.92 ? 'almost full · ' : share > 0.85 ? 'getting full · ' : '') + `${Math.round(m.free)} GB free on disk`]));
-  const work = S.claude.filter(c => c.working);
+  const cs = S.sessions || S.claude || [], work = cs.filter(c => c.working);
   $('k-cc').replaceChildren(String(work.length), el('small', {}, 'working'));
-  $('k-cc-f').textContent = `${S.claude.length - work.length} idle in the last 3 hours`;
-  guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('footer', renderAbout);
+  const openWorking = work.filter(c => c.source === 'OpenCode').length;
+  $('k-session-sources').textContent = `${work.length - openWorking} Claude Code · ${openWorking} OpenCode`;
+  $('k-cc-f').textContent = `${cs.length - work.length} idle in the last 3 hours`;
+  guard('SoC load', renderSoc); guard('Loaded models', renderModels); guard('Clients', renderUsers); guard('Coding sessions', renderSessions); guard('footer', renderAbout);
   guard('alerts', renderAlerts); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); guard('tiles (cut lines)', tipCut);
   guard('title', () => renderTitle(busy, cap, waiting)); guard('rects', writeRects);
 }
@@ -984,7 +990,7 @@ function progress(u) {             // the run (all its phases) and the phase it 
 function renderUsers() {
   const box = $('users'), us = S.users, batches = S.batches || [];
   if (!us.length && !batches.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No active clients.')); return; }
-  const head = ['project', 'what', 'now', 'model', 'running', 'Claude session'].map(h => el('th', {}, h));
+  const head = ['project', 'what', 'now', 'model', 'running', 'session'].map(h => el('th', {}, h));
   const rows = [];
   for (const u of us) {
     const b = u.batch || {};
@@ -1000,7 +1006,7 @@ function renderUsers() {
       el('td', {}, now, flag),
       el('td', {}, (u.models || []).map(short).join(', ') || '–'),
       el('td', {class: 'num', title: ((u.batch || u.job || {}).started ? 'this run started ' : 'using a model since ') + clock(u.since)}, ago(u.since)),
-      el('td', {title: u.title || ''}, u.title || (u.session ? 'a Claude session' : el('span', {class: 'muted'}, '–'))),
+      el('td', {title: u.title || ''}, u.session_source || (u.session ? 'Claude Code' : '–'), u.title ? ` · ${u.title}` : ''),
     ));
     if (prog) rows.push(el('tr', {}, el('td', {class: 'sub prog', colspan: head.length}, prog)));
     for (const j of (b.now || []).slice(0, 8)) {
@@ -1013,19 +1019,22 @@ function renderUsers() {
   tableIn(box, head, rows, 'localmodels for all of them');
 }
 
-function renderClaude() {
-  const box = $('claude'), cs = S.claude;
-  if (!cs.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No Claude Code session active in the last 3 h.')); return; }
-  const head = ['project', 'now', 'session', ''].map(h => el('th', {}, h));
+function renderSessions() {
+  const box = $('sessions'), cs = S.sessions || S.claude || [];
+  const open = cs.filter(c => c.source === 'OpenCode').length;
+  $('session-counts').textContent = `Claude Code: ${cs.length - open} · OpenCode: ${open} · last 3 h, newest first`;
+  if (!cs.length) { box.replaceChildren(el('div', {class: 'empty'}, 'No recent coding sessions.')); return; }
+  const head = ['client', 'project', 'session', 'now'].map(h => el('th', {}, h));
   const rows = cs.map(c => {
     const bits = [];
+    if (c.uses) bits.push('using a local model');
     if (c.subagents) bits.push(`${c.subagents} subagent${c.subagents === 1 ? '' : 's'}`);
     for (const w of c.workflows || []) if (w.live && w.running) bits.push(`workflow ${w.finished} of ${w.agents}`);
     return el('tr', {},
-      el('td', {}, c.project),
-      el('td', {}, c.working ? el('span', {class: 'badge live'}, 'working') : el('span', {class: 'muted'}, `idle ${ago(c.last)}`)),
+      el('td', {}, c.source || 'Claude Code'),
+      el('td', {title: c.project}, c.project),
       el('td', {title: c.title}, c.title, bits.length ? el('div', {class: 'muted'}, bits.join(' · ')) : ''),
-      el('td', {}, c.uses ? el('span', {class: 'badge'}, 'using a local model') : ''));
+      el('td', {}, c.working ? el('span', {class: 'badge live'}, 'working') : el('span', {class: 'muted'}, `idle ${ago(c.last)}`)));
   });
   tableIn(box, head, rows);
 }
@@ -1041,7 +1050,7 @@ function renderRecent() {
   const rows = R.map(r => { const peer = / on /.test(r.copy || '') ? String(r.copy).split(' on ')[1] : null, st = status(r);
     return el('tr', {},
     el('td', {class: 'num', style: 'text-align:left'}, clockS(r.at)),
-    el('td', {title: r.project || ''}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
+    el('td', {title: [r.project, r.session_source, r.title].filter(Boolean).join(' · ')}, el('span', {class: 'dot', style: `background:${color(r.project)}`}), r.project || '?'),
     el('td', {title: [r.kind, r.step, r.note].filter(Boolean).join(' · ')}, el('div', {}, kindWords(r.kind), st ? ' ' : '', st, r.step ? el('span', {class: 'muted'}, ' · ' + r.step) : '')),   // one line a request: more of them fit
     el('td', {class: 'ink2', title: peer ? `peer ${peer}` : r.copy || ''}, peer || (r.copy && r.copy !== r.model ? '#' + (String(r.copy).match(/:(\d+)$/) || [0, 1])[1] : '#1')),
     el('td', {class: 'num'}, (+r.seconds || 0).toFixed(1)),
@@ -1381,7 +1390,7 @@ try { const a = JSON.parse(localStorage.getItem('lm-accent') || 'null');
   if (a && ['sapphire', 'system', 'own'].includes(a.mode)) ACCENT = {mode: a.mode, own: /^#[0-9a-f]{6}$/i.test(a.own || '') ? a.own : SAPPHIRE}; } catch (e) {}
 applyAccent(); readSystemAccent();
 try { const r = +localStorage.getItem('lm-range'); if ([15, 60, 360, 1440].includes(r)) { RANGE = r; for (const x of $('range').querySelectorAll('button')) x.setAttribute('aria-pressed', +x.dataset.m === r ? 'true' : 'false'); } } catch (e) {}
-const relayout = () => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Claude Code sessions', renderClaude); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); } guard('Recent requests', renderRecent); };
+const relayout = () => { guard('charts', renderCharts); if (S) { guard('Clients', renderUsers); guard('Coding sessions', renderSessions); guard('Loaded models (fit)', fitModels); guard('Loaded models (tips)', stateTips); } guard('Recent requests', renderRecent); };
 let resizing, laidOut = 0; window.addEventListener('resize', () => {    // at once on the first resize (a window shown or resized is drawn
   if (Date.now() - laidOut > 250) { laidOut = Date.now(); relayout(); }   // for its new size in the same frame), again once it settles
   clearTimeout(resizing); resizing = setTimeout(() => { laidOut = Date.now(); relayout(); }, 150); });

@@ -14,7 +14,7 @@ def _free_port():
         s.bind(('127.0.0.1', 0)); return s.getsockname()[1]
 
 
-os.environ.update(HOME=BOX, LOCALMODELS_STATE=BOX, LOCALMODELS_PORT=str(_free_port()), LMSTUDIO_URL=f'http://127.0.0.1:{_free_port()}',
+os.environ.update(HOME=BOX, OPENCODE_DB=os.path.join(BOX, 'opencode.db'), LOCALMODELS_STATE=BOX, LOCALMODELS_PORT=str(_free_port()), LMSTUDIO_URL=f'http://127.0.0.1:{_free_port()}',
                   LMSTUDIO_LOGS=os.path.join(BOX, 'lmstudio-logs'), LMS='/usr/bin/false')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

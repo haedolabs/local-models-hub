@@ -179,8 +179,8 @@ def opt(a, name, default=None):
 
 # ---------------------------------------------------------------- reading
 def status():
-    from . import batches, dash, recycle
-    d, lm, users, cs = dash.door(), dash.lmstudio(), dash.users(), dash.claude()
+    from . import batches, dash, recycle, sessions
+    d, lm, users, cs = dash.door(), dash.lmstudio(), dash.users(), dash.recent_sessions()
     from . import maint
     mt = maint.view()
     if mt: print('⚠ ' + mt['words'][0].upper() + mt['words'][1:] + ('' if mt.get('off') else ' (localmodels maintenance off when done)' if mt['phase'] == 'on' else ''))
@@ -225,14 +225,17 @@ def status():
         b = r.get('batch') or {}
         state = (f"{r['answering']} active" + (f", {r['waiting']} queued" if r['waiting'] else '')) if r['answering'] or r['waiting'] else \
             f"{r['direct']} direct connections to LM Studio (bypassing the gateway)" if r['direct'] else 'idle (lease held)'
-        who = f" · Claude: {r['title']}" if r.get('title') else ' · a Claude session' if r.get('session') else f" · {r['app']}" if r.get('app') else ''
+        client = r.get('session_source') or r.get('app')
+        who = f" · {client}" if client else ''
+        if r.get('title'): who += f": {r['title']}"
         print(f"  {r['project']}: {dash.kind_words(r)} on {', '.join(dash.short(m) for m in r['models']) or '?'} · {state} · {'started' if (r.get('batch') or r.get('job') or {}).get('started') else 'since'} {ago(r['since'])}"
               + (track_words('run', b) if b.get('phases') else (track_words('run', b) if b.get('total') else '') + track_words('phase', r.get('job'))) + (f" · {r['step']}" if r.get('step') and not b.get('total') and not r.get('job') else '') + who)
     for b in batches.overview():
         print(f"batch: {b['project']} · {b['state']} · {b['done']} of {b['total']} done, {b['failed']} failed" + (f" · {b['reason']}" if b['reason'] else ''))
-    work = [c for c in cs if c['working']]
-    print(f"Claude Code sessions: {len(work)} active" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
-          + f", {len(cs) - len(work)} idle in the last 3 hours")
+    for source, group in sessions.by_source(cs).items():
+        work = [c for c in group if c['working']]
+        print(f"{source} sessions: {len(work)} active" + (f" ({', '.join(sorted({c['project'] for c in work}))})" if work else '')
+              + f", {len(group) - len(work)} idle in the last 3 hours")
     lh = dash.last_hour()
     if lh: print('last hour via the gateway: ' + '; '.join(f"{p} {v['requests']} requests, {v['tokens']:,} tokens" for p, v in lh.items()))
     n, secs, refused = llmshare.waits(7)
@@ -740,7 +743,7 @@ def quiet(wait=90, still=3, slots=False):
 
 def _plist():
     env = dict(PATH='/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
-    for k in ('LOCALMODELS_PORT', 'LMSTUDIO_URL', 'LMSTUDIO_LOGS', 'LOCALMODELS_STATE', 'LMS'):
+    for k in ('LOCALMODELS_PORT', 'LMSTUDIO_URL', 'LMSTUDIO_LOGS', 'LOCALMODELS_STATE', 'LMS', 'OPENCODE_DB', 'XDG_DATA_HOME'):
         if os.environ.get(k): env[k] = os.environ[k]
     env['LOCALMODELS_PY'] = PY                               # the stable interpreter path a worker is started with
     return dict(Label=LABEL, ProgramArguments=[PY, os.path.join(INSTALLED, 'bin', 'localmodels'), 'gateway'], RunAtLoad=True,
@@ -982,13 +985,15 @@ def name_cmd(a):
         print('localmodels name project <as seen> <shown> | batch <project> <as seen> <shown> | private <project> | public <project> | forget <project> [<as seen>]')
         return 2
     seen = {}                                                   # as seen -> {requests, batches, jobs, scripts, sessions}
-    def at(p): return seen.setdefault(p or '?', dict(requests=0, batches=set(), jobs=set(), scripts=set(), sessions=0))
+    def at(p): return seen.setdefault(p or '?', dict(requests=0, batches=set(), jobs=set(), scripts=set(), sessions={}))
     for r in llmshare.requests_log(24 * 7):
         s = at(r.get('project')); s['requests'] += 1
         if r.get('run'): s['batches'].add(r['run'])
         p = runs.parse_step(r.get('step'))
         if p: s['jobs'].add(p[0])
-    for c in sessions.recent(72): at(c.get('project'))['sessions'] += 1
+    for c in sessions.recent(72):
+        counts = at(c.get('project'))['sessions']
+        counts[c['source']] = counts.get(c['source'], 0) + 1
     for u in dash.users(shown=False):
         if u.get('app'): at(u.get('project'))['scripts'].add(u['app'])
     print(f'names are set in {names.FILE}; as seen -> shown, the last 7 days:')
@@ -996,7 +1001,7 @@ def name_cmd(a):
         s, shown = seen[p], names.project(p)
         head = f"  {p}" + (f" -> {shown}" if shown != p else '') + (' (private)' if names.private(p) else '')
         bits = [f"{s['requests']} requests"] if s['requests'] else []
-        if s['sessions']: bits.append(f"{s['sessions']} Claude Code session{'s' if s['sessions'] > 1 else ''}")
+        for source, n in sorted(s['sessions'].items()): bits.append(f"{n} {source} session{'s' if n != 1 else ''}")
         print(head + ': ' + ', '.join(bits))
         for kind in ('batches', 'jobs', 'scripts'):
             if s[kind]:

@@ -1,7 +1,7 @@
 """names - what every screen calls a project, its batches and its jobs, set by the person on this Mac.
 
 A project is seen under the name a program gives it (X-Project), or else its folder (a script's working folder, a
-Claude Code session's folder). names.json, in the hub's settings folder, maps what is seen to what is shown:
+coding session's folder). names.json, in the hub's settings folder, maps what is seen to what is shown:
 
   {"projects": {
      "<as seen>": "<shown>",
@@ -10,7 +10,7 @@ Claude Code session's folder). names.json, in the hub's settings folder, maps wh
 
 - name: what every screen calls the project. Several names seen can show as one (a folder and a header, say).
 - labels: names for its batches (X-Run), its jobs (the phase in X-Step: "extract files 8 of 360") and its scripts.
-- private: the screens show only names set here for the project: no Claude Code session titles, and no script names,
+- private: the screens show only names set here for the project: no session titles, and no script names,
   free-text steps or batch names without a label (a count such as "8 of 360" stays).
 
 The names apply when a screen reads, never in the records, so a new name applies to all past history at once.
@@ -18,7 +18,7 @@ The names apply when a screen reads, never in the records, so a new name applies
 
 Screenshot mode (`localmodels present on for 2h`, present.json beside names.json, off by itself at its end): every screen
 shows the projects it keeps by their names (the demo's and local-models by default) and every other project as "other",
-private; no Claude Code session title shows anywhere; error details are left out. For pictures of the dashboard that
+private; no session title shows anywhere; error details are left out. For pictures of the dashboard that
 show the hub at work and nothing personal.
 """
 import json, os, time
@@ -138,10 +138,11 @@ def request(rec):
 
 
 def session(c):
-    """A Claude Code session for a screen: the project as shown; its title only while the project is not private and
+    """A coding session for a screen: the project as shown; its title only while the project is not private and
     screenshot mode is off (titles are free text), else the same plain words, so every screen has a string to print."""
     raw = c.get('project') or '?'
-    return dict(c, project=project(raw), title='a Claude Code session' if presenting() or private(raw) else c.get('title'))
+    generic = 'an OpenCode session' if c.get('source') == 'OpenCode' else 'a Claude Code session'
+    return dict(c, project=project(raw), title=generic if presenting() or private(raw) else c.get('title'))
 
 
 def user(r):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llmshare - one LM Studio on this Mac, shared by every project and Claude Code session without collisions.
+"""llmshare - one LM Studio on this Mac, shared by every project and coding session without collisions.
 
 The hub's door (gateway.py, on http://localhost:1235) applies these rules to every request that comes
 through it, so a project that sends its requests to the hub needs none of this code. A project that has to talk to LM Studio
@@ -13,7 +13,7 @@ contents or anything else a project sent):
   slots/<model>/slot-N.lock    one lock per prediction LM Studio runs at once for that model (its Max Concurrent
                                Predictions, from `lms ps`). Every request holds one while it runs, so all projects together
                                never send more than the model takes; the OS frees a lock when its process dies.
-  leases/<project>-<pid>-<thread>.json   "this run is using these models": project, model ids, a kind, the Claude
+   leases/<project>-<pid>-<thread>.json   "this run is using these models": project, model ids, a kind, the coding
                                session if there is one; refreshed every 30 s, gone when the run ends. The hub writes one
                                for every program that sends it requests, kept for two minutes after its last request.
   inflight/<hub pid>-<n>.json  each request a gateway is passing to LM Studio right now, or has queued for a slot (its
@@ -1070,11 +1070,12 @@ class Held(dict):
         self['done'], self['total'] = int(done), int(total); self.save()
 
 
-def me():
-    """This process's Claude Code session, when Claude Code started it (it sets these in every shell it runs)."""
-    e = os.environ
-    return {k: v for k, v in (('session', e.get('CLAUDE_CODE_SESSION_ID')), ('host_session', e.get('CLAUDE_CODE_HOST_SESSION_ID')))
-            if v}
+def me(env=None):
+    """Session IDs inherited by a tool or script started by Claude Code or OpenCode."""
+    env = os.environ if env is None else env
+    sid, host = env.get('CLAUDE_CODE_SESSION_ID'), env.get('CLAUDE_CODE_HOST_SESSION_ID')
+    if not (sid or host): sid = env.get('OPENCODE_SESSION_ID')
+    return {k: v for k, v in (('session', sid), ('host_session', host)) if v}
 
 
 @contextlib.contextmanager

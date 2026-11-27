@@ -3,7 +3,7 @@
   localmodels gateway          # in the foreground; at login, launchd runs it (localmodels install)
 
 For every request that makes a model work (chat, completions, embeddings, responses, messages):
-  1. who: the project, the Claude Code session and the program, from the header X-Project (or a /p/<project>/ path),
+  1. who: the project, the coding session, and the program, from the header X-Project (or a /p/<project>/ path),
      or else from the program on the other end of the connection (whois). X-Kind says what kind of run it is; X-Step
      what this request is for (the dash shows it); X-Run, X-Run-Total and X-Run-Done, the whole run it belongs to, and
      X-Phase, X-Phase-Total and X-Phase-Done, the phase of it (runs.py; a run's plan: POST /hub/runs).

@@ -17,7 +17,7 @@ from . import HOME, VERSION, agent, batches, dash, llmshare, whois
 AGENTS = os.path.expanduser('~/Library/Logs/LocalModels/agents')
 GUIDE = os.path.join(HOME, 'GUIDE.md')
 INSTRUCTIONS = (
-    "Local models on this Mac (LM Studio) are shared by every project and Claude Code session through the local-models hub "
+    "Local models on this Mac (LM Studio) are shared by every project and coding session through the local-models hub "
     "(full rules: the guide tool). Send OpenAI-compatible requests to http://localhost:1235/v1 or Anthropic-compatible ones to http://localhost:1235 (the gateway), "
     "never directly to LM Studio's port 1234: the gateway runs admission control across all clients, attributes each request to its project and session, and "
     "logs metadata only (never content). The project's name on the hub's screens is set once with the name tool. Optional headers: X-Project (a name), X-Kind (batch, chat, ask, eval, test) and "
@@ -31,7 +31,7 @@ FOLDER = {'type': 'string', 'description': "a folder inside this session's proje
 TOOLS = [
     {'name': 'status', 'description': 'What is using the local models now: LM Studio and its loaded models (each instance\'s tokens since load against its '
      'recycle threshold), the gateway, its peers (replicas on other hosts that take requests when local slots are full) and link state (RTT, interface), every client using a model by '
-     'project and Claude session (batches with their progress), crashes, stalled instances and recycles, the switched-off state (peers only: requests go to the peers), and the last hour by project.',
+     'project and session (Claude Code or OpenCode), batch progress, crashes, stalled instances and recycles, the switched-off state (peers only: requests go to the peers), and the last hour by project.',
      'inputSchema': _o({})},
     {'name': 'guide', 'description': "The hub's rules for any project that uses the local models (endpoints, "
      "leases, swaps, local agents, logs). section=... reads one part; no section: the Now section and the section list.",
@@ -63,7 +63,7 @@ TOOLS = [
                         'after': {'type': 'integer', 'minimum': 0}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 1000}}, ['job'])},
     {'name': 'name', 'description': "How this project appears on every screen of the hub (dashboard, localmodels, status tool), for its "
      "past requests too: name='research'. formerly=[...] lists other names its requests carried (e.g. the X-Project its scripts send) "
-     "so they show under the new name; the project's folder is included automatically. private=true hides its Claude session titles "
+     "so they show under the new name; the project's folder is included automatically. private=true hides its session titles "
      "and free-text steps. This names the project; a batch's name is the X-Run header on its requests, a job's the phase in X-Step.",
      'inputSchema': _o({'name': {'type': 'string'}, 'formerly': {'type': 'array', 'items': {'type': 'string'}}, 'private': {'type': 'boolean'}}, ['name'])},
     {'name': 'swap_check', 'description': 'Whether these models may be unloaded or reloaded now (a swap, a context change): '
@@ -79,9 +79,9 @@ def _peers_up():
 
 
 def status():
-    from . import recycle
+    from . import recycle, sessions
     s = dict(time=time.strftime('%H:%M:%S'), door=dash.door(), lmstudio=dash.lmstudio(), users=dash.users(),
-             claude=dash.claude(), last_hour=dash.last_hour())
+             last_hour=dash.last_hour())
     lm = s['lmstudio']
     out = dict(ok=True, hub=('gateway listening' if s['door']['up'] else 'gateway down') + f" on {llmshare.HUB}"
                + (' · it runs other code than this session\'s hub: localmodels install (or /local-models:setup after a plugin update)' if s['door'].get('stale') else ''),
@@ -90,8 +90,10 @@ def status():
                         + ''.join(f'; {w}' for w in dash.embedding_words(lm['models'])),
                at_once=llmshare.at_once() if lm['families'] or _peers_up() else 0, using_now=[],
                batches=batches.overview(),
-               claude_sessions=dict(working=sum(c['working'] for c in s['claude']), idle=sum(not c['working'] for c in s['claude'])),
                last_hour={p: f"{v['requests']} requests, {v['tokens']:,} tokens" for p, v in s['last_hour'].items()})
+    for source, group in sessions.by_source(dash.recent_sessions()).items():
+        working = sum(c['working'] for c in group)
+        out[sessions.SOURCES[source] + '_sessions'] = dict(working=working, idle=len(group) - working)
     try:
         v = recycle.view(lm['models'])
         out['copies'] = {i: (f"{c['tokens']:,} tokens processed since {time.strftime('%H:%M', time.localtime(c['since']))}"
@@ -120,9 +122,12 @@ def status():
         out['crashes'] = [f"down after a crash: {d['words']}" for d in cr['down']] + ([f"last crash: {cr['last']}"] if cr['last'] else [])
     for r in s['users']:
         b = r.get('batch') or {}
+        source = r.get('session_source')
+        title = r.get('title') or (True if source else None)
         out['using_now'].append(dict(project=r['project'], kind=dash.kind_words(r), models=r['models'],
                                      state=f"{r['answering']} active, {r['waiting']} queued" + (f", {r['direct']} direct to LM Studio (bypassing the gateway)" if r['direct'] else ''),
-                                     since=time.strftime('%H:%M', time.localtime(r['since'])), claude_session=r.get('title') or (bool(r.get('session')) or None),
+                                     since=time.strftime('%H:%M', time.localtime(r['since'])), session_source=source,
+                                     claude_session=title if source == 'Claude Code' else None, opencode_session=title if source == 'OpenCode' else None,
                                      step=r.get('step'), progress=f"{b['done']} of {b['total']}" if b.get('total') else None,
                                      batch_done_about=time.strftime('%H:%M', time.localtime(b['finish'])) if b.get('finish') else None,
                                      job=(f"{(r.get('job') or {}).get('name')}: {r['job']['done']} of {r['job']['total']}" if (r.get('job') or {}).get('total') else None)))
@@ -358,7 +363,7 @@ def run_folder(d):
     defs = (lambda job: files.defs()) if spec.get('read_files', True) else (lambda job: [])
     kind = 'ask' if spec.get('kind') == 'ask' else 'batch'
     summary, _, _ = agent.batch(spec['jobs'], spec['model'], defs, lambda n, a, job: files.call(n, a), spec['project'],
-                                spec.get('parallel', 1), out_dir=d, quiet=True, by='claude' if os.environ.get('CLAUDECODE') == '1' else None, kind=kind,
+                                spec.get('parallel', 1), out_dir=d, quiet=True, kind=kind,
                                 run=spec.get('run'), phase=spec.get('phase'), labels_assigned=spec.get('labels_assigned', False))
     print(f"{summary['ok']} of {summary['jobs']} ok in {summary['seconds']} s")
     return 0 if summary['ok'] == summary['jobs'] else 1

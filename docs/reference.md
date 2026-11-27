@@ -19,7 +19,7 @@ Close-ups from the same run.
   <img src="tiles-2-dark.png" width="675" alt="Dashboard tiles: memory 148 of 176 GB (m5max 105 of 128, m4pro 43 of 48); SoC load GPU 87%, CPU 77%, m4pro GPU 99%, CPU 8%; 1 Claude Code session working, 14 idle">
 </p>
 
-**Tiles:** requests in flight against every slot the gateway can use (local and peer), the admission queue, throughput, requests in the last hour, memory as one pool across both Macs, GPU and CPU load per Mac, and Claude Code sessions.
+**Tiles:** requests in flight against every slot the gateway can use (local and peer), the admission queue, throughput, requests in the last hour, memory as one pool across both Macs, GPU and CPU load per Mac, and coding sessions (Claude Code and OpenCode).
 
 <img src="clients-dark.png" alt="Clients card: the evals, docs and research batches, each running for 58 minutes, each with its run on one line: answer grading 768 of 989, summaries 1018 of 1311 and consistency check 636 of 818, each about 18 minutes from done, finishing at about 00:25 to 00:26">
 
@@ -35,7 +35,7 @@ Close-ups from the same run.
 - **Replica pooling.** A *family* loaded as N instances (`<key>`, `<key>:2`, …) is addressed by its base id. The gateway routes each request to the first instance with a free slot (fill-first), skips instances that are down or draining, and rewrites the model id in the response to the one requested.
 - **Prefix affinity** (`affinity.py`). LM Studio's engines keep a prompt cache per instance (the MLX engine's on disk, in 256-token chunks, for the instance's lifetime), so a prompt that begins like an earlier one on the same instance skips that prefix's prompt processing; sent to another replica, the prefix is processed again and, on MLX, written to that replica's cache too. The gateway keys each request by a digest of its opening (system prompt, instructions, leading system or developer messages and the first other message, or the first 8,192 characters of a prompt given as one string, with the model) and puts the instance or peer that last answered that conversation first among its candidates. A busy preferred instance costs nothing: the request takes the next free slot as before. Digests and instance names only, in the gateway's memory (4,096 conversations, an hour each); embeddings are not keyed. Measured on one day of agent batches before it: 24% of follow-ups had landed on another instance than their previous turn.
 - **Crash handling.** A crash-shaped failure (LM Studio's crash text and the engine's failure words, one list shared with the log reader: the `400 Channel Error` every request in flight gets when the engine's generation thread dies, Metal's `Insufficient Memory` and `Resource limit`, the signals, in a `4xx` or a `5xx`; a dropped connection; an instance gone from the listing) is held while the instance reloads (up to 10 minutes), then retried once; if that fails too, the client gets `503` with `Retry-After`, never the engine's `400`. A genuine `400` passes through. A stream that breaks after it started gets an error event in its own API's format. A request for a family with no loaded instance is refused with `503` instead of being forwarded, which would trigger LM Studio's just-in-time load with default settings.
-- **Attribution.** Each request is attributed to a project (the peer process's working directory, via `lsof` and `proc_pidinfo`) and a Claude Code session (`CLAUDE_CODE_SESSION_ID` from the environment of the peer or its nearest ancestor, via `sysctl KERN_PROCARGS2`), with no client cooperation. Optional headers override or refine it (see [Configuration](#configuration)).
+- **Attribution.** The gateway finds the project from the client process's working directory (`lsof` and `proc_pidinfo`). For Claude Code and OpenCode tools it reads the inherited session ID from the client or its nearest ancestor (`sysctl KERN_PROCARGS2`). Optional headers override or refine it (see [Configuration](#configuration)).
 - **Swap guard.** Every process using an instance holds a lease (implicitly for 2 minutes after its last request, or explicitly via `llmshare.lease`). A load or unload sent through the gateway while another process holds a lease on the instance gets `409`; `localmodels swapcheck` and the `swap_check` tool give the same answer ahead of time.
 - **Power.** `caffeinate -i` while any request is in flight, released 10 minutes after the last.
 - **Request log.** One JSONL record per request: project, session, kind, model, instance, endpoint, status, latency, queue wait, token counts, the body's size and estimated context, why it waited for room, step and run, and `affinity` (`same`: the conversation's own instance answered; `moved`: it was busy, another did). Never a prompt or a completion.
@@ -94,15 +94,16 @@ A front switches a peer's local models off and on the same way: `localmodels pee
 - **Dashboard** at `http://localhost:1235` ([pictures](#dashboard)): one page, no build step, fits one screen. It shows:
   - per-instance slot occupancy by project (one module per slot), and tokens processed against the recycle threshold; the card's layout scales to its space for any number of models, folding detail as models are added;
   - active clients with batch and job progress;
-  - Claude Code sessions;
+  - Claude Code and OpenCode sessions active in the last three hours, newest first, with the client, project, title, and working or idle state. Claude Code activity follows transcript modification times; OpenCode reports busy and idle times in its local V2 session table. The hub opens that database read-only (`~/.local/share/opencode/opencode.db` by default, or `OPENCODE_DB`); it counts working child agents under their parent and reads no messages;
   - memory as one pool across this Mac and its peers, with a per-host breakdown;
   - GPU and CPU load for this Mac and each peer (the SoC tile);
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory (stacked by host);
   - crashes and recycles marked on the time series (the full record: `localmodels crashes`);
   - a line while the hub has recorded an error in the last 10 minutes (the full record: `localmodels errors`).
   - one color, Haedo Labs Sapphire (`#0f52ba`) by default; the footer's color setting takes the Mac's system accent (System Settings > Appearance) or a color of one's own instead, and every series step is drawn again from it (same OKLab lightness, its hue and chroma). The choice is kept per browser.
-- **Screenshot mode and a demo workload.** `localmodels present on [for 2h] [show a,b]` shows the named projects (by default the demo's and the hub's own) by name and every other project as "other" on every screen until it ends: no script names, batch names, Claude Code session titles or error details. `localmodels demo [--minutes 60]` runs three generic projects' batches over records it makes up (no file is read), with enough requests at once to fill every slot, this Mac's and its peers', plus two waiting. `localmodels pictures [--out docs] [--dry]` then makes the README's pictures: headless Chrome with a profile of its own draws the dashboard at 1512 × 900 and 1728 × 1117, at 2x, dark and light, and cuts the close-ups along boxes the page measures itself (`?rects`); it runs only in screenshot mode with at least 5 minutes left. The pictures above were made with all three.
+- **Screenshot mode and a demo workload.** `localmodels present on [for 2h] [show a,b]` shows the named projects (by default the demo's and the hub's own) by name and every other project as "other" on every screen until it ends: no script names, batch names, session titles, or error details. `localmodels demo [--minutes 60]` runs three generic projects' batches over records it makes up (no file is read), with enough requests at once to fill every slot, this Mac's and its peers', plus two waiting. `localmodels pictures [--out docs] [--dry]` then makes the README's pictures: headless Chrome with a profile of its own draws the dashboard at 1512 × 900 and 1728 × 1117, at 2x, dark and light, and cuts the close-ups along boxes the page measures itself (`?rects`); it runs only in screenshot mode with at least 5 minutes left. The pictures above were made with all three.
 - **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/accent` (the Mac's system accent color), `/hub/errors`, `/hub/runs` (the runs going on, every phase estimated; `POST` declares a run's plan), `/hub/peer` (this Mac's report as a peer), `/hub/link` (this Mac's view of its peers; `POST` polls them now) and `/hub/extensions` (the extensions, each menu answering or not, with its summary and alerts); `POST /hub/off` and `POST /hub/on` switch the local models off and on; `POST /hub/link/off` and `POST /hub/link/on` (`{"peer": <name>}`) switch a peer's; `POST /hub/extensions/run` (`{"id", "verb"}`) runs one of the verbs an extension's manifest lists (the dashboard's **start**).
+- `/hub/snapshot` and `localmodels dash --json` list both clients in `sessions`. Each row's `source` is `Claude Code` or `OpenCode`; the existing `claude` list contains only Claude Code rows. MCP `status` reports `working` and `idle` counts under `claude_sessions` and `opencode_sessions`.
 - **CLI:** `localmodels` (status), `open` (the dashboard in the browser), `dash` (live TUI), `log`, `crashes`, `errors`, `maintenance`, `name`, `present`, `demo`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `start`, `stop` and `restart` (the gateway), `install`, `uninstall`, `commit` (local release), and `push` / `publish` (GitHub).
 
 `localmodels` prints the same state in a terminal, during the run pictured above:
@@ -114,10 +115,11 @@ LM Studio: server up · qwen/qwen3.6-35b-a3b: 2 replicas, 8 slots (generating, 8
   tokens since load: qwen3.6-35b-a3b:2 203k (91% of recycle threshold) · qwen3.6-35b-a3b 160k (73% of recycle threshold)
 crashes in the last 24 hours: 5 · the last: 08 Nov 06:30 qwen/qwen3.6-35b-a3b, replica 2: RuntimeError: [metal::malloc] Resource limit (499000) exceeded. · reloaded by the instance manager after 13 s (localmodels crashes)
 clients:
-  docs: batch on qwen3.6-35b-a3b · 2 active, 1 queued · started 12:36 · batch summaries: 1256 of 1304, 2 min left, done about 13:36 · job notes: 1256 of 1304, 2 min left, done about 13:36 · a Claude session
-  research: batch on qwen3.6-35b-a3b · 5 active, 1 queued · started 12:36 · batch consistency check: 782 of 812, 2 min left, done about 13:36 · job records: 782 of 812, 2 min left, done about 13:36 · a Claude session
-  evals: batch on qwen3.6-35b-a3b · 5 active · started 12:36 · batch answer grading: 960 of 997, 2 min left, done about 13:36 · job answers: 960 of 997, 2 min left, done about 13:36 · a Claude session
+  docs: batch on qwen3.6-35b-a3b · 2 active, 1 queued · started 12:36 · batch summaries: 1256 of 1304, 2 min left, done about 13:36 · job notes: 1256 of 1304, 2 min left, done about 13:36 · Claude Code
+  research: batch on qwen3.6-35b-a3b · 5 active, 1 queued · started 12:36 · batch consistency check: 782 of 812, 2 min left, done about 13:36 · job records: 782 of 812, 2 min left, done about 13:36 · Claude Code
+  evals: batch on qwen3.6-35b-a3b · 5 active · started 12:36 · batch answer grading: 960 of 997, 2 min left, done about 13:36 · job answers: 960 of 997, 2 min left, done about 13:36 · Claude Code
 Claude Code sessions: 1 active (local-models), 2 idle in the last 3 hours
+OpenCode sessions: 0 active, 0 idle in the last 3 hours
 last hour via the gateway: evals 960 requests, 585,280 tokens; docs 1256 requests, 393,769 tokens; research 782 requests, 720,990 tokens
 last 7 days: 2123 queue waits > 2 s (302.3 min total), 1 swap refused
 ```
@@ -226,7 +228,7 @@ The file is re-read when its modification time changes. A file that fails to par
 **Display names:** `~/Library/Application Support/LocalModels/names.json`, set with `localmodels name`, maps what a project is seen as (its `X-Project`, else its folder) to what every screen shows, at read time, so renames apply to past history too:
 - `localmodels name project <as seen> <shown>`: one project shown under one name; a folder and a header can show as one.
 - `localmodels name batch <project> <as seen> <shown>`: a label for one of its runs (`X-Run`), phases (`X-Phase`, or the phase in `X-Step`) or scripts.
-- `localmodels name private <project>`: show only the labels set for it, with no Claude Code session titles and no unlabelled scripts, steps or batch names; `localmodels name public <project>` undoes it.
+- `localmodels name private <project>`: show only the labels set for it, with no session titles and no unlabelled scripts, steps, or batch names; `localmodels name public <project>` undoes it.
 - `localmodels name forget <project> [<as seen>]`: drop one label, or the project's whole entry.
 
 **Environment:**
@@ -239,6 +241,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `LOCALMODELS_STATE` | shared state directory (with it set, `install`, `uninstall`, `start`, `stop` and `restart` refuse unless `LOCALMODELS_LABEL` is set too, so a sandbox shell never acts on the real LaunchAgent) |
 | `LOCALMODELS_LABEL` | the LaunchAgent label (a second instance of the hub needs its own) |
 | `LMS` | the `lms` binary, when it is not at `~/.lmstudio/bin/lms` |
+| `OPENCODE_DB` | OpenCode's local session database; relative paths are under `$XDG_DATA_HOME/opencode` (default `~/.local/share/opencode`) |
 | `LOCALMODELS_PRIVATE_WORDS` | the privacy-check word list for `publish` |
 | `LOCALMODELS_HOME` | where project code that imports `llmshare` finds the repo |
 
@@ -281,7 +284,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/agent.py` | local agents: the tool loop, sandboxed read-only file tools, structured output, retries |
 | `localmodels/batches.py` | private input and result storage, model pinning, batch recovery, and the `/hub/batches` API |
 | `localmodels/mcp_server.py` | the MCP server (stdio) and the detached job runner |
-| `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code sessions |
+| `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code and OpenCode sessions |
 | `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints, with its typeface (`libre-franklin-400.woff2`, `-500.woff2`) and background (`pcb.svg`, drawn by `tools/pcb.py`), served beside the page; the terminal UI |
 | `localmodels/icon.py` | the icon as PNG (`/favicon.png`, `/apple-touch-icon.png`) and SVG; `python3 -m localmodels.icon` writes `brand/` and `docs/icon.png` |
 | `localmodels/extensions.py` | the extension protocol: manifests in the state folder's `extensions/`, the menus they serve, the actions the menu-bar app may take for them (`localmodels ext`), and the dashboard's launcher (`/hub/extensions`, its start) |
@@ -295,7 +298,8 @@ The file is re-read when its modification time changes. A file that fails to par
 
 **Reads:**
 - peer-process metadata, for attribution: `lsof` for the socket's peer, `proc_pidinfo` for its working directory and parent, `KERN_PROCARGS2` for its arguments and environment;
-- for the dashboard, Claude Code's session files and the first lines of its transcripts (working directory, title and model; of subagents and workflows only how many run, never a description or label), and `ps` and `ioreg` for the Mac's load;
+- for coding sessions, Claude Code's session files and transcript metadata, and OpenCode's local session and project tables (read-only). Subagents are counts; a request from an OpenCode subagent is attributed to its root session without reading child titles, messages, or tool output;
+- `ps` and `ioreg` for the Mac's load;
 - LM Studio's server logs, for crash detection. LM Studio writes them, not the hub: with its "log prompts and responses" setting on they hold every completion whole and the start of each prompt string, on each Mac that answers a request (peers included); the hub neither writes nor prunes them.
 
 **Writes** (in `~/Library/Application Support/LocalModels/`): `models.last-good.json` (the last settings the gateway read well), `link-events.jsonl` (each change of a peer's state: time, peer, states, reason; rolled at 1 MB), `requests.jsonl` (rotated at 20 MB), `waits.jsonl` and `crashes.jsonl` (rotated at 2 MB), `keeper.json`, `maintenance.json`, `off.json` (switched off: since when, the families to reload), `switching.json` (a switch-on under way, then its outcome for two minutes), `link.json` (the front's view of its peers), `peer-token`, `errors.jsonl` (exception types, messages and code locations; rolled over at 1 MB), `names.json` and `present.json` (display names and screenshot mode), `runs/` (one plan per declared run: its phase names and sizes), and the `leases/`, `slots/` and `inflight/` directories. These hold metadata and token counts, never a prompt or a completion. The local agents' job logs under `~/Library/Logs/LocalModels/agents/` are the only place the hub stores content, as each project's own record; `localmodels prune` deletes old ones.

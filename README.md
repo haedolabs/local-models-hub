@@ -2,7 +2,7 @@
 
 By [Haedo Labs](https://haedolabs.com)™.
 
-A gateway in front of LM Studio, for a Mac where several programs and Claude Code sessions share the same local models.
+A gateway in front of LM Studio for programs, Claude Code sessions, and OpenCode sessions that share local models on a Mac.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/dashboard-dark.png">
@@ -29,7 +29,7 @@ The hub listens on `localhost:1235` and handles these. Clients change only their
 - **Replicas.** A model can be kept loaded as several instances. Requests go to the first with a free slot.
 - **Crashes.** A crashed or stalled instance is reloaded with its settings, and requests that had not started answering are sent again.
 - **Recycling.** Each instance is drained and reloaded before the token counts at which the engine has been measured to crash.
-- **Attribution.** Each request is logged with its project and Claude Code session, found from the calling process. Prompts and completions are never logged.
+- **Attribution.** Each request is logged with its project and, when available, its Claude Code or OpenCode session ID. The dashboard lists recent sessions from both clients. Prompts and completions are never logged.
 - **Other Macs.** A second Mac's hub, over a Thunderbolt Bridge cable, can serve as more replicas.
 - **Maintenance and off.** A window or a switch refuses new requests with `Retry-After`, lets the ones in flight finish, and loads nothing until it ends.
 - **Local agents.** `ask` and `batch` run the loaded model with read-only file tools, confined to the calling project's folder.

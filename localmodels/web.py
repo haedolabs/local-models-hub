@@ -4,7 +4,7 @@
   /hub/snapshot     what is using the models now: LM Studio and each copy's slots (colored by the project holding
                     them) and its work since it was loaded against its recycle band, a copy down or being recycled, the
                     crashes and recycles of the week, every program using a model (with the step it is on), every
-                    Claude Code session, the door's queue, the Mac
+                    coding session, the door's queue, the Mac
   /hub/history      the last minutes from the hub's request log and the requests in flight now: answers at once by
                     project, waits, tokens a second, requests by project, and the memory the door samples every 15 s
   /hub/recent       the last requests (project, kind, copy, seconds, waits, tokens, the step; never the content)
@@ -133,7 +133,8 @@ def _embeddings(rows):
 
 def _snapshot():
     from . import batches
-    lm, users, cs = dash.lmstudio(), dash.users(), dash.claude()
+    lm, users = dash.lmstudio(), dash.users()
+    cs = dash.recent_sessions(users=users)
     holders = collections.defaultdict(collections.Counter)          # copy -> {project: answering}
     marks = llmshare.inflight()
     for f in marks:
@@ -165,7 +166,7 @@ def _snapshot():
                crashes=dict(down=crashes.down(), recent=_cached('crash-history', 15, lambda: crashes.history(7)), stalled=crashes.stalled()),
                recycle=dict(job=job, words=recycle.words(job) if job else None, recent=_cached('recycles', 15, lambda: recycle.recent(7)[:10]), held=recycle.held_back()),
                users=[{k: v for k, v in u.items() if k not in ('host_session',)} for u in users],
-               claude=[dict(c, uses=any(u.get('session') == c['id'] for u in users)) for c in cs],
+               sessions=cs, claude=sessions.by_source(cs)['Claude Code'],
                mac=dash.mac(), waits7=dict(waits=n, minutes=round(secs / 60, 1), refused=refused))
     out['about'] = _cached('about', 3600, about)
     try: out['maintenance'] = maint.view()
@@ -261,7 +262,8 @@ def recent(n=25):
         out.append(dict(at=r.get('at'), project=r.get('project'), kind=r.get('kind'), model=r.get('model'), copy=r.get('copy'),
                         seconds=r.get('seconds'), waited=r.get('waited'), tokens=(r.get('prompt_tokens') or 0) + (r.get('completion_tokens') or 0),
                         out_tokens=r.get('completion_tokens') or 0, status=r.get('status'), step=r.get('step'), note=r.get('note'), tries=r.get('tries'),
-                        title=None if names.private(raw.get('project')) else sessions.title_of(r.get('session'), r.get('host_session'))))
+                        session_source=sessions.source_of(r.get('session'), r.get('host_session')),
+                        title=None if names.presenting() or names.private(raw.get('project')) else sessions.title_of(r.get('session'), r.get('host_session'))))
     return out
 
 
