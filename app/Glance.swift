@@ -7,7 +7,7 @@ import Foundation
 enum Icon: Equatable { case serving, idle }            // serving: some slot can take a request; idle: off, down or none loaded
 
 enum Action: Equatable {
-    case none, openDashboard, startGateway, toggleLogin, quit
+    case none, openDashboard, openMaker, startGateway, toggleLogin, quit
     case local(on: Bool)                                // POST /hub/on or /hub/off
     case peer(name: String, on: Bool)                   // POST /hub/link/on or /hub/link/off with {"peer": name}
     case extOpen(ext: String, url: String)              // an extension's page, on its own origin, in the browser

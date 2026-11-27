@@ -166,7 +166,7 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             Spec(line: Line(title: "Open dashboard", action: .openDashboard, indent: 0), key: "d"),
             Spec(line: Line(title: "Launch at login", action: .toggleLogin, indent: 0), on: SMAppService.mainApp.status == .enabled),
             Spec(),
-            Spec(line: Line(title: "Local Models Hub" + (g.version.isEmpty ? "" : " \(g.version)") + " · Haedo Labs", indent: 0)),
+            .about(version: g.version),
             Spec(line: Line(title: "Quit", action: .quit, indent: 0), key: "q"),
         ])
     }
@@ -188,6 +188,7 @@ final class Hub: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         switch action {
         case .none: break
         case .openDashboard: openDashboard()
+        case .openMaker: NSWorkspace.shared.open(URL(string: "https://haedolabs.com/")!)
         case .toggleLogin: toggleLogin()
         case .quit: NSApp.terminate(nil)
         case .startGateway:

@@ -7,11 +7,11 @@
 <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 :root {
-  /* Haedo Labs' design language: near-black, off-white, the shared grey and
+  /* The Haedo Labs™ design language: near-black, off-white, the shared grey and
      hairline, and sapphire, the one color. Every series is a step of sapphire (OKLab, its own hue, lighter or darker), ordered
      so neighbours differ most; "other" is a neutral. No red: states are told apart by words and position first; color only
      adds weight (warning in the shared beige-grey, critical in the strongest ink). The light theme is the same on paper.
-     Haedo Labs Sapphire is the default color; the footer's color setting can take the Mac's system accent or any color
+     Sapphire is the default color; the footer's color setting can take the Mac's system accent or any color
      instead, and then every step below is drawn again from it (applyAccent): same lightness, its hue and chroma. */
   color-scheme: light;
   --plane: #ece7df; --surface: rgba(244,241,236,0.82); --ink: #111110; --ink-2: #4a4641; --muted: #6b665f;
@@ -21,10 +21,12 @@
   --other: #b5afa5; --good: #0f52ba; --warning: #8a7466; --serious: #7a6a5f; --critical: #111110; --good-text: #0d4eb1;
   --pin: #0f52ba; --die: #161615; --core: 236,231,223; --gpu: 135,172,232; --glow: rgba(15,82,186,0.35); --pcb: .2;
   --brand: #0f52ba; --brand-edge: rgba(15,82,186,0.55);   /* the color itself: the name's HUB, the board, a die's edge */
+  --maker-text: #0f52ba;   /* the maker keeps sapphire when the dashboard accent changes */
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
+    --maker-text: #3879e4;
     --plane: #111110; --surface: rgba(22,22,21,0.8); --ink: #ece7df; --ink-2: #b5afa5; --muted: #8d867c;
     --grid: rgba(236,231,223,0.07); --axis: rgba(236,231,223,0.26); --ring: #262522; --hover: rgba(236,231,223,0.05); --track: #242320;
     --s1: #4578ce; --s2: #bad3f9; --s3: #0f52ba; --s4: #87ace8; --s5: #6692db; --s6: #ccdffe; --s7: #225ec0; --s8: #5e5a54;
@@ -35,6 +37,7 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --maker-text: #3879e4;
   --plane: #111110; --surface: rgba(22,22,21,0.8); --ink: #ece7df; --ink-2: #b5afa5; --muted: #8d867c;
   --grid: rgba(236,231,223,0.07); --axis: rgba(236,231,223,0.26); --ring: #262522; --hover: rgba(236,231,223,0.05); --track: #242320;
   --s1: #4578ce; --s2: #bad3f9; --s3: #0f52ba; --s4: #87ace8; --s5: #6692db; --s6: #ccdffe; --s7: #225ec0; --s8: #5e5a54;
@@ -263,7 +266,8 @@ footer { color: var(--muted); font-size: 11px; display: flex; flex-wrap: wrap; g
 footer b { color: var(--ink-2); font-weight: 500; }
 #about { margin-left: auto; text-align: right; white-space: nowrap; }
 #about a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
-#about a:hover { color: var(--ink-2); }
+#about a:not(.maker):hover { color: var(--ink-2); }
+#about .maker { color: var(--maker-text); background: var(--plane); }
 </style>
 </head>
 <body>
@@ -311,7 +315,7 @@ footer b { color: var(--ink-2); font-weight: 500; }
     <article class="card"><h2>Recent requests</h2><div class="hint">through the gateway; metadata only</div><div class="body" id="recent"></div></article>
   </section>
 
-  <footer><span id="foot-left"><span id="clock" class="muted"></span><button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button><select id="accent" title="The dashboard's color: Haedo Labs Sapphire, the Mac's system accent (System Settings > Appearance), or a color of your own" aria-label="Color"><option value="sapphire">color: Haedo Labs Sapphire</option><option value="system">color: system accent</option><option value="own">color: your own</option></select><input type="color" id="accent-own" value="#0f52ba" title="Your own color" aria-label="Your own color" hidden></span><span id="about"></span></footer>
+  <footer><span id="foot-left"><span id="clock" class="muted"></span><button class="btn" id="theme" title="Light, dark or the Mac's setting">theme: auto</button><select id="accent" title="The dashboard's color: Haedo Labs™ Sapphire, the Mac's system accent (System Settings > Appearance), or a color of your own" aria-label="Color"><option value="sapphire">color: Haedo Labs™ Sapphire</option><option value="system">color: system accent</option><option value="own">color: your own</option></select><input type="color" id="accent-own" value="#0f52ba" title="Your own color" aria-label="Your own color" hidden></span><span id="about"></span></footer>
 </div>
 <div id="tip"></div>
 <script>
@@ -1072,7 +1076,11 @@ function renderAbout() {                // the one footer line: version, license
     const link = (href, text) => el('a', {href, target: '_blank', rel: 'noopener noreferrer'}, text);
     const bits = [el('span', {}, (ab.name || 'Local Models Hub') + ' ', el('b', {}, 'v' + ab.version))];
     if (ab.license) bits.push(ab.source ? link(ab.source.replace(/\/$/, '') + '/blob/main/LICENSE', ab.license) : ab.license);
-    if (ab.copyright) bits.push(ab.copyright_url ? link(ab.copyright_url, ab.copyright) : ab.copyright);
+    if (ab.copyright) {
+      const credit = ab.copyright_url ? link(ab.copyright_url, ab.copyright) : el('span', {}, ab.copyright);
+      credit.className = 'maker';
+      bits.push(credit);
+    }
     if (ab.source) bits.push(link(ab.source, 'source'));
     $('about').replaceChildren(...bits.flatMap((b, i) => i ? [' · ', b] : [b]));
   }
@@ -1311,7 +1319,7 @@ $('theme').addEventListener('click', () => {
   guard('charts', renderCharts);
 });
 try { const t = localStorage.getItem('lm-theme'); if (t) applyTheme(t); } catch (e) {}
-// ---- the color: Haedo Labs Sapphire by default, or the Mac's system accent (/hub/accent), or one's own. Any other color
+// ---- the color: sapphire by default, or the Mac's system accent (/hub/accent), or one's own. Any other color
 // redraws every sapphire step: each keeps its OKLab lightness (the contrast the palette was measured for) and takes the new
 // color's hue, its chroma scaled by the new color's against sapphire's, pulled in until it is a real sRGB color.
 const SAPPHIRE = '#0f52ba';

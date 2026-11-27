@@ -4,7 +4,7 @@ The full reference. The overview is [README.md](../README.md); the rules for cli
 
 ## Dashboard
 
-Close-ups from the same run.
+Close-ups from an earlier hour-long demo with 12 slots.
 
 <img src="models-dark.png" alt="Loaded models card: qwen/qwen3.6-35b-a3b, two replicas with 4 slots each and 4 slots on the peer m4pro, every slot a memory module in its project's color; replica 1 at 24% and replica 2 at 16% of 150K tokens written; the peer at 41 ms round-trip time via Thunderbolt Bridge">
 
@@ -100,7 +100,7 @@ A front switches a peer's local models off and on the same way: `localmodels pee
   - 15-minute to 24-hour series of concurrency, throughput, requests and memory (stacked by host);
   - crashes and recycles marked on the time series (the full record: `localmodels crashes`);
   - a line while the hub has recorded an error in the last 10 minutes (the full record: `localmodels errors`).
-  - one color, Haedo Labs Sapphire (`#0f52ba`) by default; the footer's color setting takes the Mac's system accent (System Settings > Appearance) or a color of one's own instead, and every series step is drawn again from it (same OKLab lightness, its hue and chroma). The choice is kept per browser.
+  - one color, Haedo Labs™ Sapphire (`#0f52ba`) by default; the footer's color setting takes the Mac's system accent (System Settings > Appearance) or a color of one's own instead, and every series step is drawn again from it (same OKLab lightness, its hue and chroma). The choice is kept per browser.
 - **Screenshot mode and a demo workload.** `localmodels present on [for 2h] [show a,b]` shows the named projects (by default the demo's and the hub's own) by name and every other project as "other" on every screen until it ends: no script names, batch names, Claude Code session titles or error details. `localmodels demo [--minutes 60]` runs three generic projects' batches over records it makes up (no file is read), with enough requests at once to fill every slot, this Mac's and its peers', plus two waiting. `localmodels pictures [--out docs] [--dry]` then makes the README's pictures: headless Chrome with a profile of its own draws the dashboard at 1512 × 900 and 1728 × 1117, at 2x, dark and light, and cuts the close-ups along boxes the page measures itself (`?rects`); it runs only in screenshot mode with at least 5 minutes left. The pictures above were made with all three.
 - **JSON endpoints:** `/hub/health`, `/hub/status`, `/hub/snapshot`, `/hub/history`, `/hub/recent`, `/hub/accent` (the Mac's system accent color), `/hub/errors`, `/hub/runs` (the runs going on, every phase estimated; `POST` declares a run's plan), `/hub/peer` (this Mac's report as a peer), `/hub/link` (this Mac's view of its peers; `POST` polls them now) and `/hub/extensions` (the extensions, each menu answering or not, with its summary and alerts); `POST /hub/off` and `POST /hub/on` switch the local models off and on; `POST /hub/link/off` and `POST /hub/link/on` (`{"peer": <name>}`) switch a peer's; `POST /hub/extensions/run` (`{"id", "verb"}`) runs one of the verbs an extension's manifest lists (the dashboard's **start**).
 - **CLI:** `localmodels` (status), `open` (the dashboard in the browser), `dash` (live TUI), `log`, `crashes`, `errors`, `maintenance`, `name`, `present`, `demo`, `peer`, `swapcheck`, `use`, `keep`, `recycle`, `ask`, `batch`, `jobs`, `prune`, `check` (self-test), `start`, `stop` and `restart` (the gateway), `install`, `uninstall` and `publish`.
@@ -322,4 +322,4 @@ Send every request through the gateway, never to port 1234. Hold a lease for a r
 
 ## License
 
-MIT, © 2026 [Haedo Labs](https://haedolabs.com); see [LICENSE](../LICENSE). The dashboard's typeface, Libre Franklin, is under the SIL Open Font License 1.1 ([localmodels/libre-franklin-OFL.txt](../localmodels/libre-franklin-OFL.txt)).
+MIT, © 2026 [Haedo Labs™](https://haedolabs.com); see [LICENSE](../LICENSE). The dashboard's typeface, Libre Franklin, is under the SIL Open Font License 1.1 ([localmodels/libre-franklin-OFL.txt](../localmodels/libre-franklin-OFL.txt)).

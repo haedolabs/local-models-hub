@@ -36,7 +36,7 @@ _mem = collections.deque(maxlen=24 * 60 * 4)            # (time, GB used here, {
 
 # ---------------------------------------------------------------- the Mac's accent color
 # AppleAccentColor as System Settings > Appearance writes it, with the sRGB value macOS draws for it (controlAccentColor);
-# no key is Multicolor, which draws blue. The page offers it beside Haedo Labs Sapphire, its default, and a color of one's own.
+# no key is Multicolor, which draws blue. The page offers it beside Haedo Labs™ Sapphire, its default, and a color of one's own.
 ACCENTS = {-1: ('Graphite', '#989898'), 0: ('Red', '#e0383e'), 1: ('Orange', '#f7821b'), 2: ('Yellow', '#ffc726'),
            3: ('Green', '#62ba46'), 4: ('Blue', '#007aff'), 5: ('Purple', '#953d96'), 6: ('Pink', '#f74f9e')}
 

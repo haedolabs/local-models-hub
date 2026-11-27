@@ -27,7 +27,7 @@ def _fg(rgb, n):
     return '38;2;%d;%d;%d' % rgb if TRUE else f'38;5;{n}'
 
 
-# Haedo Labs' palette, as on the dashboard: sapphire and its steps, the shared beige-grey, off-white, the hairline grey.
+# The Haedo Labs™ palette, as on the dashboard: sapphire and its steps, the shared beige-grey, off-white, the hairline grey.
 # The letters keep their old roles: g good, y warning, r critical (off-white: no red), c the accent, m Claude, b rules.
 C = dict(g=_fg((135, 172, 232), 110), y=_fg((188, 164, 150), 181), r=_fg((236, 231, 223), 255), c=_fg((69, 120, 206), 68),
          m=_fg((169, 198, 244), 153), b=_fg((94, 90, 84), 240), w=_fg((236, 231, 223), 255), B='1', d='2', R='7')
