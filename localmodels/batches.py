@@ -314,7 +314,8 @@ def request(spec, path, body, headers):
             # Only fixed messages reach shared state. An upstream diagnostic may quote the request.
             reason = 'waiting for a permitted replica of the pinned model'
             maintenance = e.headers.get('X-Hub-Maintenance', '') if e.headers else ''
-            if 'switched-off' in maintenance and 'peers-only' not in maintenance: reason = 'local models are switched off'
+            if maintenance.startswith('peers-only') and not spec['peers']: reason = 'gateway is in peers-only mode; this batch permits only this Mac'
+            elif 'switched-off' in maintenance and 'peers-only' not in maintenance: reason = 'local models are switched off'
             elif maintenance.startswith('on'): reason = 'gateway maintenance is active'
             elif e.code == 404: reason = 'waiting for a gateway that supports pinned inference'
             elif e.code == 429 or 'no free LM Studio slot' in agent.err_text(e): reason = 'waiting for model capacity'

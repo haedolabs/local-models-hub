@@ -1515,9 +1515,10 @@ def check():
         t("instance manager polls every 20 s (crashes, replicas, recycles)", seen < 90, f'last look {seen:.0f} s ago')
     me = whois.identity(os.getpid())
     t('whois identifies the client process', me.get('project') is not None, f"{me.get('project')} · {me.get('app')}")
-    loaded = [r['id'] for r in llmshare.chat_rows(rows)]
+    # A model may have been swapped or switched off while the sandbox suites ran.
+    loaded = [r['id'] for r in llmshare.chat_rows(llmshare.loaded(fresh=True)) if r['state'] != 'LOADING']
     busy = sum(llmshare.busy_slots().values())
-    if loaded and llmshare.hub_up() and busy < llmshare.at_once():
+    if loaded and not maint.on() and llmshare.hub_up() and busy < llmshare.at_once():
         step = f'gateway check {os.getpid()}-{time.monotonic_ns()}'
         body = dict(model=loaded[0], messages=[{'role': 'user', 'content': 'Say OK.'}], max_tokens=5)
         req = urllib.request.Request(llmshare.HUB + '/v1/chat/completions', data=json.dumps(body).encode(),
@@ -1536,7 +1537,7 @@ def check():
             row = mine[0]
             note = f"{row['project']} · {row['kind']} · {row.get('seconds')} s" + (f" (queued {row['waited']} s)" if (row.get('waited') or 0) > 2 else '')
         t('test request through the gateway completed and logged', got and bool(mine), note)
-    else: print('  skip test request (no model loaded, gateway down, or every slot busy)')
+    else: print('  skip test request (no loaded chat model, maintenance, gateway down, or every slot busy)')
     p = subprocess.run([PY, os.path.join(HOME, 'bin', 'localmodels'), 'mcp'], input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
                        '{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n', capture_output=True, text=True, timeout=30)
     names = []

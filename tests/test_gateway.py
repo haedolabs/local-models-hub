@@ -333,18 +333,23 @@ def run(box):
         t('a program that hangs up during a long answer: the door hangs up on LM Studio, the slot is free within seconds',
           bool(got_), (freed, row_.get('status'), row_.get('note')))
         time.sleep(max(0, t_leave + Fake.slow + 0.5 - time.time())); Fake.slow = 3.0
-        plan('slow', 'slow'); Fake.slow = 6.0
+        plan('gated', 'gated')
+        Fake.gates = {f'busy{i}': threading.Event() for i in range(2)}
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'busy{i}', kind='batch')) for i in range(2)]
         for x in ths: x.start()
-        time.sleep(0.8); t0 = time.time()
-        code, r, h = ask(tag='budget', kind='batch', headers={'X-Timeout': '4'})
-        took = time.time() - t0
-        row_ = rows_logged()[0]
+        try:
+            assert until(lambda: len(Fake.seen) == 2, 10)
+            t0 = time.monotonic()
+            code, r, h = ask(tag='budget', kind='batch', headers={'X-Timeout': '5', 'X-Step': 'queue deadline test'})
+            took = time.monotonic() - t0
+            row_ = until(lambda: next((r for r in llmshare.recent_requests(5, 1) if r.get('step') == 'queue deadline test'), None), 10) or {}
+        finally:
+            for gate in Fake.gates.values(): gate.set()
         for x in ths: x.join(30)
         try: kinds = [json.loads(l).get('kind') for l in open(llmshare.WAITS)]
         except OSError: kinds = []
-        t('a program that says it waits 4 s gets 503 at 3.6 s with Retry-After, nothing forwarded, the row says it waited',
-          code == 503 and h.get('Retry-After') and 3 <= took < 5 and 'budget' not in [s_[1] for s_ in Fake.seen] and row_.get('status') == 503 and 3 <= (row_.get('waited') or 0) < 5
+        t('a 5 s client budget gets 503 with Retry-After before the deadline; nothing is forwarded and the row records the wait',
+          code == 503 and h.get('Retry-After') and 4.4 <= took < 5 and 'budget' not in [s_[1] for s_ in Fake.seen] and row_.get('status') == 503 and 4.4 <= (row_.get('waited') or 0) < 5
           and 'slot timeout' in kinds, (code, round(took, 1), row_.get('waited'), kinds[-1:]))
         Fake.slow = 3.0
 

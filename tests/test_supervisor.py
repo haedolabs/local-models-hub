@@ -126,7 +126,10 @@ def run(procs):
         logf.flush(); return '\n'.join(open(os.path.join(BOX, 'gateway.log')).read().split('\n')[-n:])
 
     def idle():                                              # the supervisor's own deploy (a replacement, a start) over
-        return H.wait_for(lambda: deploy.supervisor_state() and not deploy.supervisor_state().get('deploy'), 30)
+        def no_deploy():
+            st = status()                                    # supervisor.json may predate the replacement now warming
+            return st.get('ok') and not st.get('deploy')
+        assert H.wait_for(no_deploy, 30), 'the supervisor did not finish the handoff'
 
     def install(**kw):
         say.clear(); return deploy.install_gateway(cli, say=say.append, **kw)
