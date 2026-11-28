@@ -21,7 +21,7 @@ LM Studio serves one API on `localhost:1234` and treats every client alike. When
 - a Metal engine crash unloads the model, fails the requests in flight, and leaves it unloaded;
 - nothing says which client is using what.
 
-The hub listens on `localhost:1235` and handles these. Clients change only their base URL.
+The hub listens on `localhost:1235` and handles these. Point compatible clients at its base URL; the exact API and overload contract is in [GUIDE.md](GUIDE.md).
 
 ## What it does
 
@@ -56,7 +56,7 @@ git clone https://github.com/haedolabs/local-models-hub.git ~/local-models
 ~/local-models/bin/localmodels install
 ```
 
-`install` starts the gateway at login, writes settings sized to the Mac, and adds the `localmodels` command. `localmodels check` tests it. `localmodels uninstall` removes all of it.
+`install` starts the gateway at login, writes settings sized to the Mac, and adds the `localmodels` command. If no chat model is loaded, choose the configured model and load it with `localmodels use <model>`; the gateway rejects generation requests for unloaded IDs rather than invoking just-in-time loading. `localmodels check` verifies readiness, including one real request when a model is available. `localmodels uninstall` stops and removes the gateway integration; settings, private job records, LM Studio logs, and the separately installed menu-bar app remain unless removed through their own commands.
 
 ## Use
 
@@ -74,7 +74,7 @@ Send every request through the gateway. Hold a lease for a run that pauses more 
 
 ## Privacy
 
-Requests stay on the Mac, or go over the peer cable when one is set up. Durable batches stay local unless the submitting project names approved peers. Shared records hold metadata and token counts; batch inputs and answers are stored in the project's private job folder. The peer link listens on one cable address and needs a shared token.
+Requests stay on the Mac, or go over the peer cable when one is set up. Durable batches stay local unless the submitting project names approved peers. Shared records hold metadata and token counts; batch inputs, answers, tool paths, and search text stay in the project's private job folder. The peer link listens on one directly connected address and needs a shared token.
 
 ## Reference
 

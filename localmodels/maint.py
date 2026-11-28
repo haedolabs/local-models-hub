@@ -45,12 +45,13 @@ _cache = {'mtime': None, 'rec': None}
 _off_cache = {'mtime': None, 'rec': None}
 
 
-def _write(rec, path=None):
+def _write(rec, path=None, locked=False):
     path = path or FILE
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f'{path}.{os.getpid()}.tmp'
-    with open(tmp, 'w') as f: json.dump(rec, f)
-    os.replace(tmp, path)
+    if locked:
+        llmshare._write(path, rec)
+    else:
+        with llmshare.flocked(path + '.lock'): llmshare._write(path, rec)
     _cache['mtime'] = _off_cache['mtime'] = None
 
 
@@ -66,18 +67,17 @@ def switched_off():
 
 
 def switch_off(before, why='', now=None, peers=False):
-    """Switch the local models off: `before` is the families loaded now (loaded again by switch_on); peers: requests go to
-    the peers meanwhile instead of getting 503. -> the record. Already off: the record as it is, its mode changed when
-    `peers` differs (since, what was loaded before and the unload stand)."""
-    rec = switched_off()
-    if rec:
-        if bool(rec.get('peers')) != bool(peers):
-            rec = dict(rec, peers=bool(peers), mode_at=now or time.time())
-            _write(rec, OFF)
+    """Switch the local models off, or change its peers-only mode, as one transaction with off_done/switch_on."""
+    with llmshare.flocked(OFF + '.lock'):
+        rec = switched_off()
+        if rec:
+            if bool(rec.get('peers')) != bool(peers):
+                rec = dict(rec, peers=bool(peers), mode_at=now or time.time())
+                _write(rec, OFF, locked=True)
+            return rec
+        rec = dict(v=1, at=now or time.time(), why=llmshare.clean(why, 120) or '', before=sorted(set(before or [])), unloaded=None, peers=bool(peers))
+        _write(rec, OFF, locked=True)
         return rec
-    rec = dict(v=1, at=now or time.time(), why=llmshare.clean(why, 120) or '', before=sorted(set(before or [])), unloaded=None, peers=bool(peers))
-    _write(rec, OFF)
-    return rec
 
 
 def peers_only():
@@ -88,17 +88,20 @@ def peers_only():
 
 def off_done(at, words=''):
     """The instance manager unloaded everything for the off record set at `at` (not a newer one, not after switch_on)."""
-    rec = switched_off()
-    if rec and rec.get('at') == at and not rec.get('unloaded'): _write(dict(rec, unloaded=time.time(), unload_words=str(words)[:300]), OFF)
+    with llmshare.flocked(OFF + '.lock'):
+        rec = switched_off()
+        if rec and rec.get('at') == at and not rec.get('unloaded'):
+            _write(dict(rec, unloaded=time.time(), unload_words=str(words)[:300]), OFF, locked=True)
 
 
 def switch_on():
-    """Clear the off record. -> the record as it was (with `before`), or None when the models were not switched off."""
-    rec = switched_off()
-    try: os.remove(OFF)
-    except OSError: pass
-    _off_cache['mtime'] = None
-    return rec
+    """Clear the off record under the same transaction lock as switch_off/off_done."""
+    with llmshare.flocked(OFF + '.lock'):
+        rec = switched_off()
+        try: os.remove(OFF)
+        except OSError: pass
+        _off_cache['mtime'] = None
+        return rec
 
 
 def on_started(families, now=None):
@@ -107,8 +110,9 @@ def on_started(families, now=None):
 
 
 def on_done(ok, words=''):
-    rec = _switching_raw()
-    if rec: _write(dict(rec, done=time.time(), ok=bool(ok), words=str(words)[:300]), SWITCHING)
+    with llmshare.flocked(SWITCHING + '.lock'):
+        rec = _switching_raw()
+        if rec: _write(dict(rec, done=time.time(), ok=bool(ok), words=str(words)[:300]), SWITCHING, locked=True)
 
 
 def _switching_raw():
@@ -122,7 +126,9 @@ def switching(now=None):
     SHOWN_FOR seconds after it ends; None otherwise, and when the process that ran it died mid-way."""
     rec, now = _switching_raw(), now or time.time()
     if not rec: return None
-    if rec.get('done'): return dict(rec, phase='done') if now - rec['done'] < SHOWN_FOR else None
+    if rec.get('done'):
+        # A successful notice is transient; a failed restore stays visible until a later attempt replaces it.
+        return dict(rec, phase='done') if not rec.get('ok') or now - rec['done'] < SHOWN_FOR else None
     try: os.kill(int(rec.get('pid') or 0), 0); alive = bool(rec.get('pid'))
     except (OSError, ValueError): alive = False
     return dict(rec, phase='loading') if alive and now - rec['at'] < 1800 else None
@@ -158,33 +164,37 @@ def announce(start=None, minutes=30, why='', after_batches=False, now=None):
     now = now or time.time()
     rec = dict(v=1, set_at=now, minutes=max(1, int(minutes)), why=llmshare.clean(why, 120) or '',
                start=None if after_batches else (start if start is not None else now), after_batches=bool(after_batches))
-    old = _raw() or {}
-    if old.get('before'): rec['before'] = old['before']
-    _write(rec)
-    return read(now=now)
+    with llmshare.flocked(FILE + '.lock'):
+        old = _raw() or {}
+        if old.get('before'): rec['before'] = old['before']
+        _write(rec, locked=True)
+        return read(now=now)
 
 
 def begin(now=None):
-    """Start it now (`localmodels maintenance now`, or the batches went quiet). -> the record."""
+    """Start it now (`localmodels maintenance now`, or the batches went quiet), without racing an operator ending it."""
     now = now or time.time()
-    rec = _raw() or dict(v=1, set_at=now, minutes=30, why='', after_batches=False)
-    if rec.get('start') is None or rec['start'] > now: rec = dict(rec, start=now); _write(rec)
-    return read(now=now)
+    with llmshare.flocked(FILE + '.lock'):
+        rec = _raw() or dict(v=1, set_at=now, minutes=30, why='', after_batches=False)
+        if rec.get('start') is None or rec['start'] > now: rec = dict(rec, start=now); _write(rec, locked=True)
+        return read(now=now)
 
 
 def freeze(families):
-    """Note what was loaded when maintenance began (once), so after_maintenance can load it again."""
-    rec = _raw()
-    if rec and 'before' not in rec: _write(dict(rec, before=sorted(set(families))))
+    """Note what was loaded when maintenance began once, without recreating a record an operator just ended."""
+    with llmshare.flocked(FILE + '.lock'):
+        rec = _raw()
+        if rec and 'before' not in rec: _write(dict(rec, before=sorted(set(families))), locked=True)
 
 
 def end():
-    """It is over. -> the record as it was (with `before`), or None when none was set."""
-    rec = _raw()
-    try: os.remove(FILE)
-    except OSError: pass
-    _cache['mtime'] = None
-    return rec
+    """End under the freeze/begin transaction lock, so no paused keeper can recreate the window afterwards."""
+    with llmshare.flocked(FILE + '.lock'):
+        rec = _raw()
+        try: os.remove(FILE)
+        except OSError: pass
+        _cache['mtime'] = None
+        return rec
 
 
 def tick(inflight, rows, now=None):

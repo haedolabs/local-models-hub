@@ -691,7 +691,10 @@ def test_write_problem(box):
     words = llmshare.write_problem()
     t('a failed append returns False, and the words name the file and what is frozen', ok is False and words and 'requests.jsonl' in words and 'recycle' in words, (ok, words))
     good = llmshare._append(os.path.join(box, 'requests-ok.jsonl'), dict(at=1))
-    t('the next append that works clears it', good is True and llmshare.write_problem() is None, llmshare.write_problem())
+    t('a different file that works does not clear the failed path', good is True and llmshare.write_problem() is not None, llmshare.write_problem())
+    os.remove(blocked); os.makedirs(blocked)
+    good = llmshare._append(path, dict(at=1))
+    t('the same path writing again clears its recorded problem', good is True and llmshare.write_problem() is None, llmshare.write_problem())
 
 
 def test_cli_args():
@@ -1470,6 +1473,9 @@ def test_secret_check(box):
     commit({'conf.py': f'TOKEN = "{token}"\n'})
     hits = cli.secret_check(repo)['hits']
     t('a GitHub token in an added line is caught, named by its commit and line', any('conf.py:1' in w for w, _ in hits), hits)
+    report = '\n'.join(cli.secret_words(dict(hits=hits)))
+    t('the report names the location but never prints the credential into a terminal or session transcript',
+      'conf.py:1' in report and token not in report and 'redacted' in report, report)
     g('reset', '-q', '--hard', 'origin/main')
     commit({'notes.md': '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----\nabc\n'})
     t('a private key block is caught', any('notes.md' in w for w, _ in cli.secret_check(repo)['hits']))

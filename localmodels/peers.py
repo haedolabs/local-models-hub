@@ -48,6 +48,7 @@ def _state_paths(root):
 LMSTUDIO_HOME = (os.path.dirname(os.path.dirname(llmshare.LMS)) if llmshare.LMS.endswith(os.sep + os.path.join('bin', 'lms'))
                  else os.path.expanduser('~/.lmstudio'))
 NAME = re.compile(r'^[A-Za-z0-9._-]{1,40}$')
+SSH_TARGET = re.compile(r'(?:[A-Za-z0-9._-]+@)?(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.%]+\])$')
 ON = ' on '                    # a copy on a peer is "<family> on <peer>": model ids hold no spaces, so it is never a local id
 POLL, BACKOFF_MAX, REFUSED_AGAIN, ROUTE_EVERY, WRITE_EVERY = 2.0, 10.0, 300.0, 300.0, 10.0   # a peer is only ever on a direct link: a look at one that is away costs a connect timeout at most
 STRIKES, STRIKE_WINDOW = 3, 60   # requests a peer failed though its look was fine, within this many seconds: it is backed off
@@ -175,6 +176,7 @@ def serve_problem(address):
     try: ip = ipaddress.ip_address(a.split('%')[0])
     except ValueError: return f'serve address {a!r} is not an IP address: give the Thunderbolt Bridge address of this Mac'
     if ip.is_unspecified: return f'serve address {a} listens on every interface: give the Thunderbolt Bridge address of this Mac'
+    if '%' in a and not ip.is_link_local: return f'serve address {a} is not link-local: a scoped peer listener must use the direct link'
     return None
 
 
@@ -233,7 +235,18 @@ def on_link(host, text=None):
     address names its interface (fe80::2%bridge0)."""
     h = str(host or '').strip('[]')
     if loopback(h): return 'lo0', None, h
-    if '%' in h: return h.split('%', 1)[1], None, h
+    if '%' in h:
+        # A zone identifies an interface; it does not make a routed/global address a direct peer. Only IPv6
+        # link-local addresses have meaningful interface scope here, and the zone must hold such an address of this Mac.
+        base, _, iface = h.partition('%')
+        try: ip = ipaddress.ip_address(base)
+        except ValueError: ip = None
+        if ip is None or ip.version != 6 or not ip.is_link_local or not re.fullmatch(r'[A-Za-z0-9._-]+', iface or ''):
+            return None, f'{h} is not an IPv6 link-local address with a valid interface zone: nothing is sent to it', None
+        local = (interfaces(text, ipv6=True) if text is not None else interfaces(ipv6=True)).get(iface, [])
+        if not any(ip in ipaddress.ip_network(f'{a}/{n}', strict=False) for a, n in local):
+            return None, f'{iface} has no IPv6 link-local address for {h}: nothing is sent to it', None
+        return iface, None, h
     try: ips = [ipaddress.ip_address(h)]
     except ValueError:
         try: ips = [ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(h, None, socket.AF_INET, socket.SOCK_STREAM)]
@@ -433,6 +446,12 @@ def _doc(entries, notes, meta):
     return dict(json=entries, meta=dict(meta, values=['map', flat] if flat else ['map']))
 
 
+def _source_component(value):
+    """One safe Hugging Face user/repository path component from an untrusted model manifest."""
+    return (isinstance(value, str) and value not in ('', '.', '..') and os.path.basename(value) == value
+            and '/' not in value and '\\' not in value and not re.search(r'[\x00-\x1f\x7f]', value))
+
+
 def copy_plan(key, variant=None):
     """What makes a catalog model the same on another Mac as here, as LM Studio keeps it: its definition folder
     (~/.lmstudio/hub/models/<key>/), the downloaded weights folder of its variant, its two records in
@@ -447,7 +466,9 @@ def copy_plan(key, variant=None):
     except (OSError, ValueError): raise ValueError(f"{key}: no model definition at {defn}/manifest.json (copy-model supports LM Studio catalog models only)")
     srcs = [(s.get('user'), s.get('repo')) for dep in (man.get('dependencies') or []) if isinstance(dep, dict) for s in (dep.get('sources') or [])
             if isinstance(s, dict) and s.get('type') == 'huggingface' and s.get('user') and s.get('repo')]
-    downloads = lmstudio_settings().get('downloadsFolder') or os.path.join(LMSTUDIO_HOME, 'models')
+    if any(not _source_component(u) or not _source_component(r) for u, r in srcs):
+        raise ValueError(f'{key}: model manifest contains an unsafe weights source path')
+    downloads = os.path.realpath(os.path.expanduser(lmstudio_settings().get('downloadsFolder') or os.path.join(LMSTUDIO_HOME, 'models')))
     have = [(u, r) for u, r in srcs if os.path.isdir(os.path.join(downloads, u, r))]
     quant = str(variant or '').partition('@')[2].lower()
     pick = [x for x in have if quant and quant in x[1].lower()] or have
@@ -455,7 +476,9 @@ def copy_plan(key, variant=None):
         raise ValueError(f'{key}: ' + ('no weights downloaded on this host' if not pick else
                                        'multiple variants downloaded (' + ', '.join(f'{u}/{r}' for u, r in pick) + '): pin the variant in settings'))
     u, r = pick[0]
-    wkey, weights = f'{u}/{r}', os.path.join(downloads, u, r)
+    wkey, weights = f'{u}/{r}', os.path.realpath(os.path.join(downloads, u, r))
+    if os.path.commonpath([downloads, weights]) != downloads:
+        raise ValueError(f'{key}: weights source escapes the LM Studio downloads folder')
     try: doc = json.load(open(os.path.join(LMSTUDIO_HOME, '.internal', 'model-data.json')))
     except (OSError, ValueError): doc = None
     entries, notes, _ = _records(doc)
@@ -488,8 +511,8 @@ def merge_records(doc, records):
 
 
 def remote(target, script, data=None, timeout=60):
-    """Run a shell script on a peer over SSH (its key, no password prompt). -> (exit code, what it printed, both streams:
-    `lms` prints its status lines on standard error)."""
+    """Run a shell script on a peer over SSH (its key, no password prompt), with no target that SSH could read as an option."""
+    if not isinstance(target, str) or target.startswith('-') or not SSH_TARGET.fullmatch(target): return 255, 'invalid SSH target'
     try:
         r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', target, script], input=data, capture_output=True, timeout=timeout)
         return r.returncode, (r.stdout + r.stderr).decode('utf-8', 'replace')
@@ -498,6 +521,7 @@ def remote(target, script, data=None, timeout=60):
 
 def send(src, target, dest):
     """Copy a folder to a peer over SSH (rsync: files already there with the same size and time are skipped). -> (code, words)."""
+    if not isinstance(target, str) or target.startswith('-') or not SSH_TARGET.fullmatch(target): return 255, 'invalid SSH target'
     try:
         r = subprocess.run(['rsync', '-a', '-e', 'ssh -o BatchMode=yes', src.rstrip('/') + '/', f'{target}:' + shlex.quote(dest.rstrip('/') + '/')],
                            capture_output=True, timeout=6 * 3600)
@@ -511,7 +535,10 @@ def capacity_for(fam, front):
     (its own programs', other fronts'). fam: the family as report() gives it."""
     try:
         slots, busy = int(fam.get('slots') or 0), int(fam.get('busy') or 0)
-        mine = int((fam.get('answering') or {}).get(front) or 0)
+        # Older hubs have only the all-instances count. Current hubs distinguish requests on the usable copies whose
+        # slots/busy totals feed this calculation from requests merely finishing on a draining or down copy.
+        counts = fam.get('answering_usable') if isinstance(fam.get('answering_usable'), dict) else fam.get('answering')
+        mine = int((counts or {}).get(front) or 0)
     except (AttributeError, TypeError, ValueError): return 0
     return max(0, slots - max(0, busy - mine))
 
@@ -526,11 +553,13 @@ def report(front=None):
     draining, conf = recycle.draining(), llmshare.settings().get('families') or {}
     marks = llmshare.inflight()
     loads = admission.in_flight(marks)
+    usable_ids = collections.defaultdict(set)
     for r in rows:
         base = llmshare.family(r['id'])
         kind = 'embedding' if r.get('type') == 'embedding' or llmshare.embedding(base, conf) else 'llm'
-        f = fams.setdefault(base, dict(kind=kind, copies=[], slots=0, busy=0, answering=collections.Counter(), holders=collections.Counter(),
-                                       fingerprint=None, in_settings=base in conf, ctx=dict(budget=0, load=0, by=collections.Counter())))
+        f = fams.setdefault(base, dict(kind=kind, copies=[], slots=0, busy=0, answering=collections.Counter(), answering_usable=collections.Counter(),
+                                       holders=collections.Counter(), fingerprint=None, in_settings=base in conf,
+                                       ctx=dict(budget=0, load=0, by=collections.Counter())))
         down = r['id'] in crashes.down_copies(base)
         n = busy.get(llmshare._safe(r['id']), 0)
         usable = r['state'] != 'LOADING' and not down and r['id'] not in draining
@@ -538,6 +567,7 @@ def report(front=None):
         f['copies'].append(dict(id=r['id'], parallel=r.get('parallel') or 1, context=r.get('context'), state=r['state'], busy=n, down=down, draining=r['id'] in draining,
                                 ctx=loads.get(r['id'], 0), budget=b))
         if usable:
+            usable_ids[base].add(r['id'])
             f['slots'] += max(1, r.get('parallel') or 1); f['busy'] += n
             f['ctx']['budget'] += b; f['ctx']['load'] += loads.get(r['id'], 0)
         if f['fingerprint'] is None or r['id'] == base: f['fingerprint'] = fingerprint(r)
@@ -545,9 +575,14 @@ def report(front=None):
         if m.get('state') != 'answering': continue
         f = fams.get(llmshare.family(m.get('copy') or m.get('model')))
         if not f: continue
-        if m.get('from'): f['answering'][m['from']] += 1; f['ctx']['by'][m['from']] += int(m.get('ctx') or 0)
+        if m.get('from'):
+            f['answering'][m['from']] += 1; f['ctx']['by'][m['from']] += int(m.get('ctx') or 0)
+            if m.get('copy') in usable_ids.get(llmshare.family(m.get('copy')), set()):
+                f['answering_usable'][m['from']] += 1
         f['holders'][m.get('project') or '?'] += 1
-    for f in fams.values(): f['ctx']['by'] = dict(f['ctx']['by'])
+    for f in fams.values():
+        f['ctx']['by'] = dict(f['ctx']['by'])
+        f['answering'] = dict(f['answering']); f['answering_usable'] = dict(f['answering_usable'])
     keeper = dict(gpu=models.gpu(), warnings=[])
     for base, f in fams.items():
         size = (f['fingerprint'] or {}).get('bytes')

@@ -113,6 +113,10 @@ func readManifest(_ m: [String: Any]) -> Extension? {
     }
     if present("token") {
         guard let token = m["token"] as? String, token.hasPrefix("/") else { return nil }
+        if FileManager.default.fileExists(atPath: token) {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: token),
+                  let mode = attrs[.posixPermissions] as? NSNumber, mode.intValue == 0o600 else { return nil }
+        }
         e.token = token
     }
     if present("token_header") {

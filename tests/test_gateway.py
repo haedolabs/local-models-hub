@@ -60,10 +60,13 @@ class Fake(http.server.BaseHTTPRequestHandler):
             self.close_connection = True; return
         if what == 'slow': time.sleep(Fake.slow)
         if what == 'gated': Fake.gates[body['tag']].wait(30)
-        if what in ('hang', 'sse-hang'):                     # a stalled engine: nothing comes, then the door cuts the connection
+        if what in ('hang', 'sse-hang', 'body-hang'):        # a stalled engine: nothing comes, then the door cuts the connection
             if what == 'sse-hang':
                 self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
                 self.wfile.write(b'data: {"choices":[{"delta":{"content":"One"}}]}\n\n'); self.wfile.flush()
+            elif what == 'body-hang':
+                self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', '100')
+                self.end_headers(); self.wfile.flush()       # headers arrive; the body then stays silent
             end = time.time() + Fake.hang
             while time.time() < end:
                 time.sleep(0.1)
@@ -100,6 +103,8 @@ class Fake(http.server.BaseHTTPRequestHandler):
             out, code = json.dumps(dict(error='something new')).encode(), 400
         elif what == 'replica-text':
             out, code = json.dumps(dict(model=F2, choices=[dict(message=dict(content=F2, tool_calls=[dict(function=dict(arguments=F2))]))])).encode(), 200
+        elif what == 'large':
+            out, code = json.dumps(dict(model=body.get('model'), choices=[dict(message=dict(content='x' * 2000))])).encode(), 200
         else:
             out, code = json.dumps(dict(model=body.get('model'), choices=[dict(message=dict(content='OK ' + str(body.get('tag'))))],
                                         usage=dict(prompt_tokens=3, completion_tokens=2))).encode(), 200
@@ -265,7 +270,14 @@ def run(box):
           held and got.get('r') and got['r'][0] == 200, (held and held[0].get('state'), got.get('r') and got['r'][0]))
         rows.clear(); plan()
         code, r, h = ask(model='other/unknown', tag='u')
-        t('a model the settings do not know is still passed through', code == 200 and Fake.seen[0][0] == 'other/unknown', Fake.seen)
+        t('an unknown model with no loaded instance is refused, never forwarded to LM Studio\'s just-in-time loader',
+          code == 503 and not Fake.seen, (code, Fake.seen))
+        code, _, _ = ask(model=None, tag='no-model')
+        t('a generation request without a model is a 400, never inference against an arbitrary first loaded model', code == 400 and not Fake.seen)
+        req = urllib.request.Request(url + '/v1/chat/completions', data=b'{not json', headers={'Content-Type': 'application/json'})
+        try: urllib.request.urlopen(req, timeout=10); code = 200
+        except urllib.error.HTTPError as e: code = e.code
+        t('malformed generation JSON is a clean 400 without reaching the engine', code == 400 and not Fake.seen)
         rows[:] = [row(F), row(F2)]
 
         with llmshare.slot(F, wait=2):
@@ -333,6 +345,13 @@ def run(box):
         t('a program that hangs up during a long answer: the door hangs up on LM Studio, the slot is free within seconds',
           bool(got_), (freed, row_.get('status'), row_.get('note')))
         time.sleep(max(0, t_leave + Fake.slow + 0.5 - time.time())); Fake.slow = 3.0
+        started = time.time(); plan('body-hang'); s = raw(F, 'body-leaver', kind='test'); time.sleep(1.2); s.close()
+        left = until(lambda: next((r for r in llmshare.recent_requests(1, 1)
+                                  if r.get('status') == 499 and 'during the response' in (r.get('note') or '')), None), 5)
+        recent_left = [] if left else [(r.get('at'), r.get('status'), r.get('note')) for r in llmshare.recent_requests(5, 1)]
+        t('a disconnect after response headers but before the non-streaming body also aborts upstream generation', bool(left), left or recent_left)
+        gateway._live.clear()                              # isolate the next tests from this fixture's intentional two-minute idle lease
+        for f in os.listdir(llmshare.LEASES): os.remove(os.path.join(llmshare.LEASES, f))
         plan('gated', 'gated')
         Fake.gates = {f'busy{i}': threading.Event() for i in range(2)}
         ths = [threading.Thread(target=ask, kwargs=dict(tag=f'busy{i}', kind='batch')) for i in range(2)]
@@ -374,6 +393,7 @@ def run(box):
                 handler.rfile = io.BytesIO(data)
                 try: handler._chunks(); actual = 200
                 except gateway.InputError as e: actual = e.status
+                finally: handler._release_body()             # direct parser fixture: Door.any() normally supplies this finally
                 t('the chunked reader rejects oversize and incomplete input without forwarding a prefix', actual == status)
         with socket.socket() as conn:
             handler = object.__new__(gateway.Door)
@@ -386,6 +406,7 @@ def run(box):
                 reader.read.side_effect = socket.timeout()
                 try: handler._body(); status = 200
                 except gateway.InputError as e: status = e.status
+                finally: handler._release_body()
                 t('a stalled upload receives a timeout and releases its deadline', status == 408 and conn.gettimeout() is None)
         plan()
         code, r, h = ask(tag='slash', path='/v1/chat/completions/')
@@ -437,15 +458,33 @@ def run(box):
         codes = [get(p) for p in ('/hub/errors?minutes=x', '/hub/history?minutes=x', '/hub/recent?n=x')]
         t('a window or a count that is not a number falls back to the default: answered, and nothing recorded as an error',
           codes == [200, 200, 200] and not [r for r in errors.recent(5) if r['where'].startswith('GET /hub/')], (codes, errors.recent(5)[:1]))
+        from localmodels import names
+        names.set_present(5, [])
+        try:
+            raw_errors = json.load(urllib.request.urlopen(url + '/hub/errors', timeout=10))
+            raw_status = json.load(urllib.request.urlopen(url + '/hub/status', timeout=10))
+            t('presentation mode covers raw error and status endpoints too, not only the rendered dashboard',
+              raw_errors == dict(errors=[], presenting=True) and '"session"' not in json.dumps(raw_status)
+              and 'host_session' not in json.dumps(raw_status), (raw_errors, list(raw_status)))
+        finally: names.present_off()
         held = lambda: (len(os.listdir(llmshare.INFLIGHT)) if os.path.isdir(llmshare.INFLIGHT) else 0, sum(e['n'] for e in gateway._live.values()))
+        def held_detail():
+            marks = []
+            for f in os.listdir(llmshare.INFLIGHT) if os.path.isdir(llmshare.INFLIGHT) else []:
+                try: marks.append(json.load(open(os.path.join(llmshare.INFLIGHT, f))))
+                except (OSError, ValueError): marks.append(dict(file=f))
+            return held(), marks
         plan(); time.sleep(0.3)
         code, r, h = ask(tag='inf', max_tokens=1e999)
-        t('a request whose max_tokens is not finite (1e999) is answered, and leaves no marker or lease count behind', code == 200 and until(lambda: held() == (0, 0), 5), (code, held()))
+        cleaned = until(lambda: held() == (0, 0), 5)
+        if not cleaned:
+            import faulthandler; faulthandler.dump_traceback()
+        t('a request whose max_tokens is not finite (1e999) is answered, and leaves no marker or lease count behind', code == 200 and cleaned, (code, held_detail()))
         real_est, admission.estimate = admission.estimate, lambda *a, **k: 1 / 0
         try: code, r, h = ask(tag='broken')
         finally: admission.estimate = real_est
         time.sleep(0.3)
-        t('a request that fails before it is sent (its estimate raises) answers 500 and leaves no marker or lease count', code == 500 and held() == (0, 0), (code, held()))
+        t('a request that fails before it is sent (its estimate raises) answers 500 and leaves no marker or lease count', code == 500 and held() == (0, 0), (code, held_detail()))
         req = urllib.request.Request(url + '/api/v1/models/Unload', data=json.dumps(dict(instance_id=F2, model='other/x')).encode(), headers={'Content-Type': 'application/json'})
         ps_ok, llmshare._ps['ok'] = llmshare._ps['ok'], True
         plan()
@@ -699,6 +738,11 @@ def run(box):
         row_ = rows_logged()[0]
         t("LM Studio's own API, not streamed: its tokens are counted from stats", code == 200 and (row_.get('prompt_tokens'), row_.get('completion_tokens')) == (9, 6),
           (code, row_.get('prompt_tokens'), row_.get('completion_tokens')))
+        plan('large'); was_buffer = gateway.RESPONSE_BUFFER; gateway.RESPONSE_BUFFER = 1000
+        try: code, r, _ = ask(tag='large')
+        finally: gateway.RESPONSE_BUFFER = was_buffer
+        t('a non-SSE response beyond the parse buffer streams to the client whole instead of being retained whole in memory',
+          code == 200 and r and len(r['choices'][0]['message']['content']) == 2000, code)
         data, row_ = streamed('anthropic-cut', '/v1/messages')
         t('an Anthropic stream that breaks off ends with an Anthropic error event, no [DONE]; the row says cut; the keeper looks',
           b'event: error' in data and b'"type": "error"' in data and b'api_error' in data and b'[DONE]' not in data and 'truncated' in (row_.get('note') or '') and crashes.WAKE.is_set(),
@@ -718,6 +762,31 @@ def run(box):
         except urllib.error.HTTPError as e: code, err = e.code, json.loads(e.read() or b'{}')
         t('the same refusal on the OpenAI path keeps the shape programs already read', code == 503 and isinstance(err.get('error'), str), (code, err))
         rows[:] = saved
+        drained_budget = until(lambda: gateway._body_budget['n'] == 0, 5)
+        t('every completed or disconnected request releases its decoded-body reservation', bool(drained_budget), gateway._body_budget['n'])
+        if not drained_budget:
+            with gateway._body_budget['lock']: gateway._body_budget['n'] = 0
+        handler = object.__new__(gateway.Door); handler._reserved = 0
+        was_budget = gateway.BODY_BUDGET; gateway.BODY_BUDGET = 100
+        try:
+            handler._reserve_body(60)
+            try: handler._reserve_body(50); limited = False
+            except gateway.InputError as e: limited = e.status == 429
+            handler._release_body()
+            t('decoded request bodies have a worker-wide memory budget, released after the request', limited and gateway._body_budget['n'] == 0)
+        finally:
+            handler._release_body(); gateway.BODY_BUDGET = was_budget
+        a, b = socket.socketpair(); b.settimeout(2)
+        was_connections = gateway.MAX_CONNECTIONS; gateway.MAX_CONNECTIONS = 0
+        with gateway._conns['lock']: was_count = gateway._conns['n']; gateway._conns['n'] = 1
+        try:
+            allowed = door.verify_request(a, ('127.0.0.1', 12345)); answer = b.recv(1024)
+            t('the connection limit is an active 503 with Retry-After, not just a listen backlog',
+              not allowed and answer.startswith(b'HTTP/1.0 503') and b'Retry-After: 5' in answer, answer[:100])
+        finally:
+            gateway.MAX_CONNECTIONS = was_connections
+            with gateway._conns['lock']: gateway._conns['n'] = was_count
+            a.close(); b.close()
         st_ = llmshare.waiting_here()
         t('nobody waits once the queue is empty', st_ == dict(people=0, others=0), st_)
 

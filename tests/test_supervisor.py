@@ -7,7 +7,8 @@ worker killed (only its own connections), a shared-state protocol change (no ove
 the one-time migration from a gateway that predates releases (the last release before them, from git), and its revert.
 Nothing real is loaded, and nothing touches this Mac's launchd. `localmodels check` runs it; so can you: python3 tests/test_supervisor.py
 """
-import json, os, plistlib, shutil, signal, socket, stat, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+import errno, json, os, plistlib, shutil, signal, socket, stat, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOX = tempfile.mkdtemp(prefix='lms-')                     # short: the control socket's path must fit 104 bytes
@@ -106,8 +107,38 @@ def main():
     return 0 if all(ok) else 1
 
 
+def unresponsive_worker_unit():
+    """A worker that never reads its lifeline gets one replacement and one fixed kill deadline, not endless handoffs."""
+    s = SUP.Supervisor()
+    w = SUP.Worker(987654, 1, None)
+    w.role, w.accepting = 'serving', True
+    w.progress_at = time.time() - SUP.WEDGED - 1
+    s.workers[w.pid] = w
+    with patch.object(s, 'handoff') as handoff, patch.object(s, 'running', return_value=True), patch.object(SUP.os, 'kill') as kill:
+        s.tick()
+        first_at = w.wedged_at
+        w.progress_at = time.time() - SUP.WEDGED - 1
+        s.tick()
+        t('an unresponsive worker keeps its original wedge deadline instead of starting another handoff',
+          handoff.call_count == 1 and w.wedged_at == first_at, (handoff.call_count, first_at, w.wedged_at))
+        w.wedged_at = time.time() - SUP.WEDGED_KILL - 1
+        s.tick()
+        t('the unresponsive worker is killed after that deadline even while still marked serving', kill.call_args.args == (w.pid, signal.SIGKILL), kill.call_args)
+
+
+def ipv6_adoption_unit():
+    """An IPv6 address held by a worker being adopted is a retryable state, not an immediate recorded gateway error."""
+    s = SUP.Supervisor()
+    conflict = OSError(errno.EADDRINUSE, 'Address already in use')
+    with patch.object(SUP, 'bind_main', side_effect=[object(), conflict]), patch.object(SUP, '_error') as recorded:
+        t('IPv6 EADDRINUSE during adoption is retained for retry without recording an error',
+          s.bind_listeners() and s.v6_error and s.v6_retry_at and not recorded.called, s.v6_error)
+
+
 def run(procs):
     SUP.SHARED, SUP.RUN = STATE, os.path.join(STATE, 'run')
+    unresponsive_worker_unit()
+    ipv6_adoption_unit()
     up = H.http.server.ThreadingHTTPServer(('127.0.0.1', 0), H.Fake); threading.Thread(target=up.serve_forever, daemon=True).start()
     ps = os.path.join(BOX, 'ps.json')
     json.dump([dict(identifier=i, modelKey=H.F, status='idle', sizeBytes=2**30, contextLength=65536, parallel=4, type='llm') for i in (H.F, H.F + ':2')], open(ps, 'w'))
@@ -245,7 +276,7 @@ def run(procs):
 
         def sample():
             while not stop.is_set():
-                seen.append(len([r_ for r_ in SUP.registry() if r_.get('role') in ('serving', 'draining')])); time.sleep(0.05)
+                seen.append(len([r_ for r_ in SUP.registry() if r_.get('role') == 'serving'])); time.sleep(0.05)
         sm = threading.Thread(target=sample); sm.start()
         with H.Hammer(PORT) as hm: r = H.call(STATE, 'deploy', release=os.path.basename(r8), wait=20)
         stop.set(); sm.join()
@@ -266,7 +297,7 @@ def run(procs):
         fo = H.wait_for(lambda: (deploy.supervisor_state() or {}).get('failopen'), TIMINGS['FAILOPEN_AFTER'] + 25)
         try: H.health(PORT, timeout=2); refused = False
         except (urllib.error.URLError, ConnectionError, OSError): refused = True
-        t('after FAILOPEN_AFTER with no worker: the listeners close, so clients fall back to LM Studio', fo and refused, (fo, tail()))
+        t('after FAILOPEN_AFTER with no worker: listeners close, so llmshare.post clients fall back to LM Studio', fo and refused, (fo, tail()))
         os.remove(hub); os.symlink(os.path.relpath(r4, STATE), hub)
         s_ = json.load(open(sj)); s_['current'] = os.path.basename(r4); json.dump(s_, open(sj, 'w'))
         ld('bootout', 'gui/0/x'); ld('bootstrap', 'gui/0', cli.PLIST); procs.append(ld.job)

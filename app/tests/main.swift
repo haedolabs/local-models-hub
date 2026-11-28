@@ -96,6 +96,15 @@ func manifest(_ extra: String = "") -> Data {
 let ex = readExtension(manifest())
 t("a sound manifest is read", ex != nil && ex!.label == "Example Tool — First Project" && ex!.origin == "http://localhost:9411" && ex!.verbs == ["start", "restart"], "\(String(describing: ex))")
 t("...its token header and command as given", ex?.tokenHeader == "X-Example-Token" && ex?.command == ["/usr/bin/true", "example"] && ex?.env == ["EXAMPLE_PROJECT": "/tmp/first"])
+let tokenPath = NSTemporaryDirectory() + "localmodels-menu-token-\(ProcessInfo.processInfo.processIdentifier)"
+_ = FileManager.default.createFile(atPath: tokenPath, contents: Data("test".utf8))
+try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tokenPath)
+var tokenManifest = (try! JSONSerialization.jsonObject(with: manifest())) as! [String: Any]
+tokenManifest["token"] = tokenPath
+t("a token file readable by others is refused", readManifest(tokenManifest) == nil)
+try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenPath)
+t("a token file with mode 0600 is accepted", readManifest(tokenManifest) != nil)
+try? FileManager.default.removeItem(atPath: tokenPath)
 t("refused: another protocol version", readExtension(Data(#"{"extension": 2, "id": "a.b", "name": "A", "menu": "http://localhost:1/m"}"#.utf8)) == nil)
 t("refused: a menu on another machine", readExtension(Data(#"{"extension": 1, "id": "a.b", "name": "A", "menu": "http://example.com/m"}"#.utf8)) == nil)
 t("refused: an id with capitals", readExtension(Data(#"{"extension": 1, "id": "A.b", "name": "A", "menu": "http://localhost:1/m"}"#.utf8)) == nil)

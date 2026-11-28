@@ -76,6 +76,13 @@ def _save(plan):
 
 
 def declare(project, run, phases=None, end=False, now=None):
+    """Serialize each run's read/modify/write transaction across gateway workers and CLI processes."""
+    path = _plan_path(project, run)
+    with llmshare.flocked(path + '.lock'):
+        return _declare(project, run, phases, end, now)
+
+
+def _declare(project, run, phases=None, end=False, now=None):
     """Write or update a run's plan: phases matched by name (items, approx, done updated; an items of None forgets the
     size), new ones appended in the order given. end closes the run. A run declared again after it ended starts afresh.
     -> the plan. ValueError, with the reason, for a body the hub cannot take."""

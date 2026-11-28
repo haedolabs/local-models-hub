@@ -133,8 +133,15 @@ def test_units(box):
       peers.on_link('192.168.213.1', out)[0] is None and 'nothing is sent' in peers.on_link('192.168.213.1', out)[1], peers.on_link('192.168.213.1', out))
     t('the link listener is bound to one address of this Mac: an unspecified address (every interface) or a name is refused',
       peers.serve_problem('0.0.0.0') and peers.serve_problem('::') and peers.serve_problem('mac.local') and peers.serve_problem('192.168.213.1') is None)
+    t('a peer listener on a scoped global IPv6 address is refused as outside the direct-link boundary', peers.serve_problem('2001:db8::1%en0'))
     t('a loopback peer (a sandbox) is on lo0; an IPv6 link-local address names its interface',
       peers.on_link('127.0.0.1', ifc)[0] == 'lo0' and peers.on_link('fe80::2%bridge0', ifc)[0] == 'bridge0')
+    t('a scoped global IPv6 address is not a direct link: no interface is selected and nothing may be sent',
+      peers.on_link('2001:db8::2%en0', ifc)[0] is None and 'nothing is sent' in peers.on_link('2001:db8::2%en0', ifc)[1], peers.on_link('2001:db8::2%en0', ifc))
+    t('a link-local zone must name an interface that has a link-local address here', peers.on_link('fe80::2%en0', ifc)[0] is None)
+    with patch.object(peers.subprocess, 'run') as run:
+        t('an SSH destination that could be parsed as an option is refused before a subprocess runs',
+          peers.remote('-oProxyCommand=bad', 'true')[0] == 255 and not run.called)
     for fault in (patch.object(peers, 'interface_of', return_value=None), patch.object(peers, 'bind_interface', side_effect=OSError('interface option failed'))):
         with fault, patch.object(socket.socket, 'listen') as listen:
             try: srv = gateway.link_server('127.0.0.1', 0)
@@ -179,10 +186,25 @@ def test_units(box):
     peers.LMSTUDIO_HOME = home_was
     t("a family's fingerprint: its variant, size, format and a digest of its definition", fp['variant'] == 'test/family@8bit' and fp['bytes'] == 1000 and fp['definition'], fp)
 
+    unsafe = os.path.join(box, 'unsafe-model')
+    definition = os.path.join(unsafe, 'hub', 'models', 'test', 'family'); os.makedirs(definition)
+    Path(definition, 'manifest.json').write_text(json.dumps(dict(dependencies=[dict(sources=[dict(type='huggingface', user='..', repo='outside')])])))
+    os.makedirs(os.path.join(unsafe, 'models'))
+    home_was = peers.LMSTUDIO_HOME; peers.LMSTUDIO_HOME = unsafe
+    try:
+        try: peers.copy_plan(F)
+        except ValueError as e: refused = 'unsafe weights source' in str(e)
+        else: refused = False
+        t('copy-model refuses a manifest whose source components could escape the downloads folder', refused)
+    finally: peers.LMSTUDIO_HOME = home_was
+
     print('peers: how many a front may send to a peer, from what the peer says')
     fam = dict(slots=4, busy=3, answering={'front': 1})
     t('4 slots, 3 busy of which 1 from this Mac: this Mac may have 2 in flight there', peers.capacity_for(fam, 'front') == 2)
     t('4 slots, all busy with its own work: none', peers.capacity_for(dict(slots=4, busy=4, answering={}), 'front') == 0)
+    draining = dict(slots=4, busy=2, answering={'front': 3}, answering_usable={'front': 1})
+    t('requests finishing on draining copies do not inflate the front\'s allowance on the usable copies',
+      peers.capacity_for(draining, 'front') == 3, peers.capacity_for(draining, 'front'))
     t('a garbled report counts as none', peers.capacity_for(dict(slots='x'), 'front') == 0 and peers.capacity_for(None, 'front') == 0)
 
 
@@ -219,7 +241,13 @@ def test_keeper(box):
     with crashes._state() as st: st['down'][F]['next_try'] = 0
     calls.clear(); models.keep()
     t('the guardrail setting changed: one load is tried', len([c for c in calls if c[0] == 'load']) == 1, calls)
-    models._lms = lambda *a, **k: (calls.append(a), (True, 'loaded'))[1]
+    loaded_now = {'ok': False}
+    def successful_load(*a, **k):
+        calls.append(a)
+        if a and a[0] == 'load': loaded_now['ok'] = True
+        return True, 'loaded'
+    models._lms = successful_load
+    L.loaded = lambda fresh=False, force=False: [dict(id=F, key=F, state='IDLE', size='1 GB', context=4096, parallel=2)] if loaded_now['ok'] else []
     with crashes._state() as st: st['down'][F]['next_try'] = 0
     cond['v'] = (3.0, 0); calls.clear(); models.keep()
     t('a load that works clears the refusal', crashes.load_blocked(F, cond['v']) is None and crashes.reload_proven(F), crashes._read(fresh=True).get('loads'))
@@ -340,7 +368,7 @@ def test_commands(box):
         tok = open(peers.TOKEN_FILE).read().strip()
         t('peer add writes the peer into the settings, beside what was there', code == 0 and conf.get('peers') == {'macbook': {'url': f'http://192.168.213.2:{llmshare.HUB_PORT}'}} and F in conf['families'], conf)
         t('...and makes the token: 64 hex characters, mode 0600', len(tok) == 64 and os.stat(peers.TOKEN_FILE).st_mode & 0o777 == 0o600, oct(os.stat(peers.TOKEN_FILE).st_mode))
-        t('...and never prints it: the next steps copy it over SSH from its file', tok not in out and 'ssh <user>@192.168.213.2' in out and peers.TOKEN_FILE in out, out[-300:])
+        t('...and never prints it: the next steps copy it over SSH from its file', tok not in out and '<user>@192.168.213.2' in out and peers.TOKEN_FILE in out, out[-300:])
         code, out2 = run('add', 'macbook', '192.168.213.2')
         t('a second add keeps the token', open(peers.TOKEN_FILE).read().strip() == tok and 'existing' in out2)
         t('a peer name with a space is refused', run('add', 'mac book', '192.168.213.3')[0] == 2)

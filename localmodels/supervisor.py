@@ -273,7 +273,12 @@ class Supervisor:
         for key, six in (('v4', False), ('v6', True)):
             try: self.listeners[key] = bind_main(six); self.meta[key] = dict(family='inet6' if six else 'inet', addr=['::1' if six else '127.0.0.1', PORT], link=False)
             except OSError as e:
-                if e.errno != errno.EADDRINUSE and six: self.v6_error, self.v6_retry_at = str(e), now() + 30; _error('listener [::1]', e); continue
+                if six:
+                    # EADDRINUSE can be a worker about to be adopted, or an unrelated persistent holder. Record and retry
+                    # either way; adoption clears it when the worker's listener arrives.
+                    self.v6_error, self.v6_retry_at = str(e), now() + 30
+                    if e.errno != errno.EADDRINUSE: _error('listener [::1]', e)
+                    continue
                 if e.errno != errno.EADDRINUSE: _error(f'listener {key}', e); return False
         if 'v4' in self.listeners: return True
         end = now() + (10 if adopting else 120)
@@ -397,6 +402,7 @@ class Supervisor:
             self.advance()
         elif op == 'progress':
             w.progress, w.progress_at = dict(m), now()
+            w.wedged_at = None                           # a live progress message proves the control loop recovered
             if w.internal0 is None and w.role == 'serving': w.internal0 = int(m.get('internal') or 0)
         elif op == 'draining': w.role, w.accepting = 'draining', False
         elif op == 'bye': w.role = 'gone'
@@ -461,6 +467,7 @@ class Supervisor:
                 if old is not None: old.close()
                 self.listeners[key] = s
                 self.meta[key] = {k: item.get(k) for k in ('family', 'addr', 'link', 'iface', 'hosts')}
+                if key == 'v6': self.v6_error = None
                 got.append(key)
             except (OSError, ValueError) as e:
                 _error('hold: a listener copy', e)
@@ -705,15 +712,18 @@ class Supervisor:
             try:
                 self.listeners['v6'] = bind_main(True); self.meta['v6'] = dict(family='inet6', addr=['::1', PORT], link=False); self.v6_error = None
                 log('listener [::1] bound: a same-release handoff gives it to the workers'); self.handoff(None, why='listener added')
-            except OSError as e: self.v6_error, self.v6_retry_at = str(e), t + 30
+            except OSError as e:
+                self.v6_error, self.v6_retry_at = str(e), t + 30
+                _error('listener [::1]', e)                  # still unavailable on the delayed retry: a real listener problem
         for w in list(self.workers.values()):
             if getattr(w, 'kill_at', None) and t > w.kill_at and w.proc is not None and w.proc.poll() is None:
                 try: w.proc.kill()
                 except OSError: pass
-            if w.role == 'serving' and t - w.progress_at > WEDGED and not self.deploy and w.accepting:
+            if w.role == 'serving' and t - w.progress_at > WEDGED and w.accepting and not getattr(w, 'wedged_at', None):
                 _error('wedged worker', words=f'gen {w.gen} (pid {w.pid}): no progress for {WEDGED} s; handing off')
                 w.progress_at = t; w.wedged_at = t
-                self.handoff(None, why='wedged')
+                if not self.deploy: self.handoff(None, why='wedged')
+            # The original deadline stands across the handoff. Repeated deploys must not make an unresponsive worker immortal.
             if getattr(w, 'wedged_at', None) and w.role == 'serving' and t - w.wedged_at > WEDGED_KILL:
                 _error('wedged worker', words=f'gen {w.gen} (pid {w.pid}) never drained: SIGKILL')
                 try: os.kill(w.pid, signal.SIGKILL)
@@ -752,7 +762,9 @@ class Supervisor:
         """The main listeners again, after fail-open closed them (one try each)."""
         for key, six in (('v4', False), ('v6', True)):
             if key in self.listeners: continue
-            try: self.listeners[key] = bind_main(six); self.meta[key] = dict(family='inet6' if six else 'inet', addr=['::1' if six else '127.0.0.1', PORT], link=False)
+            try:
+                self.listeners[key] = bind_main(six); self.meta[key] = dict(family='inet6' if six else 'inet', addr=['::1' if six else '127.0.0.1', PORT], link=False)
+                if six: self.v6_error = None
             except OSError as e: _error(f'listener {key}: bind again', e)
         return 'v4' in self.listeners
 

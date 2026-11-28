@@ -142,7 +142,8 @@ def guide(section=None):
         now = next((p for p in parts if p.startswith('## Now')), parts[0])
         return dict(ok=True, now=now.strip(), sections=[p.split('\n', 1)[0][3:] for p in parts if p.startswith('## ')])
     hit = [p for p in parts if p.startswith('## ') and section.lower() in p.split('\n', 1)[0].lower()]
-    return dict(ok=True, text='\n\n'.join(hit).strip()[:12000]) if hit else dict(ok=False, error=f'no section like {section!r}')
+    # A section is the operational contract; never silently cut off its later recovery or peer-safety steps.
+    return dict(ok=True, text='\n\n'.join(hit).strip()) if hit else dict(ok=False, error=f'no section like {section!r}')
 
 
 def _inside(p, d):

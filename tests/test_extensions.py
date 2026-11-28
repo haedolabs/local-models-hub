@@ -86,6 +86,11 @@ for name, m, word in [('another protocol version', manifest(extension=2), '"exte
                       ('an env with a number', manifest(run={'command': ['/usr/bin/true'], 'env': {'N': 1}, 'verbs': ['start']}), '"run.env"')]:
     probs = ex.validate(m)
     t(f'refused: {name}', any(word in x for x in probs), probs)
+token_path = os.path.join(os.environ['LOCALMODELS_STATE'], 'page.token')
+open(token_path, 'w').write('not-a-real-token'); os.chmod(token_path, 0o644)
+t('a token file readable by others is refused', any('0600' in x for x in ex.validate(manifest(token=token_path))))
+os.chmod(token_path, 0o600)
+t('a token file with mode 0600 is accepted', ex.validate(manifest(token=token_path)) == [])
 
 try: ex.register(manifest(menu='http://example.com/x')); t('register refuses an unsound manifest', False)
 except ValueError: t('register refuses an unsound manifest, and writes nothing', not os.path.exists(ex.path('example.first')))

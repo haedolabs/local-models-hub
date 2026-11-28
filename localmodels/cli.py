@@ -116,7 +116,7 @@ _HOME_SHOWN = '~' + HOME[len(os.path.expanduser('~')):] if HOME.startswith(os.pa
 SIGNPOST = (f"Local models on this Mac (LM Studio) are shared through the local-models hub: its rules live in {_HOME_SHOWN}/GUIDE.md "
             f"(or the local-models tools' guide). Send requests to {llmshare.HUB}/v1, never directly to LM Studio's port 1234. "
             "<!-- local-models hub signpost -->")
-TESTS = ('test_crashes.py', 'test_rules.py', 'test_gateway.py', 'test_agent.py', 'test_batches.py', 'test_peers.py', 'test_extensions.py', 'test_code.py', 'test_handoff.py', 'test_supervisor.py')
+TESTS = ('test_crashes.py', 'test_rules.py', 'test_mutations.py', 'test_gateway.py', 'test_agent.py', 'test_batches.py', 'test_peers.py', 'test_extensions.py', 'test_code.py', 'test_handoff.py', 'test_supervisor.py')
 
 
 def ago(t): return time.strftime('%H:%M', time.localtime(t))
@@ -325,23 +325,22 @@ def peer_lines(door_up=True):
 
 
 def edit_settings(change):
-    """Change this Mac's settings file (models.json) in place; the door rereads it as it changes. -> words or None."""
-    src = llmshare.MODELS if os.path.exists(llmshare.MODELS) else llmshare.MODELS_DEFAULT
-    try: d = json.load(open(src))
-    except (OSError, ValueError) as e: return f'settings not readable: {src} ({type(e).__name__}: {e})'
-    change(d)
-    os.makedirs(os.path.dirname(llmshare.MODELS), exist_ok=True)
-    tmp = llmshare.MODELS + '.tmp'
-    with open(tmp, 'w') as f: json.dump(d, f, indent=1); f.write('\n')
-    os.replace(tmp, llmshare.MODELS)
-    return None
+    """One locked read/modify/write transaction; the gateway rereads the completed file."""
+    with llmshare.flocked(llmshare.MODELS + '.lock'):
+        src = llmshare.MODELS if os.path.exists(llmshare.MODELS) else llmshare.MODELS_DEFAULT
+        try: d = json.load(open(src))
+        except (OSError, ValueError) as e: return f'settings not readable: {src} ({type(e).__name__}: {e})'
+        change(d)
+        os.makedirs(os.path.dirname(llmshare.MODELS), exist_ok=True)
+        llmshare._write(llmshare.MODELS, d)
+        return None
 
 
 def token_copy(peer_ssh='<user>@<the other Mac>'):
     """The command that copies peer-token to another host over SSH (the token is never printed)."""
     from . import peers
     rel = os.path.relpath(peers.TOKEN_FILE, os.path.expanduser('~'))
-    return f"""ssh {peer_ssh} 'mkdir -p "{os.path.dirname(rel)}" && umask 077 && cat > "{rel}" && chmod 600 "{rel}"' < "{peers.TOKEN_FILE}\""""
+    return f"""ssh {shlex.quote(peer_ssh)} 'mkdir -p "{os.path.dirname(rel)}" && umask 077 && cat > "{rel}" && chmod 600 "{rel}"' < "{peers.TOKEN_FILE}\""""
 
 
 def token_words():
@@ -601,7 +600,7 @@ def swapcheck(models):
 def use(a):
     from . import models
     if not a or a[0].startswith('-'): print('localmodels use <model key or id> [--context N] [--parallel N] [--dry]'); return 2
-    code, words = models.use(a[0], opt(a, '--identifier'), opt(a, '--context'), opt(a, '--parallel'), dry='--dry' in a)
+    code, words = models.use(a[0], None, opt(a, '--context'), opt(a, '--parallel'), dry='--dry' in a)
     print(words)
     return code
 
@@ -939,13 +938,18 @@ def install(wait=90, plugin=False, dry=False, no_claude=False, force=False):
 
 def uninstall():
     if sandboxed(): print(f'nothing uninstalled: {sandboxed()}'); return 2
+    if not quiet():
+        print(f'gateway busy ({len(llmshare.inflight())} requests in flight for 90 s): nothing uninstalled; retry when idle')
+        return 3
     print('0. ' + set_hook(False))                         # first: a hook left pointing at removed code would refuse every prompt
     uid = f'gui/{os.getuid()}'
-    for label in (LABEL,) + OLD_LABELS:
-        if _loaded(label): _launchctl('bootout', f'{uid}/{label}')
-        try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{label}.plist'))
-        except OSError: pass
-    n = sweep_workers()                                    # adopted workers are not launchd's children
+    with llmshare.swapping(wait=120) as got:
+        if not got: print('a swap or reload is under way: nothing uninstalled; retry in a moment'); return 3
+        for label in (LABEL,) + OLD_LABELS:
+            if _loaded(label): _launchctl('bootout', f'{uid}/{label}')
+            try: os.remove(os.path.expanduser(f'~/Library/LaunchAgents/{label}.plist'))
+            except OSError: pass
+        n = sweep_workers()                                # adopted workers are not launchd's children
     if os.path.islink(INSTALLED): os.remove(INSTALLED)
     else: shutil.rmtree(INSTALLED, ignore_errors=True)
     for d in ('releases', 'run', 'peer-slots'): shutil.rmtree(os.path.join(llmshare.SHARED, d), ignore_errors=True)
@@ -1173,6 +1177,22 @@ def maintenance_cmd(a):
 
 
 # ---------------------------------------------------------------- releases and the supervisor
+def release_sound(dest, digest):
+    """Whether an existing release still has exactly the deployed content and metadata its digest names."""
+    from . import dash, supervisor
+    if os.path.islink(dest): return False
+    try:
+        info = json.load(open(os.path.join(dest, 'RELEASE.json')))
+        if info.get('digest') != digest or dash.deploy_digest(dest) != digest: return False
+        if info.get('supervisor') != supervisor.supervisor_digest(dest): return False
+        for rel, field, default in (('localmodels/llmshare.py', 'STATE_PROTOCOL', llmshare.STATE_PROTOCOL),
+                                    ('localmodels/supervisor.py', 'CHANNEL', supervisor.CHANNEL)):
+            m = re.search(rf'^{field}\s*=\s*(\d+)', open(os.path.join(dest, rel)).read(), re.M)
+            if info.get(field.lower()) != (int(m.group(1)) if m else default): return False
+        return not any(os.path.islink(os.path.join(dest, rel)) for rel in dash.deploy_files(dest))
+    except (OSError, ValueError, TypeError, AttributeError): return False
+
+
 def build_release(root=None, shared=None):
     """releases/<D>: an immutable copy of the files a gateway runs (dash.deploy_files) and its RELEASE.json {digest,
     version, state_protocol, channel, supervisor, built}, built in releases/.tmp-<D>-<pid>/ and renamed into place; an
@@ -1181,7 +1201,10 @@ def build_release(root=None, shared=None):
     root, shared = root or HOME, shared or llmshare.SHARED
     d = dash.deploy_digest(root)
     dest = os.path.join(shared, 'releases', d)
-    if os.path.isfile(os.path.join(dest, 'RELEASE.json')): return dest
+    if os.path.isfile(os.path.join(dest, 'RELEASE.json')):
+        if not release_sound(dest, d):
+            raise RuntimeError(f'existing release {d} differs from its contents or metadata; move it aside and install again')
+        return dest
     tmp = os.path.join(shared, 'releases', f'.tmp-{d}-{os.getpid()}')
     shutil.rmtree(tmp, ignore_errors=True)
     for rel in dash.deploy_files(root):
@@ -1202,6 +1225,7 @@ def build_release(root=None, shared=None):
     except OSError:
         shutil.rmtree(tmp, ignore_errors=True)
         if not os.path.isfile(os.path.join(dest, 'RELEASE.json')): raise          # else another install built it meanwhile
+    if not release_sound(dest, d): raise RuntimeError(f'release {d} failed its final content and metadata check')
     return dest
 
 
@@ -1269,15 +1293,15 @@ def off_cmd(a):
     rows = llmshare.loaded(fresh=True, force=True)
     print('switched off: ' + (f"still listed: {', '.join(r['id'] for r in rows)}" if rows else 'no instance loaded')
           + ('' if off.get('unloaded') else ' (the unload is still pending: the instance manager keeps trying)') + '. Turn on: localmodels on')
-    return 0
+    return 0 if off.get('unloaded') and not rows else 1
 
 
 def on_cmd():
-    from . import models
+    from . import maint, models
     for line in models.switch_on(): print(line)
     rows = llmshare.loaded(fresh=True, force=True)
     print('loaded now: ' + (', '.join(r['id'] for r in rows) or 'nothing') + ' (the instance manager adds the other replicas within 20 s)')
-    return 0
+    return 1 if maint.switched_off() else 0
 
 
 def door(verb, a=()):
@@ -1524,6 +1548,9 @@ def check():
     # A model may have been swapped or switched off while the sandbox suites ran.
     loaded = [r['id'] for r in llmshare.chat_rows(llmshare.loaded(fresh=True)) if r['state'] != 'LOADING']
     busy = sum(llmshare.busy_slots().values())
+    if not loaded and not maint.on():
+        t('a chat model is loaded for client traffic', False,
+          'installed but not serving: choose the configured model and load it with localmodels use <model>, then run check again')
     if loaded and not maint.on() and llmshare.hub_up() and busy < llmshare.at_once():
         step = f'gateway check {os.getpid()}-{time.monotonic_ns()}'
         body = dict(model=loaded[0], messages=[{'role': 'user', 'content': 'Say OK.'}], max_tokens=5)
@@ -1735,8 +1762,8 @@ def _scan_push(repo, tip, held, held_name, remote='origin'):
 
 
 def secret_words(sc):
-    """The secrets check's hits as lines a person acts on."""
-    out = [f'{where}: {text}' for where, text in sc['hits'][:30]]
+    """Actionable locations without copying a detected credential into a terminal, build log, or AI transcript."""
+    out = [f'{where}: ' + (text if ' file name ' in where else '[sensitive text redacted]') for where, text in sc['hits'][:30]]
     if len(sc['hits']) > 30: out.append(f"... and {len(sc['hits']) - 30} more")
     return out + ['a credential stays in the commit that added it, so amend, squash or rebase that commit before it leaves this Mac,',
                   'and revoke the credential if it was ever pushed; a file that runs code on GitHub or on install (RUNS_CODE in',
@@ -1777,7 +1804,7 @@ def prepush(a, stdin=None):
             sc = secret_check(repo, tip=tip, remote=remote)
         except RuntimeError as e: why.append(f'could not read what the push sends: {e}'); continue
         if pc['status'] == 'skipped': why.append(f'private word list unavailable at {PRIVATE_WORDS}: privacy check skipped')
-        why += [f'private word: {w}: {t}' for w, t in pc['hits'][:20]]
+        why += [f'private word: {w}: [private text redacted]' for w, _ in pc['hits'][:20]]
         if sc['hits']: why += secret_words(sc)
     if why:
         print('localmodels pre-push: push stopped', file=sys.stderr)
@@ -1929,7 +1956,7 @@ def release_checks(head):
         print(f'   no private word list at {PRIVATE_WORDS}: not checked (one word or pattern a line, `allow: <pattern>` for what may')
         print('   appear, # for notes); nothing published'); return 1
     elif pc['status'] == 'hits':
-        for where, text in pc['hits'][:30]: print(f'   {where}: {text}')
+        for where, _ in pc['hits'][:30]: print(f'   {where}: [private text redacted]')
         if len(pc['hits']) > 30: print(f"   ... and {len(pc['hits']) - 30} more")
         print('   nothing published. A hit stays in the commit named before it: a later commit does not remove it, so amend,')
         print(f"   squash or rebase that commit (none of these is on origin yet), or add an `allow:` line to {PRIVATE_WORDS}")

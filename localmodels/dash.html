@@ -56,6 +56,12 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-even
 body { font: 13px/1.4 "Libre Franklin", system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; overflow: hidden; }
 .wrap { height: 100vh; display: grid; grid-template-rows: auto auto auto minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; padding: 10px 16px 8px; }
 @media (max-height: 700px), (max-width: 1100px) { body { overflow: auto; } .wrap { height: auto; grid-template-rows: none; } .card { min-height: 220px; } }
+@media (max-width: 700px) {
+  header { grid-template-columns: 1fr; } .h-status, .h-actions { justify-content: flex-start; }
+  .kpis { flex-wrap: wrap; } .kpis > .card { flex: 1 1 45%; }
+  .row.a, .row.b, .row.c { grid-template-columns: 1fr; }
+  .card .body { overflow: auto; } .wrap { padding: 8px; }
+}
 header { display: grid; grid-template-columns: minmax(0, auto) minmax(50%, 1fr); align-items: center; gap: 6px 20px; }   /* name | status, then view | actions: the status keeps half the row, the subtitle gives way first */
 .h-status, .h-actions, .h-view { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink-2); }
 .h-status, .h-actions { justify-content: flex-end; }
@@ -202,7 +208,7 @@ svg text { font: 11px "Libre Franklin", system-ui, -apple-system, "Segoe UI", sa
 @media (prefers-reduced-motion: reduce) { .slot.on::before, .slot.on::after { animation: none; } }
 .copy .st { color: var(--ink-2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .bandpct { display: none; }
-#models-body.tight .band, #models-body.tight .band-end { display: none; }
+#models-body.tight .band, #models-body.tight .band-end, #models-body.tight .ctx-note { display: none; }
 #models-body.tight .bandpct { display: inline; }
 .band { grid-column: 2; display: flex; align-items: center; gap: calc(8px * var(--mk, 1)); color: var(--muted); font-size: 11px; white-space: nowrap; }
 .band.wide { grid-column: 2 / -1; }
@@ -409,7 +415,8 @@ function frame(box, t0, t1, ymax, yfmt) {
   const labels = ticks(ymax).map(v => yfmt ? yfmt(v) : compact(v));
   const W = Math.max(240, box.clientWidth), P = {l: Math.max(28, Math.max(...labels.map(s => s.length)) * 6.4 + 10), r: 58, t: 8, b: 20};
   const height = Math.max(50, box.clientHeight - P.t - P.b - 2);
-  const svg = sv('svg', {width: W, height: height + P.t + P.b, role: 'img'});
+  const title = box.closest('.card')?.querySelector('h2')?.textContent || 'chart';
+  const svg = sv('svg', {width: W, height: height + P.t + P.b, role: 'img', 'aria-label': `${title} over the selected time range; a table view is available`});
   const x = t => P.l + (t - t0) / (t1 - t0) * (W - P.l - P.r);
   const y = v => P.t + height - (v / ymax) * height;
   for (const v of ticks(ymax)) {
@@ -424,7 +431,8 @@ function frame(box, t0, t1, ymax, yfmt) {
 }
 function crosshair(f, xs, onAt) {
   const line = sv('line', {y1: f.P.t, y2: f.P.t + f.height, stroke: 'var(--axis)', 'stroke-width': 1, visibility: 'hidden'});
-  const hit = sv('rect', {x: f.P.l, y: f.P.t, width: f.W - f.P.l - f.P.r, height: f.height, fill: 'transparent', tabindex: 0});
+  const hit = sv('rect', {x: f.P.l, y: f.P.t, width: f.W - f.P.l - f.P.r, height: f.height, fill: 'transparent', tabindex: 0,
+                           role: 'button', 'aria-label': 'Show the latest chart values'});
   const at = ev => {
     const r = f.svg.getBoundingClientRect(), px = ev.clientX - r.left;
     let i = 0, best = Infinity;
@@ -762,7 +770,7 @@ function tipCut() {      // a tile line too long for its column ends in an ellip
 // a short models card (alerts above, several peers): each copy's band folds into its state line rather than being cut off
 const CURRENT = 4;            // seconds: one pass of light along an active module (the CSS animations' duration)
 function slotEl(p, j) {        // a slot as a memory module; an active one carries a current whose phase follows the clock, staggered by slot
-  return el('span', {class: p ? 'slot on' : 'slot', tabindex: 0,
+  return el('span', {class: p ? 'slot on' : 'slot', tabindex: 0, role: 'img', 'aria-label': p ? `slot used by ${p}` : 'free model slot',
     style: p ? `--board:${color(p)};--d:${(-((Date.now() / 1000 + j * 0.35) % CURRENT)).toFixed(2)}s` : ''});
 }
 function fitModels() {   // any number of models: rows grow to fill the card (never cutting a line), else fold bands, then rows, then shrink
@@ -816,13 +824,17 @@ function renderAlerts() {
   }
   for (const w of (S.link && S.link.problems) || []) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Peer settings: '), w)));
   if (S.settings_error) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Settings file not taken: '), S.settings_error)));
+  if (S.switching && S.switching.phase === 'done' && S.switching.ok === false) out.push(el('div', {class: 'alert critical', role: 'status'},
+    el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Switch-on failed; local models remain off. '), S.switching.words || 'Run localmodels on to retry.')));
   if (S.write_problem) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'), el('span', {}, el('b', {}, 'Records not written: '), S.write_problem)));
   if (S.errors) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
     el('span', {}, el('b', {}, `${S.errors.count} error${S.errors.count === 1 ? '' : 's'} recorded in the last ${S.errors.minutes} min. `),
       S.errors.last ? `Last: ${S.errors.last.where}: ${S.errors.last.error} ` : '', el('span', {class: 'ink2'}, '(details: '), el('code', {}, 'localmodels errors --trace'), el('span', {class: 'ink2'}, ')'))));
   for (const [where, words] of Object.entries(failing)) out.push(el('div', {class: 'alert warning', role: 'status'}, el('span', {class: 'ico', 'aria-hidden': 'true'}, '!'),
     el('span', {}, el('b', {}, `Display error in ${where}: `), words, el('span', {class: 'ink2'}, ' (the rest of the page is current; recorded for localmodels errors)'))));
-  $('alerts').replaceChildren(...out);
+  const key = out.map(e => e.className + '|' + e.textContent).join('\n');
+  const box = $('alerts');
+  if (box.dataset.key !== key) { box.replaceChildren(...out); box.dataset.key = key; }   // unchanged alerts are not re-announced
 }
 
 function chip(id, ok, yes, no) {
@@ -872,8 +884,8 @@ function renderModels() {
       const state = c.stalled || stallJob ? el('span', {class: 'badge down', title: ((S.crashes && S.crashes.stalled) || []).filter(x => x.copy === c.id).map(x => x.words).join('\n') || (stallJob ? S.recycle.words : '')}, c.recycling === 'reloading' ? 'stalled: reloading' : 'stalled: out of routing')
         : c.down ? el('span', {class: 'badge down'}, 'down: reloading') : c.recycling ? el('span', {class: 'badge cycle'}, c.recycling === 'draining' ? 'draining for recycle' : 'recycling')
         : el('span', {title: c.ctx && c.ctx.budget ? `context in flight ${full(c.ctx.load)} of a budget of ${full(c.ctx.budget)} tokens (admission by context size)` : ''},
-            (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`
-            + (c.ctx && c.ctx.budget && c.busy ? ` · ${compact(c.ctx.load)}/${compact(c.ctx.budget)} context` : ''),
+            (c.busy ? 'generating' : c.state === 'IDLE' ? 'idle' : c.state.toLowerCase()) + ` · ${c.busy}/${c.parallel} active`,
+            c.ctx && c.ctx.budget && c.busy ? el('span', {class: 'ctx-note'}, ` · ${compact(c.ctx.load)}/${compact(c.ctx.budget)} context`) : '',
             el('span', {class: 'bandpct'}, c.served && c.served.band ? ` · ${Math.round((c.served.share || 0) * 100)}% of recycle threshold` : ''));
       const sv_ = c.served, parts = [el('span', {class: 'nm'}, f.copies.length > 1 ? `replica ${k + 1}` : 'slots'), slots, el('span', {class: 'st'}, state)];
       if (sv_) {
@@ -1266,6 +1278,7 @@ $('ext-chips').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-ext]'); if (!b || b.disabled) return;
   const x = EXT.find(e => e.id === b.dataset.ext); if (!x) return;
   const tab = x.open ? window.open('', '_blank') : null;   // opened now, while the click counts, so no blocker stops it
+  if (tab) tab.opener = null;
   if (tab) try {                                           // in the page's own colors until the extension's page replaces it
     const css = getComputedStyle(document.documentElement), tok = n => css.getPropertyValue(n).trim(), words = `Starting ${x.name.replace(/[<&]/g, '')}…`;
     tab.document.write(`<!doctype html><meta charset="utf-8"><title>${words}</title><body style="margin:0;padding:24px;background:${tok('--plane')};`

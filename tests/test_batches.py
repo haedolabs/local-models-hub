@@ -192,6 +192,43 @@ class Durable(unittest.TestCase):
         self.assertEqual(cli.prune()[0], 1)
         self.assertFalse(Path(folder).exists())
 
+    def test_runner_budget_and_backoff(self):
+        folders = []
+        for parallel in (3, 2, 1):
+            _, folder = self.submit([item(len(folders), '/v1/embeddings')], parallel=parallel)
+            folders.append(folder)
+        processes = []
+
+        class Child:
+            def poll(self): return None
+
+        def spawn(*args, **kwargs):
+            processes.append(args[0][-1]); return Child()
+
+        stop = threading.Event(); threading.Thread(target=lambda: (time.sleep(0.1), stop.set())).start()
+        with patch.object(batches, 'queued', side_effect=lambda: iter(folders)), \
+             patch.object(batches, 'MAX_RUNNERS', 2), patch.object(batches, 'MAX_RUNNER_THREADS', 4), \
+             patch.object(batches.subprocess, 'Popen', side_effect=spawn):
+            batches.recover(stop)
+        self.assertEqual(processes, [folders[0], folders[2]])   # 3 + 1 threads; the parallel=2 job stays queued
+
+        batches._runner_failed(folders[0], -9)
+        state = batches.status(folders[0])
+        self.assertEqual(state['state'], 'waiting')
+        self.assertIn('exited -9', state['reason'])
+        self.assertGreater(state['retry_at'], time.time())
+        first = state['retry_at']; batches._runner_failed(folders[0], -9)
+        self.assertGreater(batches.status(folders[0])['retry_at'], first)
+
+        fingerprint = dict(variant=MODEL + '@8bit', bytes=1024, format='test', definition='abc')
+        peer = dict(name='peer', state='up', batch_inference=1,
+                    families={MODEL: dict(match=True, fingerprint=fingerprint,
+                                          copies=[dict(context=65536, state='IDLE'), dict(context=16384, state='IDLE')])})
+        with patch.object(llmshare, 'loaded', return_value=[]), patch.object(llmshare, 'read_ok', return_value=False), \
+             patch.object(batches.peers, 'view', return_value=[peer]):
+            _, _, context = batches.model_info(MODEL, ['peer'])
+        self.assertEqual(context, 16384)
+
     def test_two_gateways(self):
         for endpoint in batches.ROUTES:
             with self.subTest(endpoint=endpoint): self.interrupt(endpoint, 10000 if LARGE else 64)

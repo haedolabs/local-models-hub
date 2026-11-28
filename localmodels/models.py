@@ -312,16 +312,24 @@ def reset_start():
 
 
 def load(key, ident, context, parallel):
-    """Load one copy with lms; -> (ok, LM Studio's words). What came of it is kept (crashes.load_ok, load_refused)."""
+    """Load one copy with lms and verify the exact instance and parameters in a fresh listing before reporting success."""
     if not (_ok_id(key) and _ok_id(ident)): return False, f'refused: {key!r} / {ident!r} is not a model id'
     f = (llmshare.settings().get('families') or {}).get(llmshare.family(ident))
     if isinstance(f, dict) and f.get('kind') == 'embedding':   # its own settings or LM Studio's defaults, never a chat model's 32,768 and 4
         context, parallel = f.get('context'), f.get('parallel')
     args = ['load', key, '--identifier', ident] + (['-c', str(int(context))] if context else []) + (['--parallel', str(int(parallel))] if parallel else [])
     ok, out = _lms(*args, '-y')
-    if ok: crashes.loaded_now([ident]); crashes.load_ok(llmshare.family(ident))
-    elif refused(out): crashes.load_refused(llmshare.family(ident), refused(out), conditions())
-    return ok, out
+    if not ok:
+        if refused(out): crashes.load_refused(llmshare.family(ident), refused(out), conditions())
+        return False, out
+    rows = llmshare.loaded(fresh=True, force=True)
+    row = next((r for r in rows if r.get('id') == ident and r.get('state') != 'LOADING'), None)
+    if not llmshare.read_ok() or row is None:
+        return False, f'lms load returned success, but {ident} is not confirmed in LM Studio\'s fresh model listing'
+    drift = recycle.drift(row, dict(context=context, parallel=parallel))
+    if drift: return False, f'lms load returned success, but {ident} has {drift}'
+    crashes.loaded_now([ident]); crashes.load_ok(llmshare.family(ident))
+    return True, out
 
 
 def unload(ident):
@@ -335,12 +343,21 @@ def unload(ident):
     try:
         d = json.load(llmshare.urlopen(req, timeout=120))
         if isinstance(d, dict) and d.get('instance_id') == ident: return True, f'{ident} unloaded'
-    except urllib.error.HTTPError as e:                     # 404 model_not_found: the API is there and the instance is not
+        if isinstance(d, dict) and 'Unexpected endpoint or method' in str(d.get('error') or ''):
+            return _lms('unload', ident, timeout=120)                  # the server positively rejected the route without acting
+        return False, f'{ident}: the unload API returned an unexpected response; not retrying an ambiguous mutation'
+    except urllib.error.HTTPError as e:
         try: err = (json.loads(e.read() or b'{}') or {}).get('error')
         except (ValueError, AttributeError): err = None
         if e.code == 404 and isinstance(err, dict) and err.get('type') == 'model_not_found': return False, f'{ident} is not loaded'
-    except (OSError, ValueError): pass                       # no answer, or an LM Studio without this API: the command
-    return _lms('unload', ident, timeout=120)
+        if e.code == 404: return _lms('unload', ident, timeout=120)       # positive evidence that an older server has no such route
+        return False, f'{ident}: unload API returned HTTP {e.code}; not retrying an ambiguous mutation'
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, 'reason', None), ConnectionRefusedError):
+            return _lms('unload', ident, timeout=120)                  # the connection was refused: no request reached the server
+        return False, f'{ident}: unload outcome is unknown ({e}); not retrying an ambiguous mutation'
+    except (OSError, ValueError) as e:
+        return False, f'{ident}: unload outcome is unknown ({type(e).__name__}: {e}); not retrying an ambiguous mutation'
 
 
 def _listed():
@@ -678,6 +695,9 @@ def off_pass(off):
     for those on this Mac's own instances (their in-flight markers, and every slot held on them, a program's own included).
     -> words."""
     did = ['switched off: crash recovery, stalls and the recycle under way cancelled (switching on starts them afresh)'] if crashes.switched_off() else []
+    restoring = maint.switching()
+    if restoring and restoring.get('phase') == 'loading':
+        return did + ['switching on: restoring the families loaded before; unload remains paused']
     if off.get('unloaded'):
         return did + [('switched off, peers only: requests go to the peers' if off.get('peers') else 'switched off')
                       + '; instance manager paused (no loads, reloads, recycles or server starts)']
@@ -706,23 +726,28 @@ def off_pass(off):
 
 
 def switch_on():
-    """Switched on again: skip what LM Studio logged while off (the unloads), clear the off record, then load each family
-    that was loaded when it was switched off (every family in the settings when none was). -> words."""
-    rec = maint.switched_off()
-    if not rec: return ['the local models were not switched off']
-    with llmshare.swapping(wait=120) as got:                 # an unload under way finishes first; then no pass reads the record
-        if not got: return ['a swap or an unload is under way: retry in a moment (localmodels on)']
-        rows = llmshare.loaded(fresh=True, force=True)
-        crashes.after_maintenance(rows)
-        maint.switch_on()
-    fams = list(rec.get('before') or (llmshare.settings().get('families') or {}).keys())
-    maint.on_started([b for b in fams if b not in {r['id'] for r in rows}])
-    did = []
-    try: did = _load_back(fams, {r['id'] for r in rows}, 'switch-off')
-    finally:
-        bad = [w for w in did if 'failed' in w or 'manually' in w or 'not in settings' in w]
-        maint.on_done(not bad, '; '.join(bad) if bad else (lambda n: f"{n} instance{'s' if n != 1 else ''} loaded; the instance manager adds the other replicas")(len(llmshare.loaded(fresh=True))))
-    return ['switched on: requests are admitted and the instance manager resumes'] + did
+    """One cross-process restore at a time. Keep the off record until every first copy loads, so failure stays fail-closed
+    and a later `localmodels on` can retry; clear it only after a successful restore."""
+    with llmshare.flocked(os.path.join(llmshare.RUN, 'switch-on.lock')):
+        rec = maint.switched_off()
+        if not rec: return ['the local models were not switched off']
+        with llmshare.swapping(wait=120) as got:             # an unload under way finishes first; then no pass reads the record
+            if not got: return ['a swap or an unload is under way: retry in a moment (localmodels on)']
+            rows = llmshare.loaded(fresh=True, force=True)
+            crashes.after_maintenance(rows)
+        fams = list(rec.get('before') or (llmshare.settings().get('families') or {}).keys())
+        maint.on_started([b for b in fams if b not in {r['id'] for r in rows}])
+        did = []
+        try: did = _load_back(fams, {r['id'] for r in rows}, 'switch-off')
+        except Exception as e:
+            errors.record('switch on', e)
+            did = [f'switch on failed: {type(e).__name__}: {e}']
+        finally:
+            bad = [w for w in did if 'failed' in w or 'manually' in w or 'not in settings' in w]
+            if not bad: maint.switch_on()
+            maint.on_done(not bad, '; '.join(bad) if bad else (lambda n: f"{n} instance{'s' if n != 1 else ''} loaded; the instance manager adds the other replicas")(len(llmshare.loaded(fresh=True))))
+        return ([f'switch on failed: local models remain switched off; resolve the failure and run localmodels on again'] if bad
+                else ['switched on: requests are admitted and the instance manager resumes']) + did
 
 
 def _again(job, room):
@@ -782,19 +807,20 @@ def _recycle(job, fams):
     return [f"{copy} recycled in {time.time() - t0:.0f} s: {job['why']}" if ok else f'{copy}: reload after recycle failed: {refused(out) or out[-200:]}']
 
 
-def plan(ident, context=None):
-    """What a swap to this model would do: -> (copies wanted, models to unload), from what LM Studio holds now."""
+def plan(ident, context=None, parallel=None):
+    """What a swap to this model would do, including context or slot-count drift: (copies wanted, models to unload)."""
     fams = llmshare.settings().get('families') or {}
     f = fams.get(llmshare.family(ident)) or {}
     want = llmshare.copy_ids(ident, f.get('copies', 1)) if f and llmshare.family(ident) == ident else [ident]
     rows = llmshare.loaded(fresh=True, force=True)
     if f.get('kind') == 'embedding':                        # loading the embedding model unloads nothing else
-        context = context or f.get('context')
+        context, parallel = context or f.get('context'), parallel or f.get('parallel')
         return want, [r['id'] for r in rows if llmshare.family(r['id']) == llmshare.family(ident)
-                      and (r['id'] not in want or (context and r['context'] and r['context'] != int(context)))]
-    context = int(context or f.get('context') or 32768)
+                      and (r['id'] not in want or (context and r['context'] and r['context'] != int(context))
+                           or (parallel and r['parallel'] and r['parallel'] != int(parallel)))]
+    context, parallel = int(context or f.get('context') or 32768), int(parallel or f.get('parallel') or 4)
     drop = [r['id'] for r in llmshare.chat_rows(rows, fams)   # a peer-requested embedding also stays loaded through a chat swap
-            if r['id'] not in want or (r['context'] and r['context'] != context)]
+            if r['id'] not in want or (r['context'] and r['context'] != context) or (r['parallel'] and r['parallel'] != parallel)]
     return want, drop
 
 
@@ -807,7 +833,7 @@ def use(key, ident=None, context=None, parallel=None, dry=False):
     else: context, parallel = int(context or f.get('context') or 32768), int(parallel or f.get('parallel') or 4)
     with llmshare.swapping(wait=120) as got:
         if not got: return 3, 'another swap is under way: try again in a moment'
-        want, drop = plan(ident, context)
+        want, drop = plan(ident, context, parallel)
         if not llmshare.read_ok(): return 3, "LM Studio did not say which models it holds (lms ps failed): not swapping; try again in a moment"
         with llmshare.swap_guard(drop, loading=want) as why:
             if why: return 3, 'not now: ' + '; '.join(why) + '. Try again when it is done.'

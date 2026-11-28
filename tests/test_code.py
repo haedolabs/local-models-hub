@@ -252,6 +252,18 @@ def test_recent_requests(box):
             views = list(pool.map(web.recent, [1, 3, 5, 8]))
         t('concurrent dashboard readers each receive the requested tail across rotation',
           all([r['step'] for r in v] == [f'item {n}' for n in range(7, 7-count, -1)] for v, count in zip(views, [1, 3, 5, 8])))
+        rotating = os.path.join(box, 'rotating.jsonl')
+        def write_many(writer):
+            for n in range(100): llmshare._append(rotating, dict(writer=writer, n=n), roll_at=1000)
+        with ThreadPoolExecutor(4) as pool: list(pool.map(write_many, range(4)))
+        llmshare._append(rotating, dict(writer='last', n=0), roll_at=1000)
+        records = []
+        for path in (rotating + '.1', rotating):
+            try: records += [json.loads(line) for line in open(path) if line.strip()]
+            except OSError: pass
+        ids = [(r['writer'], r['n']) for r in records]
+        t('concurrent rotation leaves whole, unique retained records and preserves a final post-contention write',
+          len(ids) == len(set(ids)) and ('last', 0) in ids, len(records))
 
 
 def test_agent_roots(box):
@@ -408,6 +420,10 @@ def main():
         print('the error record')
         test_record(box)
         test_mcp_stdout(box)
+        peers_guide = mcp_server.guide('Peers')
+        t('the MCP guide returns a whole operational section, with no silent 12,000-character cutoff',
+          peers_guide.get('ok') and len(peers_guide.get('text', '')) > 12000 and 'FileVault' in peers_guide['text']
+          and 'peer remove' in peers_guide['text'], len(peers_guide.get('text', '')))
         print("a project names itself (the name tool)")
         test_name_tool(box)
         print("the local agents read only the session's own project")

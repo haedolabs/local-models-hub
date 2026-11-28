@@ -75,6 +75,11 @@ def validate(m):
     if local(m.get('menu')) and m.get('open') and local(m['open']) and origin(m['open']) != origin(m['menu']):
         p.append('"open" is on another origin than "menu"')
     if m.get('token') is not None and not (isinstance(m['token'], str) and os.path.isabs(m['token'])): p.append('"token" must be an absolute file path')
+    elif m.get('token') is not None:
+        try: mode = os.stat(m['token']).st_mode & 0o777
+        except FileNotFoundError: mode = 0o600             # a not-yet-started extension may create it before its first action
+        except OSError: mode = 0o777
+        if mode != 0o600: p.append('"token" file must be mode 0600')
     if m.get('token_header') is not None and not (isinstance(m['token_header'], str) and HEADER.fullmatch(m['token_header'])):
         p.append('"token_header" must be an X- header name')
     run = m.get('run')
@@ -189,7 +194,10 @@ def fetch_menu(m, timeout=3.0):
     """GET the extension's menu. -> (menu, None) or (None, why not)."""
     if not local(m.get('menu')): return None, 'invalid extension menu URL'
     try:
-        with _menu_opener.open(m['menu'], timeout=timeout) as r: return json.load(r), None
+        with _menu_opener.open(m['menu'], timeout=timeout) as r:
+            data = r.read(4_000_001)
+            if len(data) > 4_000_000: return None, 'extension menu response exceeds 4 MB'
+            return json.loads(data), None
     except (OSError, ValueError) as e: return None, f'{type(e).__name__}: {e}'
 
 

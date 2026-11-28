@@ -178,23 +178,22 @@ def run(g):
 # ---------------------------------------------------------------- setting them (localmodels name)
 def _save(d):
     os.makedirs(os.path.dirname(FILE), exist_ok=True)
-    tmp = f'{FILE}.{os.getpid()}.tmp'
-    with open(tmp, 'w') as f: json.dump(d, f, indent=1, sort_keys=True); f.write('\n')
-    os.replace(tmp, FILE)
+    llmshare._write(FILE, d)
     _cache['mtime'] = None
 
 
 def _edit(key, change):
-    d = json.loads(json.dumps(_load() or {}))
-    ps = d.setdefault('projects', {})
-    v = ps.get(key)
-    e = dict(name=v) if isinstance(v, str) else dict(v) if isinstance(v, dict) else {}
-    change(e)
-    e = {k: x for k, x in e.items() if x not in (None, False, {}, '')}
-    if not e: ps.pop(key, None)
-    elif list(e) == ['name']: ps[key] = e['name']                   # a plain rename stays a plain string
-    else: ps[key] = e
-    _save(d)
+    with llmshare.flocked(FILE + '.lock'):
+        d = json.loads(json.dumps(_load() or {}))
+        ps = d.setdefault('projects', {})
+        v = ps.get(key)
+        e = dict(name=v) if isinstance(v, str) else dict(v) if isinstance(v, dict) else {}
+        change(e)
+        e = {k: x for k, x in e.items() if x not in (None, False, {}, '')}
+        if not e: ps.pop(key, None)
+        elif list(e) == ['name']: ps[key] = e['name']               # a plain rename stays a plain string
+        else: ps[key] = e
+        _save(d)
 
 
 def set_project(as_seen, shown):
@@ -217,8 +216,10 @@ def forget(project_name, as_seen=None):
     """Drop a label (as_seen), or the project's whole entry."""
     key = llmshare.clean(project_name, 120)
     if as_seen is None:
-        d = json.loads(json.dumps(_load() or {}))
-        (d.get('projects') or {}).pop(key, None); _save(d); return
+        with llmshare.flocked(FILE + '.lock'):
+            d = json.loads(json.dumps(_load() or {}))
+            (d.get('projects') or {}).pop(key, None); _save(d)
+        return
 
     def change(e):
         labels = dict(e.get('labels') or {})

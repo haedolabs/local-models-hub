@@ -246,9 +246,21 @@ def upgrade(cli, d, say):
     if not r or not r.get('ok'): return 1, f"upgrade refused: {(r or {}).get('why') or 'no answer from the supervisor'}"
     _say(say, 'the supervisor handed over; waiting for launchd to start the new one')
     if _new_supervisor(old.get('pid'), want): return 0, 'the supervisor upgraded; it adopted the workers'
-    link_hub(was)                                               # revert: the old release's supervisor comes back and adopts
-    _new_supervisor(old.get('pid'), wait=UPGRADE_WAIT)
-    return 1, f'no supervisor from release {os.path.basename(d)} within {UPGRADE_WAIT} s: SHARED/hub switched back'
+    # The hub symlink chooses the next process, not the code of a failed new supervisor still held by launchd. Detach it
+    # without cutting its workers, then explicitly start and verify the old supervisor.
+    uid = f'gui/{os.getuid()}'
+    _detach_marker(True)
+    try:
+        cli._launchctl('bootout', f'{uid}/{cli.LABEL}')
+        link_hub(was)
+        cli._launchctl('bootstrap', uid, cli.PLIST)
+    except Exception as e:
+        errors.record('install: supervisor rollback', e)
+        return 1, f'no supervisor from release {os.path.basename(d)}; restoring the old supervisor failed: {type(e).__name__}: {e}'
+    finally: _detach_marker(False)
+    restored = _new_supervisor(old.get('pid'), old.get('digest'), wait=UPGRADE_WAIT) if old.get('digest') else None
+    if restored: return 1, f'upgrade to {os.path.basename(d)} failed; the previous supervisor was restored and adopted its serving worker'
+    return 1, f'upgrade to {os.path.basename(d)} failed and the previous supervisor could not be verified: localmodels check'
 
 
 # ---------------------------------------------------------------- the one-time migration

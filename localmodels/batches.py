@@ -31,6 +31,9 @@ DB = 'batch.sqlite3'
 JOB_ID = re.compile(r'project-[0-9a-f]{32}/[0-9]{8}-[0-9]{6}-batch(?:-[0-9]+)?')
 ROUTES = {'/v1/embeddings': '/hub/infer/embedding', '/v1/chat/completions': '/hub/infer/chat'}
 MAX_PARALLEL = 64
+MAX_RUNNERS = 4                 # process/thread budgets across all projects, not a separate allowance for every batch
+MAX_RUNNER_THREADS = 64
+RUNNER_BACKOFF = (5, 15, 45, 120, 300)
 
 
 def pin(fingerprint):
@@ -46,16 +49,22 @@ def model_info(model, allowed):
         choices = llmshare.chat_rows(rows)
         if not choices: raise ValueError('no chat model loaded; specify a model offered by an approved peer')
         model = llmshare.family(choices[0]['id'])
+    candidates = []
     for r in sorted(rows, key=lambda r: r['id'] != model):
         if r['id'] != model and llmshare.family(r['id']) != model: continue
         value = pin(peers.fingerprint(r))
-        if value: return model, value, r.get('context') or 32768
+        if value: candidates.append((value, int(r.get('context') or 32768)))
     for p in peers.view():
         f = (p.get('families') or {}).get(model) or {}
         if p['name'] in allowed and p['state'] == 'up' and f.get('match') and p.get('batch_inference') == 1:
             value = pin(f.get('fingerprint'))
-            if value: return model, value, 32768
-    raise ValueError(f'cannot pin {model}: need its loaded fingerprint here or on an approved batch-capable peer')
+            contexts = [int(c['context']) for c in f.get('copies') or []
+                        if isinstance(c, dict) and c.get('context') and not c.get('down') and not c.get('draining') and c.get('state') != 'LOADING']
+            if value: candidates.append((value, min(contexts) if contexts else 32768))
+    if not candidates: raise ValueError(f'cannot pin {model}: need its loaded fingerprint here or on an approved batch-capable peer')
+    fingerprint = candidates[0][0]
+    # Every permitted destination must hold the conversation the runner trims to: use the smallest matching context.
+    return model, fingerprint, min(c for value, c in candidates if value == fingerprint)
 
 
 def normalize(jobs, model=None):
@@ -139,7 +148,10 @@ def submit(base, scope, root, project, jobs, parallel, read_files, run, phase, m
         raise ValueError('model, run, and phase must be strings')
     items, model, endpoint = normalize(jobs, model)
     model, fingerprint, context = model_info(model, allowed)
-    if parallel is None: parallel = min(MAX_PARALLEL, llmshare.at_once(model) or 1)
+    if parallel is None:
+        try: configured = int(llmshare.settings().get('batch_at_once') or MAX_PARALLEL)
+        except (TypeError, ValueError): configured = MAX_PARALLEL
+        parallel = min(MAX_PARALLEL, max(1, configured), llmshare.at_once(model) or 1)
     if type(parallel) is not int or not 1 <= parallel <= MAX_PARALLEL:
         raise ValueError(f'parallel must be an integer between 1 and {MAX_PARALLEL}')
     namespace = os.path.join(base, scope.namespace)
@@ -491,20 +503,56 @@ def overview():
     return out
 
 
+def _runner_failed(d, code):
+    """Record a runner's exit with bounded backoff in the durable run itself, so a worker handoff does not forget it."""
+    from . import errors
+    try:
+        with database(d, True) as db:
+            data = db.execute('SELECT spec FROM run').fetchone()[0]
+            spec = json.loads(data)
+            fails = int(spec.get('runner_fails') or 0) + 1
+            spec['runner_fails'] = fails
+            pause = RUNNER_BACKOFF[min(fails - 1, len(RUNNER_BACKOFF) - 1)]
+            reason = f'batch runner exited {code}; retry in {pause} s'
+            with db:
+                db.execute("UPDATE run SET spec=?,state='waiting',reason=?,wake=?",
+                           (json.dumps(spec), reason, time.time() + pause))
+    except (OSError, sqlite3.Error, ValueError, TypeError) as e: errors.record('batch runner: record its exit', e)
+
+
 def recover(stop=None):
-    """The serving gateway starts detached runners. File locks survive a handoff and disappear on process exit."""
+    """Start detached runners within global process/thread budgets. File locks survive handoff and vanish on process exit."""
     from . import errors
     stop = stop or threading.Event()
-    children = {}
+    children = {}                                      # directory -> {process, parallel}
     while not stop.is_set():
-        children = {d: child for d, child in children.items() if child.poll() is None}
-        for d in queued():
+        for d, child in list(children.items()):
+            code = child['process'].poll()
+            if code is None: continue
+            children.pop(d)
+            if code: _runner_failed(d, code)
+        jobs = list(queued())
+        used = 0
+        for d in jobs:
+            try:
+                if d in children:
+                    used += children[d]['parallel']; continue
+                if llmshare._flock_test(os.path.join(d, 'batch.lock')):       # a runner held by a draining worker counts too
+                    with database(d) as db: spec = json.loads(db.execute('SELECT spec FROM run').fetchone()[0])
+                    used += int(spec.get('parallel') or 1)
+            except (OSError, sqlite3.Error, ValueError, TypeError) as e: errors.record('batch recovery: runner budget', e)
+        for d in jobs:
             try:
                 if d in children or llmshare._flock_test(os.path.join(d, 'batch.lock')): continue
-                with database(d) as db: wake = db.execute('SELECT wake FROM run').fetchone()[0]
+                with database(d) as db:
+                    wake, raw = db.execute('SELECT wake,spec FROM run').fetchone()
+                    spec = json.loads(raw)
                 if wake > time.time(): continue
+                parallel = max(1, min(MAX_PARALLEL, int(spec.get('parallel') or 1)))
+                if len(children) >= MAX_RUNNERS or used + parallel > MAX_RUNNER_THREADS: continue
                 with open(os.path.join(d, 'run.log'), 'ab') as log:
-                    children[d] = subprocess.Popen([sys.executable, os.path.join(HOME, 'bin', 'localmodels'), 'agent-run', d],
-                                                   stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-            except (OSError, sqlite3.Error, ValueError) as e: errors.record('batch recovery', e)
+                    p = subprocess.Popen([sys.executable, os.path.join(HOME, 'bin', 'localmodels'), 'agent-run', d],
+                                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                children[d] = dict(process=p, parallel=parallel); used += parallel
+            except (OSError, sqlite3.Error, ValueError, TypeError) as e: errors.record('batch recovery', e)
         stop.wait(2)

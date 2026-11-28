@@ -21,11 +21,12 @@ can never be empty says "nonempty": true and gets minItems: 1 on its lists from 
 answers). A request that fails because the model is down or LM Studio is not answering is tried again with growing pauses
 for up to "wait_down" seconds in all, so a crash in the night costs a job minutes, not its result.
 """
-import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, threading, time, urllib.error
+import concurrent.futures as cf, fnmatch, http.client, json, os, re, socket, subprocess, sys, threading, time, urllib.error
 
 from . import llmshare, sessions
 
 RESULT_CAP, HISTORY_CAP = 8000, 80000                 # characters: one tool result, the whole conversation (~20k tokens)
+GREP_TIMEOUT = 20                                      # hard wall clock, enforced by a killable child process
 CHARS_PER_TOKEN, CONTEXT_SHARE = 3.5, 0.8             # measured: about 3.6 characters a token (recalibrated from each
                                                       # answer's prompt_tokens); the conversation may use 80% of the loaded context
 SAMPLING = dict(temperature=0.7, top_p=0.95, top_k=20, min_p=0)
@@ -136,18 +137,36 @@ class Files:
         if not p or not os.path.exists(p): return dict(ok=False, error=f'no file or folder {path!r} inside {self.where}')
         if len(pattern or '') > 200 or re.search(r'\([^()]*[+*}][^()]*\)\s*[+*{]', pattern or ''):
             return dict(ok=False, error='this pattern can run for hours (a repeated group that itself repeats, or 200+ characters): simplify it')
+        try: re.compile(pattern, re.I)
+        except re.error as e: return dict(ok=False, error=f'bad pattern: {e}')
+        # Python's re can spend unbounded time inside one backtracking search, so a timer around that call is not enough.
+        # The existing traversal runs unchanged in a child which subprocess.run kills and reaps at the hard deadline.
+        spec = dict(roots=self.roots, base=self.base, where=self.where, skip=sorted(self.skip), text=list(self.text), pattern=pattern, path=path, limit=limit)
+        try:
+            package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            r = subprocess.run([sys.executable, '-m', 'localmodels.agent'], cwd=package_root,
+                               input=json.dumps(spec), capture_output=True, text=True, timeout=GREP_TIMEOUT)
+            if r.returncode: return dict(ok=False, error=f'search worker exited {r.returncode}: {r.stderr.strip()[-200:]}')
+            return json.loads(r.stdout)
+        except subprocess.TimeoutExpired:
+            return dict(ok=True, hits=[], more=f'stopped after {GREP_TIMEOUT} s: narrow the path or the pattern')
+        except (OSError, ValueError) as e:
+            return dict(ok=False, error=f'could not run the search worker: {type(e).__name__}: {e}')
+
+    def _grep_direct(self, pattern, path='.', limit=40):
+        """The search itself, called only in the killable child created by grep()."""
+        p = self.safe(path)
+        if not p or not os.path.exists(p): return dict(ok=False, error=f'no file or folder {path!r} inside {self.where}')
         try: rx = re.compile(pattern, re.I)
         except re.error as e: return dict(ok=False, error=f'bad pattern: {e}')
         files = [p] if os.path.isfile(p) else []
         for d, ds, fs in os.walk(p) if os.path.isdir(p) else ():
             ds[:] = sorted(x for x in ds if x not in self.skip and not x.startswith('.') and not x.endswith('.logicx') and not os.path.islink(os.path.join(d, x)))
             files += [os.path.join(d, f) for f in sorted(fs) if f.endswith(self.text) and not os.path.islink(os.path.join(d, f))]
-        hits, cap, t0 = [], max(1, min(int(limit or 40), 100)), time.time()
+        hits, cap = [], max(1, min(int(limit or 40), 100))
         for f in files:
-            if time.time() - t0 > 20: return dict(ok=True, hits=hits, more='stopped after 20 s: narrow the path')
             if not self.is_text(f): continue
             for i, line in enumerate(open(f, errors='replace'), 1):
-                if i % 500 == 0 and time.time() - t0 > 20: return dict(ok=True, hits=hits, more='stopped after 20 s: narrow the path or the pattern')
                 if rx.search(line[:1000]):
                     hits.append(f'{self.rel(f)}:{i}: {line.strip()[:200]}')
                     if len(hits) >= cap: return dict(ok=True, hits=hits, more='stopped at max: narrow the pattern or the path')
@@ -341,11 +360,10 @@ def unique_labels(jobs):
 
 
 def step_words(fn, a):
-    """What a tool call is doing, in plain words, for the dash."""
-    path = os.path.basename(str(a.get('path') or ''))
-    if fn == 'read_file': return f"reading {path}" + (f" from line {a['start']}" if a.get('start') else '')
-    if fn == 'grep': return f"searching for '{str(a.get('pattern', ''))[:30]}' in {path or 'the project'}"
-    if fn == 'list_files': return f"looking in {a.get('path') or 'the project'}"
+    """Shared telemetry without file names, paths, search text, or other project content; details stay in the private job log."""
+    if fn == 'read_file': return 'reading a project file' + (f" from line {a['start']}" if a.get('start') else '')
+    if fn == 'grep': return 'searching the project'
+    if fn == 'list_files': return 'listing a project folder'
     return f"using {fn}"
 
 
@@ -594,3 +612,16 @@ def batch(jobs, model, defs, call, project, parallel=1, out_dir=None, logs=None,
         try: json.dump(summary, open(os.path.join(out_dir, 'summary.json'), 'w'), indent=1)
         except OSError: pass
     return summary, out_dir, results
+
+
+def _grep_child():
+    """Isolated entry point for Files.grep's hard-timeout worker; one JSON specification and one JSON result on stdout."""
+    spec = json.load(sys.stdin)
+    files = Files(spec['roots'], base=spec['base'], where=spec.get('where') or 'the project', skip=set(spec.get('skip') or SKIP),
+                  text=tuple(spec.get('text') or TEXT))
+    out = files._grep_direct(spec['pattern'], spec.get('path') or '.', spec.get('limit') or 40)
+    sys.stdout.write(json.dumps(out))
+
+
+if __name__ == '__main__':
+    _grep_child()

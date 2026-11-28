@@ -165,7 +165,7 @@ def _new_lines(st, most=32 << 20):
             if size < pos: pos = 0                                               # the file started again
             with open(f, 'rb') as h: h.seek(pos); data = h.read(min(size - pos, most))
         except OSError: continue
-        cut = data.rfind(b'\n') + 1 if k == len(todo) - 1 else len(data)          # the newest: whole lines, the rest next time
+        cut = data.rfind(b'\n') + 1                                             # every file: carry a partial last line into the next look
         lines += data[:cut].decode('utf-8', 'replace').split('\n')
         st['log'] = dict(file=f, pos=pos + cut, at=time.time())
     return lines
@@ -182,7 +182,10 @@ def _state():
         yield st
         st['at'] = time.time()
         try: llmshare._write(STATE, st)
-        except OSError: pass
+        except OSError as e:
+            from . import errors
+            errors.record('keeper state: write', e)
+            raise                                         # a serving worker and the next role holder must not diverge silently
         _seen_state.update(at=time.time(), st=st)
 
 

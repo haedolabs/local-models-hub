@@ -180,6 +180,13 @@ def run(box):
     t0 = time.time(); g = files.grep('(a+)+b', '.')
     t('a pattern that could run for hours is refused at once', not g['ok'] and 'hours' in g['error'] and time.time() - t0 < 2, g)
     t('a plain pattern still searches', bool(files.grep('aaa', '.')['hits']))
+    open(os.path.join(box, 'aaa.txt'), 'w').write('a' * 999 + '!\n')
+    agent.GREP_TIMEOUT = 1; t0 = time.time(); g = files.grep('(a|a)*$', '.')
+    t('catastrophic backtracking is stopped by a real process deadline, not an in-process timer',
+      g.get('ok') and 'stopped after' in g.get('more', '') and 0.8 <= time.time() - t0 < 5, g)
+    agent.GREP_TIMEOUT = 20
+    words = agent.step_words('grep', dict(pattern='private text', path='secret/folder')) + ' ' + agent.step_words('read_file', dict(path='secret/name.txt'))
+    t('shared agent steps contain neither a path nor search text', all(x not in words for x in ('private text', 'secret', 'name.txt')), words)
 
 
 if __name__ == '__main__':

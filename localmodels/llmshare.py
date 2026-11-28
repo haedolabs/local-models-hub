@@ -91,7 +91,7 @@ KINDS = ('batch', 'chat', 'eval', 'test', 'ask', 'other')
 PEOPLE = ('chat', 'ask')                                 # kinds a person is waiting on: the next free slot is theirs
 VERSION = 2                                              # the lease file format
 LISTING_EVERY, LISTING_LEAST, PS_TIMEOUT = 20, 5, 20     # seconds: `lms ps` is read this often at most, never more often than this, and given this long
-_ps = {'at': 0.0, 'rows': [], 'ok': False, 'good_at': 0.0, 'tried': 0.0}
+_ps = {'at': 0.0, 'rows': [], 'ok': False, 'good_at': 0.0, 'tried': 0.0, 'completed': 0.0}
 _ps_lock = threading.Lock()
 _api = {'at': 0.0, 'ids': None}
 _hub = {'at': 0.0, 'up': False}
@@ -133,22 +133,30 @@ def _error(where, e):
     except Exception: pass                                   # not recorded: the recorder itself failed; nothing left to tell
 
 
-_unwritten = {}                                          # the last record this process could not write: path, error, since
+_unwritten = {}                                          # path -> {error, since}: every failed write, not only JSONL appends
+
+
+def _write_failed(path, e):
+    old = _unwritten.get(path) or {}
+    _unwritten[path] = dict(error=e.strerror or str(e), since=old.get('since') or time.time())
 
 
 def _append(path, rec, roll_at=0):
-    """One JSON line, appended under a lock so two processes never interleave; past roll_at bytes the file becomes
-    <path>.1. -> True when written; False when not (a full disk, a folder not writable), kept for write_problem()."""
+    """Append and rotate under a stable sidecar lock: an inode lock cannot protect a file after another writer renames it."""
     try:
         os.makedirs(SHARED, exist_ok=True)
-        with open(path, 'a') as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            f.write(json.dumps(rec) + '\n')
-            if roll_at and f.tell() > roll_at and os.path.getsize(path) > roll_at: os.replace(path, path + '.1')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + '.lock', 'a') as hold:
+            fcntl.flock(hold, fcntl.LOCK_EX)
+            made = not os.path.exists(path)
+            with open(path, 'a') as f:
+                f.write(json.dumps(rec) + '\n')
+                if made: os.chmod(path, 0o600)
+                if roll_at and f.tell() > roll_at and os.path.getsize(path) > roll_at: os.replace(path, path + '.1')
     except OSError as e:
-        _unwritten.update(path=path, error=e.strerror or str(e), since=_unwritten.get('since') or time.time())
+        _write_failed(path, e)
         return False
-    _unwritten.clear()
+    _unwritten.pop(path, None)
     return True
 
 
@@ -156,8 +164,9 @@ def write_problem():
     """Words when this process could not write the hub's records lately, else None: the request log feeds the recycle
     counts, admission's bytes per token, batch progress and the charts, so they stand still until it can."""
     if not _unwritten: return None
-    return (f"the hub's records are not writable since {time.strftime('%H:%M', time.localtime(_unwritten['since']))} "
-            f"({os.path.basename(_unwritten['path'])}: {_unwritten['error']}): recycle counts, batch progress and the charts are frozen")
+    path, problem = min(_unwritten.items(), key=lambda item: item[1]['since'])
+    return (f"the hub's records are not writable since {time.strftime('%H:%M', time.localtime(problem['since']))} "
+            f"({os.path.basename(path)}: {problem['error']}): recycle counts, batch progress and the charts are frozen")
 
 
 def _note(kind, model, seconds=0.0):
@@ -167,8 +176,14 @@ def _note(kind, model, seconds=0.0):
 
 def _write(path, rec):
     tmp = f'{path}.{os.getpid()}.{threading.get_ident()}.tmp'
-    with open(tmp, 'w') as f: json.dump(rec, f)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, 'w') as f: json.dump(rec, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as e:
+        _write_failed(path, e)
+        raise
+    _unwritten.pop(path, None)
 
 
 # ---------------------------------------------------------------- what LM Studio holds
@@ -209,12 +224,14 @@ def loaded(fresh=False, force=False):
     listing stands and read_ok() says it is unsure, rather than an empty listing that would make the door route as if
     nothing were loaded. Every good listing is also written to listing.json, and a newer one written by another process
     is taken in its place (_adopt), so every gateway on this Mac routes by the newest listing any of them read."""
+    started = time.time()
     if not fresh: _adopt()
     now = time.time()
     due = fresh or now - _ps['at'] > LISTING_EVERY
     if not due or (now - _ps['tried'] < LISTING_LEAST and not force): return _ps['rows']
     if not _ps_lock.acquire(blocking=fresh): return _ps['rows']
     try:
+        if force and _ps['ok'] and _ps.get('completed', 0.0) >= started: return _ps['rows']  # one good read served this waiter
         now = time.time()
         if now - _ps['tried'] < LISTING_LEAST and not force: return _ps['rows']
         _ps['tried'] = now
@@ -226,7 +243,7 @@ def loaded(fresh=False, force=False):
             if gone:                                         # under load `lms ps` can leave an instance out: LM Studio's own
                 there = api_models()                         # server decides, so a partial listing never takes slots away
                 rows = rows + [dict(r) for r in gone if there is not None and r['id'] in there]
-            _ps.update(at=now, rows=rows, ok=True, good_at=now)
+            _ps.update(at=now, rows=rows, ok=True, good_at=now, completed=time.time())
             _publish_listing(rows, now)
         else: _ps.update(at=now, ok=False)
         return _ps['rows']
@@ -413,16 +430,16 @@ def copy_ids(base, n):
 
 def copies(model, fresh=False):
     """The loaded copies a request for this model may go to, first copy first (one still loading is left out). A request
-    naming one copy (<id>:2) gets that copy while it is loaded, else its family's loaded copies; [model] when none is loaded
-    and the family is unknown to the settings, [] when the settings know it (the door then holds or answers 503, never
-    forwards the bare id for LM Studio to load on its own terms)."""
+    naming one copy (<id>:2) gets that copy while it is loaded, else its family's loaded copies; [] when none is loaded
+    (the door then holds a known family or answers 503, never forwards a bare id for LM Studio to load on its own terms)."""
     base = family(model)
     rows = [r for r in loaded(fresh) if family(r['id']) == base and r['state'] != 'LOADING']
     ids = [r['id'] for r in rows]
     if base != model and model in ids: return [model]
     mine = sorted(ids, key=lambda i: (i != base, len(i), i))
     if mine: return mine
-    return [] if base in (settings().get('families') or {}) else [model]
+    # Never forward an unloaded identifier for LM Studio's just-in-time loader, whether the family is configured or not.
+    return []
 
 
 def at_once(model=None):
@@ -442,14 +459,14 @@ def at_once(model=None):
             from . import peers                              # the families this Mac's peers serve for it count too
             fams |= {f for p in peers.view() for f in (p.get('families') or {}) if not embedding(f)}
         except Exception as e: _error('at_once: peer families', e)
-        return max([at_once(f) for f in fams] or [1 if here_too else 0])
+        return max([at_once(f) for f in fams] or [0])
     ids = {r['id'] for r in rows}
     here = sum(parallel_of(c) for c in copies(model) if c in ids)
     try:
         from . import peers
         there = peers.capacity(model)
     except Exception as e: there = 0; _error('at_once: peer capacity', e)
-    return (here + there) or (parallel_of(model) if here_too else 0)
+    return here + there
 
 
 @contextlib.contextmanager
@@ -866,7 +883,10 @@ def _take_slot(m, need=0):
             except OSError: h.close(); continue
             if need:
                 try: h.seek(0); h.truncate(); h.write(str(int(need))); h.flush()
-                except OSError as e: _error('slot: write its context', e)
+                except OSError as e:
+                    _error('slot: write its context', e)
+                    h.close()
+                    return None                         # an invisible context must never make admission succeed
             return h
     return None
 
@@ -1282,12 +1302,18 @@ def _tail(path, since, start=4_000_000):
 
 
 def requests_log(hours=1.0, tail=4_000_000):
-    """The hub's request records from the last `hours` hours (read from the end of the log, as far back as needed)."""
+    """Read both rotation generations under the writers' stable sidecar lock."""
     since = time.time() - hours * 3600
-    return _tail(REQUESTS + '.1', since, tail) + _tail(REQUESTS, since, tail)
+    with flocked(REQUESTS + '.lock'):
+        return _tail(REQUESTS + '.1', since, tail) + _tail(REQUESTS, since, tail)
 
 
 def recent_requests(n, hours, qualifies=None):
+    with flocked(REQUESTS + '.lock'):
+        return _recent_requests(n, hours, qualifies)
+
+
+def _recent_requests(n, hours, qualifies=None):
     """Up to n matching records, newest first. Read only the blocks needed, including the previous file on rollover."""
     if n <= 0: return []
     since, out, seen = time.time() - hours * 3600, [], set()
