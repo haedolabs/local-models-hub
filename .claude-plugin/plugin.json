@@ -1,7 +1,7 @@
 {
   "name": "local-models",
   "description": "A gateway in front of LM Studio, for a Mac where several programs and Claude Code sessions share the same local models. MCP tools: status, guide, ask, batch, job_status, name, swap_check.",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "author": {
     "name": "Haedo Labs\u2122",
     "url": "https://haedolabs.com"
