@@ -280,7 +280,7 @@ The file is re-read when its modification time changes. A file that fails to par
 | `localmodels/agent.py` | local agents: the tool loop, sandboxed read-only file tools, structured output, retries |
 | `localmodels/mcp_server.py` | the MCP server (stdio) and the detached job runner |
 | `localmodels/whois.py`, `sessions.py` | peer-process attribution; discovery of Claude Code sessions |
-| `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints, with its typeface (`libre-franklin-400.woff2`, `-500.woff2`) and background (`pcb.svg`, drawn by `tools/pcb.py`), served beside the page; the terminal UI |
+| `localmodels/web.py`, `dash.html`, `dash.py` | the dashboard and its JSON endpoints, with its typeface (`libre-franklin-400.woff2`, `-500.woff2`) and background (`pcb.svg`), served beside the page; the terminal UI |
 | `localmodels/icon.py` | the icon as PNG (`/favicon.png`, `/apple-touch-icon.png`) and SVG; `python3 -m localmodels.icon` writes `brand/` and `docs/icon.png` |
 | `localmodels/extensions.py` | the extension protocol: manifests in the state folder's `extensions/`, the menus they serve, the actions the menu-bar app may take for them (`localmodels ext`), and the dashboard's launcher (`/hub/extensions`, its start) |
 | `localmodels/cli.py`, `bin/localmodels` | the CLI |
