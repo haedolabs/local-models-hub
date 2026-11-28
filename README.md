@@ -1,4 +1,4 @@
-# <img src="docs/icon.png" alt="" width="32" height="32"> Local Models Hub
+# <img src="docs/icon.png" alt="" width="32" height="32"> <picture><source media="(prefers-color-scheme: dark)" srcset="docs/name-dark.svg"><img src="docs/name-light.svg" alt="Local Models Hub" height="32"></picture>
 
 [By Haedo Labs™.](https://haedolabs.com)
 
